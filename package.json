@@ -1,0 +1,201 @@
+{
+  "name": "weavenet-for-copilot",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.0.7",
+  "publisher": "huangonce",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huangonce/weavenet-for-copilot"
+  },
+  "engines": {
+    "vscode": "^1.116.0",
+    "node": ">=24"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "weavenet",
+        "displayName": "WeaveNet"
+      }
+    ],
+    "commands": [
+      {
+        "command": "weavenet-copilot.setOpenAIKey",
+        "title": "%command.setOpenAIKey%"
+      },
+      {
+        "command": "weavenet-copilot.setChatGPTKey",
+        "title": "%command.setChatGPTKey%"
+      },
+      {
+        "command": "weavenet-copilot.setClaudeKey",
+        "title": "%command.setClaudeKey%"
+      },
+      {
+        "command": "weavenet-copilot.clearOpenAIKey",
+        "title": "%command.clearOpenAIKey%"
+      },
+      {
+        "command": "weavenet-copilot.clearChatGPTKey",
+        "title": "%command.clearChatGPTKey%"
+      },
+      {
+        "command": "weavenet-copilot.clearClaudeKey",
+        "title": "%command.clearClaudeKey%"
+      },
+      {
+        "command": "weavenet-copilot.refreshModels",
+        "title": "%command.refreshModels%"
+      },
+      {
+        "command": "weavenet-copilot.refreshModelMetadata",
+        "title": "%command.refreshModelMetadata%"
+      },
+      {
+        "command": "weavenet-copilot.openSettings",
+        "title": "%command.openSettings%"
+      },
+      {
+        "command": "weavenet-copilot.showDebugLog",
+        "title": "%command.showDebugLog%"
+      }
+    ],
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "weavenet-copilot.baseUrl": {
+          "type": "string",
+          "default": "https://sub2api.huangonce.com/v1",
+          "description": "%configuration.baseUrl.description%"
+        },
+        "weavenet-copilot.anthropicVersion": {
+          "type": "string",
+          "default": "2023-06-01",
+          "description": "%configuration.anthropicVersion.description%"
+        },
+        "weavenet-copilot.openaiPromptCaching": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.openaiPromptCaching.description%"
+        },
+        "weavenet-copilot.openaiPromptCacheKey": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.openaiPromptCacheKey.description%"
+        },
+        "weavenet-copilot.claudePromptCaching": {
+          "type": "string",
+          "enum": ["automatic", "disabled"],
+          "enumDescriptions": [
+            "%configuration.claudePromptCaching.automatic%",
+            "%configuration.claudePromptCaching.disabled%"
+          ],
+          "default": "automatic",
+          "description": "%configuration.claudePromptCaching.description%"
+        },
+        "weavenet-copilot.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.debug.description%"
+        },
+        "weavenet-copilot.modelNamePrefix": {
+          "type": "string",
+          "default": "WeaveNet",
+          "description": "%configuration.modelNamePrefix.description%"
+        },
+        "weavenet-copilot.includeModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.includeModels.description%"
+        },
+        "weavenet-copilot.excludeModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.excludeModels.description%"
+        },
+        "weavenet-copilot.maxInputTokens": {
+          "type": "number",
+          "default": 128000,
+          "minimum": 1,
+          "description": "%configuration.maxInputTokens.description%"
+        },
+        "weavenet-copilot.maxOutputTokens": {
+          "type": "number",
+          "default": 16384,
+          "minimum": 1,
+          "description": "%configuration.maxOutputTokens.description%"
+        },
+        "weavenet-copilot.sendMaxTokens": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.sendMaxTokens.description%"
+        },
+        "weavenet-copilot.supportsToolCalling": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.supportsToolCalling.description%"
+        },
+        "weavenet-copilot.supportsImageInput": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.supportsImageInput.description%"
+        },
+        "weavenet-copilot.imageInputModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.imageInputModels.description%"
+        },
+        "weavenet-copilot.disabledImageInputModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.disabledImageInputModels.description%"
+        },
+        "weavenet-copilot.metadataRefreshHours": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "description": "%configuration.metadataRefreshHours.description%"
+        },
+        "weavenet-copilot.requestHeaders": {
+          "type": "object",
+          "default": {},
+          "description": "%configuration.requestHeaders.description%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
+    "compile": "npm run clean && tsc -p ./",
+    "watch": "npm run clean && tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/vscode": "^1.116.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^6.0.3"
+  }
+}
