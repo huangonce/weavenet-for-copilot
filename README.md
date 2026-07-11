@@ -88,3 +88,13 @@ API Key 会存储在 VS Code SecretStorage 中。
 - 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)，问题反馈见 [SUPPORT.md](SUPPORT.md)。
+
+## 发布流程
+
+合并到 `main` 后，GitHub Actions 会自动编译、打包并发布到 Visual Studio Marketplace。发布前必须在 PR 中更新 `package.json` 和 `package-lock.json` 的版本号，并同步维护 `CHANGELOG.md`；Marketplace 不允许重复发布同一版本。
+
+```bash
+npm version patch --no-git-tag-version
+```
+
+流水线使用仓库的 `VSCE_PAT` Actions Secret。重复版本会安全跳过，不会覆盖已发布版本。

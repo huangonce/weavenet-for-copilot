@@ -215,7 +215,8 @@
     "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "compile": "npm run clean && tsc -p ./",
     "watch": "npm run clean && tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "publish:marketplace": "vsce publish --skip-duplicate"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
