@@ -79,3 +79,12 @@ src/
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
 
 API Key 会存储在 VS Code SecretStorage 中。
+
+## 隐私与安全
+
+- API Key 只保存在 VS Code SecretStorage 中，不会写入工作区文件或调试日志。
+- 对话、代码、图片和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务。
+- 插件不会收集遥测数据。开启调试日志时只记录脱敏请求摘要，不记录 API Key 或提示词正文。
+- 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。
+
+完整说明见 [PRIVACY.md](PRIVACY.md)，问题反馈见 [SUPPORT.md](SUPPORT.md)。

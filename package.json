@@ -2,9 +2,30 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.0.7",
+  "version": "0.1.0",
   "publisher": "huangonce",
+  "icon": "images/icon.png",
+  "author": "huangonce",
   "license": "MIT",
+  "pricing": "Free",
+  "keywords": [
+    "copilot",
+    "sub2api",
+    "openai",
+    "claude",
+    "anthropic",
+    "ai models",
+    "model relay",
+    "bring your own key"
+  ],
+  "galleryBanner": {
+    "color": "#0b0f16",
+    "theme": "dark"
+  },
+  "homepage": "https://github.com/huangonce/weavenet-for-copilot#readme",
+  "bugs": {
+    "url": "https://github.com/huangonce/weavenet-for-copilot/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/huangonce/weavenet-for-copilot"
@@ -95,7 +116,10 @@
         },
         "weavenet-copilot.claudePromptCaching": {
           "type": "string",
-          "enum": ["automatic", "disabled"],
+          "enum": [
+            "automatic",
+            "disabled"
+          ],
           "enumDescriptions": [
             "%configuration.claudePromptCaching.automatic%",
             "%configuration.claudePromptCaching.disabled%"
@@ -187,6 +211,7 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "compile": "npm run clean && tsc -p ./",
     "watch": "npm run clean && tsc -watch -p ./",
