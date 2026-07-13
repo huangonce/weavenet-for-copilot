@@ -9,6 +9,7 @@ import type {
   StreamChunk,
   ToolCall,
 } from './types';
+import { createRelayRequestError } from './errors';
 
 export interface RelayClientOptions {
   baseUrl: string;
@@ -223,7 +224,12 @@ async function throwIfNotOk(response: Response): Promise<void> {
     return;
   }
   const text = await response.text().catch(() => '');
-  throw new Error(`Relay request failed: HTTP ${response.status} ${response.statusText}${text ? ` - ${text.slice(0, 600)}` : ''}`);
+  throw createRelayRequestError(
+    response.status,
+    response.statusText,
+    response.headers.get('content-type') ?? '',
+    text,
+  );
 }
 
 function mergeToolCallDeltas(

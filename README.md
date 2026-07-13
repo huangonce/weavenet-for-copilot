@@ -71,12 +71,15 @@ src/
   - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
 - `weavenet-copilot.includeModels`：模型 ID 正则白名单。
 - `weavenet-copilot.excludeModels`：模型 ID 正则黑名单。
+- `weavenet-copilot.maxInputTokens`：向 Copilot 声明的输入 token 硬上限，默认 `128000`。即使模型元数据声明了更大的上下文，也不会超过这个值；OAuth 上游的实际窗口较小时应相应调低。
 - `weavenet-copilot.supportsToolCalling`：是否向 Copilot 声明工具调用能力。
 - `weavenet-copilot.supportsImageInput`：是否为所有模型向 Copilot 声明图片输入能力，默认关闭。
 - `weavenet-copilot.imageInputModels`：可选的模型 ID 正则表达式；命中后强制向 Copilot 声明图片输入能力。正常情况下无需配置，插件会优先根据 sub2api 和 OpenRouter 的模型元数据自动识别。
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
+
+当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 
 API Key 会存储在 VS Code SecretStorage 中。
 

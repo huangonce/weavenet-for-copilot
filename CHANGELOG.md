@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.1.1
+
+- 将 `maxInputTokens` 改为模型元数据之上的硬上限，避免 OAuth 上游实际上下文较小时让 Copilot 持续堆积超量输入。
+- 识别 JSON/SSE 中的上下文超限错误，并清理 Cloudflare 等网关返回的 HTML 错误页。
+- 调试日志增加脱敏的请求体字节数。
+
 ## 0.1.0
 
 - 首次公开发布。

@@ -23,7 +23,7 @@
   "configuration.modelNamePrefix.description": "Display prefix for models shown in Copilot Chat.",
   "configuration.includeModels.description": "Optional regular expressions. When set, only matching model IDs are shown.",
   "configuration.excludeModels.description": "Optional regular expressions. Matching model IDs are hidden.",
-  "configuration.maxInputTokens.description": "Max input token count advertised to Copilot for relay models.",
+  "configuration.maxInputTokens.description": "Hard upper limit for input tokens advertised to Copilot. Lower this when an upstream OAuth model accepts less context than its model metadata reports.",
   "configuration.maxOutputTokens.description": "Max output token count advertised to Copilot and optionally sent as max_tokens.",
   "configuration.sendMaxTokens.description": "Send max_tokens with chat completion requests.",
   "configuration.supportsToolCalling.description": "Advertise tool calling support for relay models.",

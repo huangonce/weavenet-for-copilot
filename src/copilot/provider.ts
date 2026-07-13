@@ -319,12 +319,13 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   private logOpenAIRequest(config: ReturnType<typeof getConfig>, request: ChatRequest): void {
+    const bodyBytes = Buffer.byteLength(JSON.stringify(request));
     this.debug(
       config,
       `OpenAI request: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, `
         + `imageParts=${countOpenAIImages(request)}, promptCacheKey=${Boolean(request.prompt_cache_key)}, `
         + `streamUsage=${Boolean(request.stream_options?.include_usage)}, `
-        + `customEndpointImageCompatibility=${countOpenAIImages(request) > 0}`,
+        + `customEndpointImageCompatibility=${countOpenAIImages(request) > 0}, bodyBytes=${bodyBytes}`,
     );
   }
 
@@ -345,7 +346,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       config,
       `Claude request: model=${request.model}, cacheMode=${config.claudePromptCaching}, `
         + `messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, systemChars=${systemChars}, `
-        + `cachePoints={topLevel:${Boolean(request.cache_control)}}`,
+        + `cachePoints={topLevel:${Boolean(request.cache_control)}}, bodyBytes=${Buffer.byteLength(JSON.stringify(request))}`,
     );
   }
 
