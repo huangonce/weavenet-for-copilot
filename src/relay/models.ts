@@ -39,7 +39,7 @@ export function toChatInformation(
     version: model.id,
     detail: hasApiKey ? `${protocolLabel}, ${owner}${model.referencePricing ? ', public reference pricing' : ''}` : 'API key required',
     tooltip: hasApiKey ? buildTooltip(model, protocolLabel) : 'Run a WeaveNet key command first.',
-    maxInputTokens: model.maxInputTokens ?? config.maxInputTokens,
+    maxInputTokens: Math.min(model.maxInputTokens ?? config.maxInputTokens, config.maxInputTokens),
     maxOutputTokens: model.maxOutputTokens ?? config.maxOutputTokens,
     isBYOK: true,
     isUserSelectable: true,

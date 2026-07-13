@@ -23,7 +23,7 @@
   "configuration.modelNamePrefix.description": "Copilot Chat 模型选择器中显示的模型名称前缀。",
   "configuration.includeModels.description": "可选正则表达式。设置后只显示匹配的模型 ID。",
   "configuration.excludeModels.description": "可选正则表达式。匹配的模型 ID 会被隐藏。",
-  "configuration.maxInputTokens.description": "向 Copilot 声明的中转模型最大输入 token 数。",
+  "configuration.maxInputTokens.description": "向 Copilot 声明的输入 token 硬上限。当 OAuth 上游的实际上下文小于模型元数据时，请降低此值。",
   "configuration.maxOutputTokens.description": "向 Copilot 声明的最大输出 token 数；也可选择作为 max_tokens 发送。",
   "configuration.sendMaxTokens.description": "向 Chat Completions 请求发送 max_tokens。",
   "configuration.supportsToolCalling.description": "向 Copilot 声明中转模型支持工具调用。",
