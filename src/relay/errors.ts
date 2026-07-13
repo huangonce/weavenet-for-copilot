@@ -9,6 +9,16 @@ export class RelayRequestError extends Error {
   }
 }
 
+export class RelayStreamError extends Error {
+  constructor(
+    message: string,
+    readonly protocol: 'OpenAI' | 'Claude',
+  ) {
+    super(message);
+    this.name = 'RelayStreamError';
+  }
+}
+
 export function createRelayRequestError(
   status: number,
   statusText: string,
@@ -36,6 +46,33 @@ export function createRelayRequestError(
 
   const detail = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
   return new RelayRequestError(`Relay request failed: ${statusLabel}${detail}`, status, responseKind);
+}
+
+export function createRelayStreamError(
+  protocol: RelayStreamError['protocol'],
+  upstreamMessage?: string,
+): RelayStreamError {
+  if (upstreamMessage && isContextWindowError(upstreamMessage)) {
+    return new RelayStreamError(
+      "The request exceeds this model's context window. Start a new chat or reduce attached files and workspace context.",
+      protocol,
+    );
+  }
+
+  const detail = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
+  return new RelayStreamError(`Relay ${protocol} stream failed${detail}`, protocol);
+}
+
+export function createIncompleteStreamError(
+  protocol: RelayStreamError['protocol'],
+  reason: 'missing-terminal-event' | 'empty-response' | 'missing-terminal-empty-response',
+): RelayStreamError {
+  const message = reason === 'empty-response'
+    ? `Relay ${protocol} stream completed without any text, reasoning, or tool calls.`
+    : reason === 'missing-terminal-empty-response'
+      ? `Relay ${protocol} stream ended without a response or terminal event.`
+      : `Relay ${protocol} stream ended before its terminal event was received.`;
+  return new RelayStreamError(message, protocol);
 }
 
 function classifyResponse(

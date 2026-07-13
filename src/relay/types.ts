@@ -115,6 +115,10 @@ export interface OpenAIUsage {
 
 export interface StreamChunk {
   usage?: OpenAIUsage;
+  error?: {
+    type?: string;
+    message?: string;
+  };
   choices?: Array<{
     delta?: {
       content?: string | null;
@@ -206,6 +210,10 @@ export interface ClaudeUsage {
 
 export interface ClaudeStreamEvent {
   type?: string;
+  error?: {
+    type?: string;
+    message?: string;
+  };
   message?: {
     id?: string;
     usage?: ClaudeUsage;

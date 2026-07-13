@@ -208,23 +208,28 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     };
     this.logOpenAIRequest(config, request);
 
-    await client.streamChatCompletion(
-      request,
-      {
-        onContent: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
-        onReasoning: (text) => reportThinking(progress, text),
-        onOpenAIUsage: (usage) => this.logOpenAIUsage(config, usage),
-        onToolCall: (toolCall) =>
-          progress.report(
-            new vscode.LanguageModelToolCallPart(
-              toolCall.id,
-              toolCall.function.name,
-              parseToolArguments(toolCall.function.arguments),
+    try {
+      await client.streamChatCompletion(
+        request,
+        {
+          onContent: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
+          onReasoning: (text) => reportThinking(progress, text),
+          onOpenAIUsage: (usage) => this.logOpenAIUsage(config, usage),
+          onToolCall: (toolCall) =>
+            progress.report(
+              new vscode.LanguageModelToolCallPart(
+                toolCall.id,
+                toolCall.function.name,
+                parseToolArguments(toolCall.function.arguments),
+              ),
             ),
-          ),
-      },
-      token,
-    );
+        },
+        token,
+      );
+    } catch (error) {
+      this.debug(config, `OpenAI request failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   private async provideClaudeResponse(
