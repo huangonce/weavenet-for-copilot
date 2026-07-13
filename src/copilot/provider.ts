@@ -227,6 +227,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         token,
       );
     } catch (error) {
+      if (token.isCancellationRequested) {
+        this.debug(config, 'OpenAI request cancelled by VS Code before completion.');
+        throw new vscode.CancellationError();
+      }
       this.debug(config, `OpenAI request failed: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
@@ -295,6 +299,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         token,
       );
     } catch (error) {
+      if (token.isCancellationRequested) {
+        this.debug(config, 'Claude request cancelled by VS Code before completion.');
+        throw new vscode.CancellationError();
+      }
       this.debug(config, `Claude request failed: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }

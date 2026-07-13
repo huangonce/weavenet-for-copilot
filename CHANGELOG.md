@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.1.3
+
+- 修复 VS Code 在流式请求进行中取消 token 时客户端静默返回，进而被 Chat 显示为无响应的问题；现在按 VS Code 的取消语义结束，并写入 WeaveNet 调试输出。
+
 ## 0.1.2
 
 - 将 OpenAI 与 Claude 流中的 SSE 错误、异常断流和无内容响应转为明确异常，并写入 WeaveNet 调试输出，避免 Copilot 只显示 `Sorry, no response was returned.`。

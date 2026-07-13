@@ -114,10 +114,6 @@ export class RelayClient {
     };
 
     while (true) {
-      if (token?.isCancellationRequested) {
-        return;
-      }
-
       const { value, done } = await reader.read();
       if (done) {
         break;
@@ -229,10 +225,6 @@ export class RelayClient {
     };
 
     while (true) {
-      if (token?.isCancellationRequested) {
-        return;
-      }
-
       const { value, done } = await reader.read();
       if (done) {
         break;
