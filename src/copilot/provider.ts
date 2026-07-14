@@ -8,7 +8,9 @@ import {
   LEGACY_API_KEY_SECRET,
   OPENAI_API_KEY_SECRET,
 } from '../constants';
+import { convertClaudeMessages, convertClaudeTools } from '../relay/claude';
 import { RelayClient } from '../relay/client';
+import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import {
   enrichModelsWithMetadata,
   filterModels,
@@ -30,18 +32,30 @@ import type {
   RelayModel,
   RoutedModel,
 } from '../relay/types';
-import { convertClaudeMessages, convertClaudeTools, convertMessages, convertTools } from './convert';
+import { convertMessages, convertTools } from './convert';
 
 type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
   readonly modelConfiguration?: Record<string, unknown>;
   readonly configuration?: Record<string, unknown>;
 };
 
+interface RequestDiagnostics {
+  onContent(): void;
+  onReasoning(): void;
+  onToolCall(): void;
+  onResponse(protocol: 'OpenAI' | 'Claude', status: number, contentType: string): void;
+  onStreamEnd(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+  complete(): void;
+  cancelled(): void;
+  failed(error: unknown): void;
+}
+
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly output = vscode.window.createOutputChannel('WeaveNet');
   private readonly auth: AuthManager;
   private cachedModels: RoutedModel[] = [];
+  private refreshModelsTask: Promise<void> | undefined;
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
 
@@ -102,6 +116,18 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   async refreshModels(): Promise<void> {
+    if (this.refreshModelsTask) {
+      return this.refreshModelsTask;
+    }
+
+    this.refreshModelsTask = this.refreshModelsInternal()
+      .finally(() => {
+        this.refreshModelsTask = undefined;
+      });
+    return this.refreshModelsTask;
+  }
+
+  private async refreshModelsInternal(): Promise<void> {
     const config = getConfig();
     if (!config.baseUrl) {
       this.changeEmitter.fire();
@@ -127,16 +153,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       }
     }
 
-    return this.cachedModels.map((model) => {
-      const information = toChatInformation(model, config, true);
-      this.debug(
-        config,
-        `Picker pricing: id=${model.id}, input=${information.inputCost ?? 'n/a'}, `
-          + `output=${information.outputCost ?? 'n/a'}, cache=${information.cacheCost ?? 'n/a'}, `
-          + `imageAdvertised=${information.capabilities.imageInput === true}`,
-      );
-      return information;
-    });
+    return this.cachedModels.map((model) => toChatInformation(model, config, true));
   }
 
   async provideLanguageModelChatResponse(
@@ -207,31 +224,43 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       stream_options: { include_usage: true },
     };
     this.logOpenAIRequest(config, request);
+    const diagnostics = this.createRequestDiagnostics(config, 'OpenAI', model.id, request.messages.length, request.tools?.length ?? 0);
 
     try {
       await client.streamChatCompletion(
         request,
         {
-          onContent: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
-          onReasoning: (text) => reportThinking(progress, text),
+          onContent: (text) => {
+            diagnostics.onContent();
+            progress.report(new vscode.LanguageModelTextPart(text));
+          },
+          onReasoning: (text) => {
+            diagnostics.onReasoning();
+            reportThinking(progress, text);
+          },
           onOpenAIUsage: (usage) => this.logOpenAIUsage(config, usage),
-          onToolCall: (toolCall) =>
+          onResponse: diagnostics.onResponse,
+          onStreamEnd: diagnostics.onStreamEnd,
+          onToolCall: (toolCall) => {
+            diagnostics.onToolCall();
             progress.report(
               new vscode.LanguageModelToolCallPart(
                 toolCall.id,
                 toolCall.function.name,
                 parseToolArguments(toolCall.function.arguments),
               ),
-            ),
+            );
+          },
         },
         token,
       );
+      diagnostics.complete();
     } catch (error) {
       if (token.isCancellationRequested) {
-        this.debug(config, 'OpenAI request cancelled by VS Code before completion.');
+        diagnostics.cancelled();
         throw new vscode.CancellationError();
       }
-      this.debug(config, `OpenAI request failed: ${error instanceof Error ? error.message : String(error)}`);
+      diagnostics.failed(error);
       throw error;
     }
   }
@@ -279,31 +308,43 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       ...(toClaudeThinking(getConfiguredReasoningEffort(routedModel, options), model.maxOutputTokens ?? config.maxOutputTokens)),
     };
     this.logClaudeRequest(config, request);
+    const diagnostics = this.createRequestDiagnostics(config, 'Claude', model.id, request.messages.length, request.tools?.length ?? 0);
 
     try {
       await client.streamClaudeMessages(
         request,
         {
-          onContent: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
-          onReasoning: (text) => reportThinking(progress, text),
+          onContent: (text) => {
+            diagnostics.onContent();
+            progress.report(new vscode.LanguageModelTextPart(text));
+          },
+          onReasoning: (text) => {
+            diagnostics.onReasoning();
+            reportThinking(progress, text);
+          },
           onClaudeUsage: (usage, responseId) => this.logClaudeUsage(config, usage, responseId),
-          onToolCall: (toolCall) =>
+          onResponse: diagnostics.onResponse,
+          onStreamEnd: diagnostics.onStreamEnd,
+          onToolCall: (toolCall) => {
+            diagnostics.onToolCall();
             progress.report(
               new vscode.LanguageModelToolCallPart(
                 toolCall.id,
                 toolCall.function.name,
                 parseToolArguments(toolCall.function.arguments),
               ),
-            ),
+            );
+          },
         },
         token,
       );
+      diagnostics.complete();
     } catch (error) {
       if (token.isCancellationRequested) {
-        this.debug(config, 'Claude request cancelled by VS Code before completion.');
+        diagnostics.cancelled();
         throw new vscode.CancellationError();
       }
-      this.debug(config, `Claude request failed: ${error instanceof Error ? error.message : String(error)}`);
+      diagnostics.failed(error);
       throw error;
     }
   }
@@ -379,6 +420,64 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     );
   }
 
+  private createRequestDiagnostics(
+    config: ReturnType<typeof getConfig>,
+    protocol: 'OpenAI' | 'Claude',
+    model: string,
+    messageCount: number,
+    toolCount: number,
+  ): RequestDiagnostics {
+    const startedAt = Date.now();
+    let firstOutputAt: number | undefined;
+    let contentParts = 0;
+    let reasoningParts = 0;
+    let toolCalls = 0;
+    let responseStatus: number | undefined;
+    let responseContentType: string | undefined;
+    let terminalEvent: string | undefined;
+
+    const elapsed = (): number => Date.now() - startedAt;
+    const summary = (): string =>
+      `protocol=${protocol} model=${model} messages=${messageCount} tools=${toolCount} `
+        + `http=${responseStatus ?? 'n/a'} contentType=${responseContentType ?? 'n/a'} `
+        + `ttfbMs=${firstOutputAt === undefined ? 'n/a' : firstOutputAt - startedAt} elapsedMs=${elapsed()} `
+        + `parts={content:${contentParts},reasoning:${reasoningParts},tools:${toolCalls}}`
+        + (terminalEvent ? ` terminal=${terminalEvent}` : '');
+    const markFirstOutput = (): void => {
+      firstOutputAt ??= Date.now();
+    };
+
+    this.debug(config, `${protocol} request started: model=${model}, messages=${messageCount}, tools=${toolCount}`);
+    return {
+      onContent: () => {
+        markFirstOutput();
+        contentParts++;
+      },
+      onReasoning: () => {
+        markFirstOutput();
+        reasoningParts++;
+      },
+      onToolCall: () => {
+        markFirstOutput();
+        toolCalls++;
+      },
+      onResponse: (_responseProtocol, status, contentType) => {
+        responseStatus = status;
+        responseContentType = contentType;
+        this.debug(config, `${protocol} response: status=${status}, contentType=${contentType}, responseMs=${elapsed()}`);
+      },
+      onStreamEnd: (_responseProtocol, event) => {
+        terminalEvent = event;
+      },
+      complete: () => this.debug(config, `${protocol} request completed: ${summary()}`),
+      cancelled: () => this.debug(config, `${protocol} request cancelled: ${summary()}`),
+      failed: (error) => this.debug(
+        config,
+        `${protocol} request failed: ${summary()} error=${formatLogError(error)}`,
+      ),
+    };
+  }
+
   private debug(config: ReturnType<typeof getConfig>, message: string): void {
     if (config.debug) {
       this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
@@ -420,6 +519,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     config: ReturnType<typeof getConfig>,
     token?: vscode.CancellationToken,
   ): Promise<RoutedModel[]> {
+    const startedAt = Date.now();
     const client = new RelayClient({
       baseUrl: config.baseUrl,
       apiKey,
@@ -432,13 +532,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       toRoutedModel(model, protocol === 'claude' || isClaudeModel(model.id) ? 'claude' : 'openai'),
     );
     const filtered = filterModels(enrichModelsWithMetadata(routed), config, protocol);
-    for (const model of filtered) {
-      this.debug(
-        config,
-        `Model metadata: id=${model.id}, image=${model.imageInput === true}, tools=${model.toolCalling !== false}, `
-          + `context=${model.maxInputTokens ?? 'n/a'}, pricing=${JSON.stringify(model.referencePricing)}, sources=${JSON.stringify(model.metadataSources)}`,
-      );
-    }
+    this.debug(config, `Models loaded: protocol=${protocol}, count=${filtered.length}, elapsedMs=${Date.now() - startedAt}`);
     return filtered;
   }
 
@@ -492,6 +586,17 @@ function isOpenAIPromptCacheModel(modelId: string): boolean {
 
 function isGPTModel(modelId: string): boolean {
   return modelId.toLowerCase().startsWith('gpt-');
+}
+
+function formatLogError(error: unknown): string {
+  if (error instanceof RelayRequestError) {
+    return `RelayRequestError(status=${error.status}, responseKind=${error.responseKind})`;
+  }
+  if (error instanceof RelayStreamError) {
+    return `RelayStreamError(protocol=${error.protocol})`;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return `${error instanceof Error ? error.name : 'UnknownError'}(${message.replace(/\s+/g, ' ').trim().slice(0, 200)})`;
 }
 
 function hashString(value: string): string {

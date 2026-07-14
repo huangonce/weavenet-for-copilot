@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "huangonce",
   "icon": "images/icon.png",
   "author": "huangonce",
@@ -96,7 +96,7 @@
       "properties": {
         "weavenet-copilot.baseUrl": {
           "type": "string",
-          "default": "https://sub2api.huangonce.com/v1",
+          "default": "https://hk-sub2api.huangonce.com/v1",
           "description": "%configuration.baseUrl.description%"
         },
         "weavenet-copilot.anthropicVersion": {

@@ -18,7 +18,7 @@ src/
 ## 使用方式
 
 1. 安装本地 VSIX 扩展。
-2. 默认中转站地址是 `https://sub2api.huangonce.com/v1`。如果换了部署地址，再修改 `weavenet-copilot.baseUrl`。
+2. 默认中转站地址是 `https://hk-sub2api.huangonce.com/v1`。如需使用原入口或其他部署地址，再修改 `weavenet-copilot.baseUrl`。
 3. 在 sub2api 里创建三个用户密钥：
    - OpenAI 密钥：绑定 `aixroute openai` 分组，只包含非 `gpt-*`、非 `claude-*` 模型。
    - ChatGPT 密钥：绑定 GPT 专用分组，只包含 `gpt-*` 模型。
@@ -62,7 +62,7 @@ src/
 
 ## 常用设置
 
-- `weavenet-copilot.baseUrl`：sub2api API 地址，默认 `https://sub2api.huangonce.com/v1`。
+- `weavenet-copilot.baseUrl`：sub2api API 地址，默认 `https://hk-sub2api.huangonce.com/v1`；原入口为 `https://sub2api.huangonce.com/v1`，可作为回退地址。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。

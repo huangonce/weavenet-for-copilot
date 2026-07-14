@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { CONFIG_SECTION } from '../constants';
+import { CONFIG_SECTION, DEFAULT_BASE_URL, LEGACY_BASE_URL } from '../constants';
 
 export interface ExtensionConfig {
   baseUrl: string;
@@ -45,6 +45,43 @@ export function getConfig(): ExtensionConfig {
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
     requestHeaders: normalizeHeaders(config.get<Record<string, unknown>>('requestHeaders') ?? {}),
   };
+}
+
+/**
+ * Migrates only the former bundled endpoint. Other user-selected endpoints
+ * remain untouched, including workspace-specific overrides.
+ */
+export async function migrateLegacyBaseUrl(): Promise<boolean> {
+  let migrated = false;
+  const migrate = async (
+    configuration: vscode.WorkspaceConfiguration,
+    target: vscode.ConfigurationTarget,
+    value: unknown,
+  ): Promise<void> => {
+    if (typeof value !== 'string' || normalizeBaseUrl(value) !== LEGACY_BASE_URL) {
+      return;
+    }
+
+    await configuration.update('baseUrl', DEFAULT_BASE_URL, target);
+    migrated = true;
+  };
+
+  const globalConfiguration = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  const globalInspection = globalConfiguration.inspect<string>('baseUrl');
+  await migrate(globalConfiguration, vscode.ConfigurationTarget.Global, globalInspection?.globalValue);
+  await migrate(globalConfiguration, vscode.ConfigurationTarget.Workspace, globalInspection?.workspaceValue);
+
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const folderConfiguration = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
+    const folderInspection = folderConfiguration.inspect<string>('baseUrl');
+    await migrate(
+      folderConfiguration,
+      vscode.ConfigurationTarget.WorkspaceFolder,
+      folderInspection?.workspaceFolderValue,
+    );
+  }
+
+  return migrated;
 }
 
 function normalizeBaseUrl(value: string): string {

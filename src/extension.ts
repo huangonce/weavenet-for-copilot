@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { VENDOR } from './constants';
 import { WeaveNetChatProvider } from './copilot/provider';
-import { getConfig } from './config/config';
+import { getConfig, migrateLegacyBaseUrl } from './config/config';
 import { initMetadataCache, onMetadataChanged } from './metadata/metadataCache';
 import { scheduleOpenRouterRefresh } from './metadata/openrouterFallback';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const migratedBaseUrl = await migrateLegacyBaseUrl();
   const provider = new WeaveNetChatProvider(context);
   initMetadataCache(context, (message) => provider.logMetadata(message));
 
@@ -41,6 +42,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   await vscode.extensions.getExtension('github.copilot-chat')?.activate();
+  if (migratedBaseUrl) {
+    void vscode.window.showInformationMessage(
+      'WeaveNet API endpoint was updated to the Hong Kong gateway for improved connectivity.',
+    );
+  }
   void provider.refreshModels().catch(() => undefined);
 }
 
