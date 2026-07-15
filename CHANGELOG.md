@@ -1,9 +1,17 @@
 # Change Log
 
+## 0.2.0 - 2026-07-15
+
+- Added independent route refresh, fixed/private model definitions, unique picker IDs, and explicit upstream routing.
+- Added response/stream timeouts, one safe retry for model discovery GETs, and processing-aware stream fallback without blind chat retries.
+- Improved OpenAI and Claude SSE/JSON compatibility, reasoning, usage, incremental tools, MIME validation, and strict tool argument parsing.
+- Added Anthropic cache breakpoints with configurable `5m`/`1h` TTL, sampling controls, sanitized tool schemas, safer relay error mapping, and broader token estimation.
+- Added Vitest coverage for protocol parsing, cache controls, schema sanitization, and model routing.
+
 ## 0.1.4
 
 - 默认 API 地址改为香港前置 `https://hk-sub2api.huangonce.com/v1`。
-- 扩展升级时自动迁移显式配置的旧默认地址；其他自定义地址和 API Key 保持不变。
+- 激活时自动迁移显式配置的旧默认地址；其他自定义地址和 API Key 保持不变。
 
 ## 0.1.3
 

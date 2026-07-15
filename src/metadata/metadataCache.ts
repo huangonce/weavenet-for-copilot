@@ -47,9 +47,27 @@ export function initMetadataCache(context: vscode.ExtensionContext, debug?: (mes
   context.subscriptions.push(changeEmitter);
 }
 
-/** Reads the cached payload for {@link key}, or `undefined` if not yet populated. */
-export function getCachedData<T>(key: string): T | undefined {
-  return extensionContext?.globalState.get<CacheEntry<T>>(key)?.data;
+/**
+ * Reads the cached payload for {@link key}, or `undefined` if it is missing or
+ * older than {@link ttlMs}. The default preserves non-expiring reads.
+ */
+export function getCachedData<T>(key: string, ttlMs = Number.POSITIVE_INFINITY): T | undefined {
+  const entry = extensionContext?.globalState.get<CacheEntry<T>>(key);
+  if (!entry || Date.now() - (entry.fetchedAt ?? 0) > ttlMs) return undefined;
+  return entry.data;
+}
+
+/**
+ * Finds a cached routed model by picker route, falling back to its model ID.
+ */
+export function findRoutedModel<T extends { readonly id: string; readonly pickerId?: string }>(
+  key: string,
+  pickerId: string,
+  ttlMs = Number.POSITIVE_INFINITY,
+): T | undefined {
+  return getCachedData<readonly T[]>(key, ttlMs)?.find(
+    (model) => model.pickerId === pickerId || model.id === pickerId,
+  );
 }
 
 /** Returns the cache timestamp for diagnostic logging. */

@@ -12,8 +12,10 @@ import { convertClaudeMessages, convertClaudeTools } from '../relay/claude';
 import { RelayClient } from '../relay/client';
 import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import {
+  assignUniquePickerIds,
   enrichModelsWithMetadata,
   filterModels,
+  fromConfiguredModel,
   supportsImageInputForModel,
   supportsImageInputForRoutedModel,
   supportsToolCallingForModel,
@@ -55,7 +57,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly output = vscode.window.createOutputChannel('WeaveNet');
   private readonly auth: AuthManager;
   private cachedModels: RoutedModel[] = [];
+  private readonly routeModelSnapshots = new Map<RoutedModel['route'], RoutedModel[]>();
   private refreshModelsTask: Promise<void> | undefined;
+  private modelRefreshGeneration = 0;
+  private readonly refreshWarnings = new Set<string>();
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
 
@@ -116,25 +121,47 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   async refreshModels(): Promise<void> {
+    this.modelRefreshGeneration++;
     if (this.refreshModelsTask) {
       return this.refreshModelsTask;
     }
 
-    this.refreshModelsTask = this.refreshModelsInternal()
+    this.refreshModelsTask = this.refreshModelsUntilCurrent()
       .finally(() => {
         this.refreshModelsTask = undefined;
       });
     return this.refreshModelsTask;
   }
 
-  private async refreshModelsInternal(): Promise<void> {
+  private async refreshModelsUntilCurrent(): Promise<void> {
+    let generation: number;
+    do {
+      generation = this.modelRefreshGeneration;
+      try {
+        await this.refreshModelsInternal(generation);
+      } catch (error) {
+        if (generation === this.modelRefreshGeneration) {
+          throw error;
+        }
+      }
+    } while (generation !== this.modelRefreshGeneration);
+  }
+
+  private async refreshModelsInternal(generation: number): Promise<void> {
     const config = getConfig();
     if (!config.baseUrl) {
-      this.changeEmitter.fire();
+      if (generation === this.modelRefreshGeneration) {
+        this.changeEmitter.fire();
+      }
       return;
     }
 
-    this.cachedModels = await this.loadAllModels(config);
+    const models = await this.loadAllModels(config);
+    if (generation !== this.modelRefreshGeneration) {
+      return;
+    }
+
+    this.cachedModels = models;
     this.changeEmitter.fire();
     vscode.window.showInformationMessage(`WeaveNet loaded ${this.cachedModels.length} model(s).`);
   }
@@ -146,14 +173,23 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     const config = getConfig();
 
     if (this.cachedModels.length === 0 && config.baseUrl) {
+      const generation = this.modelRefreshGeneration;
       try {
-        this.cachedModels = await this.loadAllModels(config, token);
+        const models = await this.loadAllModels(config, token);
+        if (generation === this.modelRefreshGeneration) {
+          this.cachedModels = models;
+        }
       } catch (error) {
-        console.error('Failed to load WeaveNet models', error);
+        if (generation === this.modelRefreshGeneration) {
+          console.error('Failed to load WeaveNet models', error);
+        }
       }
     }
 
-    return this.cachedModels.map((model) => toChatInformation(model, config, true));
+    const keyAvailability = new Map<RoutedModel['route'], boolean>(await Promise.all(
+      (['openai', 'chatgpt', 'claude'] as const).map(async (route) => [route, await this.auth.hasApiKey(route)] as const),
+    ));
+    return this.cachedModels.map((model) => toChatInformation(model, config, keyAvailability.get(model.route) === true));
   }
 
   async provideLanguageModelChatResponse(
@@ -168,7 +204,13 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       throw new Error('weavenet-copilot.baseUrl is not configured.');
     }
 
-    if (isClaudeModel(model.id)) {
+    const routedModel = this.cachedModels.find((entry) => entry.pickerId === model.id);
+    if (!routedModel) {
+      throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
+    }
+    const protocol: ModelProtocol = routedModel.protocol;
+
+    if (protocol === 'claude') {
       await this.provideClaudeResponse(model, messages, options, progress, token);
       return;
     }
@@ -184,14 +226,19 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
   ): Promise<void> {
     const config = getConfig();
-    const keyKind = isGPTModel(model.id) ? 'chatgpt' : 'openai';
-    const apiKey = await this.auth.getApiKey(keyKind);
+    const routedModel = this.cachedModels.find(
+      (entry) => entry.pickerId === model.id,
+    );
+    if (!routedModel) {
+      throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
+    }
+    const protocol = routedModel.route;
+    const apiKey = await this.auth.getApiKey(protocol);
     if (!apiKey) {
-      const command = keyKind === 'chatgpt' ? 'WeaveNet: Set ChatGPT API Key' : 'WeaveNet: Set OpenAI API Key';
-      throw new Error(`WeaveNet ${keyKind === 'chatgpt' ? 'ChatGPT' : 'OpenAI'} API key is not configured. Run ${command}.`);
+      const command = protocol === 'chatgpt' ? 'WeaveNet: Set ChatGPT API Key' : 'WeaveNet: Set OpenAI API Key';
+      throw new Error(`WeaveNet ${protocol === 'chatgpt' ? 'ChatGPT' : 'OpenAI'} API key is not configured. Run ${command}.`);
     }
 
-    const routedModel = this.cachedModels.find((candidate) => candidate.id === model.id && candidate.protocol === 'openai');
     const tools = !routedModel || supportsToolCallingForModel(routedModel, config)
       ? convertTools(options.tools)
       : undefined;
@@ -199,6 +246,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       baseUrl: config.baseUrl,
       apiKey,
       requestHeaders: config.requestHeaders,
+      requestTimeoutMs: config.requestTimeoutMs,
+      streamIdleTimeoutMs: config.streamIdleTimeoutMs,
     });
     const promptCacheKey = config.openaiPromptCaching && isOpenAIPromptCacheModel(model.id)
       ? this.getOpenAIPromptCacheKey(config)
@@ -213,10 +262,15 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     // Completions. Optional relay hints can change upstream routing and are
     // deliberately omitted when an image is present.
     const request: ChatRequest = {
-      model: model.id,
+      model: routedModel.upstreamId,
       messages: convertedMessages,
       stream: true,
-      ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
+      temperature: config.temperature,
+      top_p: config.topP,
+      ...(tools?.length ? {
+        tools,
+        tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
+      } : {}),
       ...(!hasImageInput && config.sendMaxTokens ? { max_tokens: model.maxOutputTokens ?? config.maxOutputTokens } : {}),
       ...(!hasImageInput && getConfiguredContextWindow(routedModel, options) ? { context_window: getConfiguredContextWindow(routedModel, options) } : {}),
       ...(!hasImageInput && getConfiguredReasoningEffort(routedModel, options) ? { reasoning_effort: getConfiguredReasoningEffort(routedModel, options) } : {}),
@@ -261,7 +315,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         throw new vscode.CancellationError();
       }
       diagnostics.failed(error);
-      throw error;
+      throw toLanguageModelError(error);
     }
   }
 
@@ -273,19 +327,26 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
   ): Promise<void> {
     const config = getConfig();
-    const apiKey = await this.auth.getApiKey('claude');
+    const routedModel = this.cachedModels.find(
+      (entry) => entry.pickerId === model.id,
+    );
+    if (!routedModel) {
+      throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
+    }
+    const apiKey = await this.auth.getApiKey(routedModel.route);
     if (!apiKey) {
       throw new Error('WeaveNet Claude API key is not configured. Run WeaveNet: Set Claude API Key.');
     }
 
-    const routedModel = this.cachedModels.find((candidate) => candidate.id === model.id && candidate.protocol === 'claude');
     const converted = convertClaudeMessages(messages, {
       supportsImageInput: routedModel
         ? supportsImageInputForRoutedModel(routedModel, config)
         : supportsImageInputForModel(model.id, config),
+      promptCaching: config.claudePromptCaching !== 'disabled',
+      cacheTTL: config.claudePromptCachingTTL,
     });
     const tools = !routedModel || supportsToolCallingForModel(routedModel, config)
-      ? convertClaudeTools(options.tools)
+      ? convertClaudeTools(options.tools, config.claudePromptCaching !== 'disabled', config.claudePromptCachingTTL)
       : undefined;
     const client = new RelayClient({
       baseUrl: config.baseUrl,
@@ -293,18 +354,22 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       requestHeaders: config.requestHeaders,
       authScheme: 'x-api-key',
       anthropicVersion: config.anthropicVersion,
+      requestTimeoutMs: config.requestTimeoutMs,
+      streamIdleTimeoutMs: config.streamIdleTimeoutMs,
     });
 
     const request: ClaudeRequest = {
-      model: model.id,
+      model: routedModel.upstreamId,
       max_tokens: model.maxOutputTokens ?? config.maxOutputTokens,
       messages: converted.messages,
       system: converted.system,
       stream: true,
-      ...(tools?.length ? { tools } : {}),
-      ...(config.claudePromptCaching === 'automatic'
-        ? { cache_control: { type: 'ephemeral' as const } }
-        : {}),
+      temperature: config.temperature,
+      top_p: config.topP,
+      ...(tools?.length ? {
+        tools,
+        tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? { type: 'any' } : undefined,
+      } : {}),
       ...(toClaudeThinking(getConfiguredReasoningEffort(routedModel, options), model.maxOutputTokens ?? config.maxOutputTokens)),
     };
     this.logClaudeRequest(config, request);
@@ -345,7 +410,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         throw new vscode.CancellationError();
       }
       diagnostics.failed(error);
-      throw error;
+      throw toLanguageModelError(error);
     }
   }
 
@@ -400,7 +465,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       config,
       `Claude request: model=${request.model}, cacheMode=${config.claudePromptCaching}, `
         + `messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, systemChars=${systemChars}, `
-        + `cachePoints={topLevel:${Boolean(request.cache_control)}}, bodyBytes=${Buffer.byteLength(JSON.stringify(request))}`,
+        + `bodyBytes=${Buffer.byteLength(JSON.stringify(request))}`,
     );
   }
 
@@ -496,25 +561,81 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.auth.getApiKey('chatgpt'),
       this.auth.getApiKey('claude'),
     ]);
-    const loaded: RoutedModel[] = [];
+    const routes: Array<{ readonly name: RoutedModel['route']; readonly task: Promise<RoutedModel[]> }> = [];
 
     if (openaiKey) {
-      const models = await this.loadModelsForProtocol('openai', openaiKey, config, token);
-      loaded.push(...models.filter((model) => !isGPTModel(model.id)));
+      routes.push({
+        name: 'openai',
+        task: this.loadModelsForProtocol('openai', 'openai', openaiKey, config, token)
+            .then((models) => models.filter((model) => !isGPTModel(model.id) && !isClaudeModel(model.id))),
+      });
     }
     if (chatgptKey) {
-      const models = await this.loadModelsForProtocol('openai', chatgptKey, config, token);
-      loaded.push(...models.filter((model) => isGPTModel(model.id)));
+      routes.push({
+        name: 'chatgpt',
+        task: this.loadModelsForProtocol('openai', 'chatgpt', chatgptKey, config, token)
+          .then((models) => models.filter((model) => isGPTModel(model.id))),
+      });
     }
     if (claudeKey) {
-      loaded.push(...await this.loadModelsForProtocol('claude', claudeKey, config, token));
+      routes.push({
+        name: 'claude',
+        task: this.loadModelsForProtocol('claude', 'claude', claudeKey, config, token),
+      });
     }
 
-    return dedupeModels(loaded);
+    const results = await Promise.allSettled(routes.map((route) => route.task));
+    const loaded: RoutedModel[] = [];
+    let failedRouteCount = 0;
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      const route = routes[index].name;
+      if (result.status === 'fulfilled') {
+        this.routeModelSnapshots.set(route, result.value);
+        this.clearRouteRefreshWarnings(route);
+        loaded.push(...result.value);
+      } else {
+        failedRouteCount++;
+        this.reportRouteRefreshFailure(route, result.reason);
+        loaded.push(...(this.routeModelSnapshots.get(route) ?? []));
+      }
+    }
+
+    loaded.push(
+      ...filterModels(
+        enrichModelsWithMetadata(config.models.map(fromConfiguredModel)),
+        config,
+      ),
+    );
+
+    if (!loaded.length && routes.length > 0 && failedRouteCount === routes.length) {
+      throw new Error('All model routes failed to refresh.');
+    }
+
+    const routed = assignUniquePickerIds(dedupeModels(loaded));
+    return routed;
+  }
+
+  private reportRouteRefreshFailure(route: RoutedModel['route'], error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const key = `${route}:${message}`;
+    if (!this.refreshWarnings.has(key)) {
+      this.refreshWarnings.add(key);
+      this.output.appendLine(
+        `[models] ${route} route unavailable; continuing with successful routes: ${message.slice(0, 240)}`,
+      );
+    }
+  }
+
+  private clearRouteRefreshWarnings(route: RoutedModel['route']): void {
+    for (const key of this.refreshWarnings) {
+      if (key.startsWith(`${route}:`)) this.refreshWarnings.delete(key);
+    }
   }
 
   private async loadModelsForProtocol(
     protocol: ModelProtocol,
+    route: RoutedModel['route'],
     apiKey: string,
     config: ReturnType<typeof getConfig>,
     token?: vscode.CancellationToken,
@@ -526,10 +647,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       requestHeaders: config.requestHeaders,
       authScheme: protocol === 'claude' ? 'x-api-key' : 'bearer',
       anthropicVersion: config.anthropicVersion,
+      requestTimeoutMs: config.requestTimeoutMs,
+      streamIdleTimeoutMs: config.streamIdleTimeoutMs,
     });
     const response = await client.listModels(token);
     const routed = (response.data ?? []).map((model: RelayModel) =>
-      toRoutedModel(model, protocol === 'claude' || isClaudeModel(model.id) ? 'claude' : 'openai'),
+        toRoutedModel(model, protocol === 'claude' || isClaudeModel(model.id) ? 'claude' : 'openai', route),
     );
     const filtered = filterModels(enrichModelsWithMetadata(routed), config, protocol);
     this.debug(config, `Models loaded: protocol=${protocol}, count=${filtered.length}, elapsedMs=${Date.now() - startedAt}`);
@@ -541,8 +664,19 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     text: string | vscode.LanguageModelChatRequestMessage,
     _token: vscode.CancellationToken,
   ): Promise<number> {
-    const value = typeof text === 'string' ? text : messageToText(text);
-    return Math.ceil(value.length / 4);
+    if (typeof text === 'string') return estimateTextTokens(text);
+    let tokens = 4;
+    for (const part of text.content) {
+      if (part instanceof vscode.LanguageModelTextPart) tokens += estimateTextTokens(part.value);
+      else if (part instanceof vscode.LanguageModelToolCallPart) {
+        tokens += estimateTextTokens(part.name) + estimateTextTokens(JSON.stringify(part.input ?? {}));
+      } else if (part instanceof vscode.LanguageModelToolResultPart) {
+        tokens += estimateTextTokens(JSON.stringify(part.content));
+      } else if (part instanceof vscode.LanguageModelDataPart) {
+        tokens += Math.max(256, Math.ceil(part.data.byteLength / 768));
+      }
+    }
+    return tokens;
   }
 }
 
@@ -599,6 +733,21 @@ function formatLogError(error: unknown): string {
   return `${error instanceof Error ? error.name : 'UnknownError'}(${message.replace(/\s+/g, ' ').trim().slice(0, 200)})`;
 }
 
+function toLanguageModelError(error: unknown): Error {
+  if (error instanceof vscode.LanguageModelError || error instanceof vscode.CancellationError) return error;
+  if (error instanceof RelayRequestError) {
+    const suffix = [error.upstreamCode, error.requestId].filter(Boolean).join('/');
+    const message = suffix ? `${error.message} [${suffix}]` : error.message;
+    return new vscode.LanguageModelError(message, {
+      cause: error,
+    });
+  }
+  if (error instanceof RelayStreamError) {
+    return new vscode.LanguageModelError(error.message, { cause: error });
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 function hashString(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index++) {
@@ -611,7 +760,7 @@ function hashString(value: string): string {
 function dedupeModels(models: RoutedModel[]): RoutedModel[] {
   const byKey = new Map<string, RoutedModel>();
   for (const model of models) {
-    byKey.set(`${model.protocol}:${model.id}`, model);
+    byKey.set(`${model.route}:${model.upstreamId}`, model);
   }
   return [...byKey.values()].sort((a, b) => {
     if (a.protocol !== b.protocol) {
@@ -626,10 +775,24 @@ function parseToolArguments(value: string): object {
     return {};
   }
   try {
-    return JSON.parse(value) as object;
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Tool call arguments must be a JSON object.');
+    }
+    return parsed;
   } catch {
-    return { input: value };
+    throw new Error('Relay returned invalid tool call arguments.');
   }
+}
+
+function estimateTextTokens(value: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (const character of value) {
+    if (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(character)) cjk++;
+    else other++;
+  }
+  return Math.max(1, cjk + Math.ceil(other / 4));
 }
 
 function messageToText(message: vscode.LanguageModelChatRequestMessage): string {

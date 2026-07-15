@@ -8,7 +8,7 @@ import type {
   ToolCall,
 } from './types';
 import { streamClaudeMessages } from './claude';
-import { throwIfNotOk, toAbortSignal } from './http';
+import { fetchJsonWithRetry } from './http';
 import { streamOpenAIChatCompletion } from './openai';
 
 export interface RelayClientOptions {
@@ -17,6 +17,8 @@ export interface RelayClientOptions {
   requestHeaders: Record<string, string>;
   authScheme?: 'bearer' | 'x-api-key';
   anthropicVersion?: string;
+  requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
 }
 
 export interface StreamCallbacks {
@@ -27,6 +29,7 @@ export interface StreamCallbacks {
   onClaudeUsage?(usage: ClaudeUsage, responseId?: string): void;
   /** HTTP response metadata only; authentication headers and bodies are never exposed. */
   onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string): void;
+  onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
   /** Called only when the protocol's normal terminal event is received. */
   onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
 }
@@ -35,12 +38,9 @@ export class RelayClient {
   constructor(private readonly options: RelayClientOptions) {}
 
   async listModels(token?: CancellationToken): Promise<ModelsResponse> {
-    const response = await fetch(`${this.options.baseUrl}/models`, {
+    return fetchJsonWithRetry<ModelsResponse>(`${this.options.baseUrl}/models`, {
       headers: this.headers(),
-      signal: toAbortSignal(token),
-    });
-    await throwIfNotOk(response);
-    return (await response.json()) as ModelsResponse;
+    }, this.options.requestTimeoutMs, token);
   }
 
   async streamChatCompletion(
@@ -51,6 +51,8 @@ export class RelayClient {
     await streamOpenAIChatCompletion({
       baseUrl: this.options.baseUrl,
       headers: this.headers(),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
     }, request, callbacks, token);
   }
 
@@ -63,6 +65,8 @@ export class RelayClient {
       baseUrl: this.options.baseUrl,
       headers: this.headers(),
       anthropicVersion: this.options.anthropicVersion,
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
     }, request, callbacks, token);
   }
 

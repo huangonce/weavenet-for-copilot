@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ExtensionConfig } from '../config/config';
+import type { ConfiguredModel, ExtensionConfig } from '../config/config';
 import { enrichModelsWithOpenRouter } from '../metadata/openrouterFallback';
 import type { ModelMetadataSources, ModelProtocol, ReasoningEffort, RelayModel, RoutedModel } from './types';
 
@@ -33,10 +33,10 @@ export function toChatInformation(
   const owner = model.owned_by ? `owned by ${model.owned_by}` : 'from your relay';
   const protocolLabel = model.protocol === 'claude' ? 'Claude native' : 'OpenAI compatible';
   return {
-    id: model.id,
-    name: `${config.modelNamePrefix} ${model.id}`,
+    id: model.pickerId || model.id,
+    name: `${config.modelNamePrefix} ${model.name || model.upstreamId}`,
     family: model.protocol === 'claude' ? 'claude' : 'weavenet',
-    version: model.id,
+    version: model.upstreamId,
     detail: hasApiKey ? `${protocolLabel}, ${owner}${model.referencePricing ? ', public reference pricing' : ''}` : 'API key required',
     tooltip: hasApiKey ? buildTooltip(model, protocolLabel) : 'Run a WeaveNet key command first.',
     maxInputTokens: Math.min(model.maxInputTokens ?? config.maxInputTokens, config.maxInputTokens),
@@ -147,7 +147,11 @@ export function enrichModelsWithMetadata(models: RoutedModel[]): RoutedModel[] {
   return enrichModelsWithOpenRouter(models);
 }
 
-export function toRoutedModel(model: RelayModel, protocol: ModelProtocol): RoutedModel {
+export function toRoutedModel(
+  model: RelayModel,
+  protocol: ModelProtocol,
+  route: RoutedModel['route'] = protocol === 'claude' ? 'claude' : 'openai',
+): RoutedModel {
   const record = model as unknown as Record<string, unknown>;
   const capabilities = objectFrom(model.capabilities);
   const maxInputTokens = numberFrom(model.context_length, model.context_window, record.max_input_tokens);
@@ -178,7 +182,10 @@ export function toRoutedModel(model: RelayModel, protocol: ModelProtocol): Route
 
   return {
     ...model,
+    pickerId: model.id,
+    upstreamId: model.id,
     protocol,
+    route,
     maxInputTokens,
     maxOutputTokens,
     imageInput,
@@ -186,6 +193,41 @@ export function toRoutedModel(model: RelayModel, protocol: ModelProtocol): Route
     thinking,
     metadataSources,
   };
+}
+
+export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
+  const protocol: ModelProtocol = model.route === 'claude' ? 'claude' : 'openai';
+  return {
+    id: model.id,
+    pickerId: model.id,
+    upstreamId: model.id,
+    name: model.name,
+    protocol,
+    route: model.route,
+    maxInputTokens: model.maxInputTokens,
+    maxOutputTokens: model.maxOutputTokens,
+    toolCalling: model.toolCalling,
+    imageInput: model.imageInput,
+    thinking: model.thinking,
+    metadataSources: {},
+  };
+}
+
+/** Adds a protocol suffix only when two routes expose the same upstream id. */
+export function assignUniquePickerIds(models: RoutedModel[]): RoutedModel[] {
+  const counts = new Map<string, number>();
+  for (const model of models) counts.set(model.upstreamId, (counts.get(model.upstreamId) ?? 0) + 1);
+  const used = new Set<string>();
+  return models.map((model) => {
+    const base = (counts.get(model.upstreamId) ?? 0) > 1
+      ? `${model.upstreamId}::${model.route}`
+      : model.upstreamId;
+    let pickerId = base;
+    let suffix = 2;
+    while (used.has(pickerId)) pickerId = `${base}::${suffix++}`;
+    used.add(pickerId);
+    return { ...model, pickerId };
+  });
 }
 
 export function filterModels(

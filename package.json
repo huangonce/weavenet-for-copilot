@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "publisher": "huangonce",
   "icon": "images/icon.png",
   "author": "huangonce",
@@ -127,6 +127,49 @@
           "default": "automatic",
           "description": "%configuration.claudePromptCaching.description%"
         },
+        "weavenet-copilot.claudePromptCachingTTL": {
+          "type": "string",
+          "enum": [
+            "5m",
+            "1h"
+          ],
+          "default": "5m",
+          "description": "%configuration.claudePromptCachingTTL.description%"
+        },
+        "weavenet-copilot.temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "%configuration.temperature.description%"
+        },
+        "weavenet-copilot.topP": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "%configuration.topP.description%"
+        },
+        "weavenet-copilot.requestTimeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 300,
+          "description": "%configuration.requestTimeoutSeconds.description%"
+        },
+        "weavenet-copilot.streamIdleTimeoutSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "%configuration.streamIdleTimeoutSeconds.description%"
+        },
         "weavenet-copilot.debug": {
           "type": "boolean",
           "default": false,
@@ -206,6 +249,51 @@
           "type": "object",
           "default": {},
           "description": "%configuration.requestHeaders.description%"
+        },
+        "weavenet-copilot.models": {
+          "type": "array",
+          "default": [],
+          "description": "%configuration.models.description%",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "route"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string",
+                "enum": [
+                  "openai",
+                  "chatgpt",
+                  "claude"
+                ]
+              },
+              "maxInputTokens": {
+                "type": "number",
+                "minimum": 1
+              },
+              "maxOutputTokens": {
+                "type": "number",
+                "minimum": 1
+              },
+              "toolCalling": {
+                "type": "boolean"
+              },
+              "imageInput": {
+                "type": "boolean"
+              },
+              "thinking": {
+                "type": "boolean"
+              }
+            }
+          }
         }
       }
     }
@@ -215,6 +303,8 @@
     "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "compile": "npm run clean && tsc -p ./",
     "watch": "npm run clean && tsc -watch -p ./",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "package": "vsce package",
     "publish:marketplace": "vsce publish --skip-duplicate"
   },
@@ -222,6 +312,7 @@
     "@types/node": "^25.6.0",
     "@types/vscode": "^1.116.0",
     "@vscode/vsce": "^3.9.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }

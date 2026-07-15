@@ -1,9 +1,11 @@
-.vscode/**
+src/**
+test/**
+vitest.config.ts
+tsconfig.json
+package-lock.json
+node_modules/**
+weavenet-for-copilot-*.vsix.vscode/**
 .github/**
 .gitignore
 .vscodeignore
-src/**
-node_modules/**
-tsconfig.json
-package-lock.json
 *.vsix

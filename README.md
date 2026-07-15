@@ -54,7 +54,7 @@ src/
 
 ## 模型能力与参考价格
 
-模型的图片输入、工具调用、推理、上下文窗口与公开参考价格按 `sub2api → OpenRouter` 的顺序读取。sub2api 明确返回的字段优先，只有缺失字段才由 OpenRouter 补充；插件不再使用 LiteLLM、内置模型快照或名称猜测。无法确认的图片、工具与推理能力保持关闭，缺失的 token 上限使用插件配置默认值。模型选择器会显示输入、输出和缓存读取的每百万 token 参考价，以及对应的成本档位。
+模型的图片输入、工具调用、推理和上下文窗口优先读取 sub2api 返回的能力字段，缺失字段由 OpenRouter 补充；公开参考价格来自 OpenRouter。插件不再使用 LiteLLM、内置模型快照或名称猜测。无法确认的图片、工具与推理能力保持关闭，缺失的 token 上限使用插件配置默认值。模型选择器会显示输入、输出和缓存读取的每百万 token 参考价，以及对应的成本档位。
 
 参考价格不是 sub2api 实际扣费价格。实际扣费受你的分组、账号倍率和上游渠道影响，应以 sub2api 的用量日志为准。
 
@@ -62,11 +62,11 @@ src/
 
 ## 常用设置
 
-- `weavenet-copilot.baseUrl`：sub2api API 地址，默认 `https://hk-sub2api.huangonce.com/v1`；原入口为 `https://sub2api.huangonce.com/v1`，可作为回退地址。
+- `weavenet-copilot.baseUrl`：sub2api API 地址，默认 `https://hk-sub2api.huangonce.com/v1`。为迁移旧默认值，显式配置的旧默认入口会自动更新为香港入口；其他自定义地址保持不变。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
-- `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会在整个 `/messages` 请求的顶层发送唯一的 `cache_control: { "type": "ephemeral" }`，让 Anthropic 自动把缓存点推进到最后一个可缓存块，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
+- `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会为 system、最后一个工具定义和最近两条用户消息设置显式缓存断点，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
 - `weavenet-copilot.debug`：开启后将请求摘要和 Claude 缓存用量写入 VS Code 的 `WeaveNet` 输出通道，不记录 API Key 或 prompt 正文。通过 `WeaveNet: Show Debug Log` 打开。
   - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
 - `weavenet-copilot.includeModels`：模型 ID 正则白名单。
@@ -78,6 +78,14 @@ src/
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
+- `weavenet-copilot.models`：可选固定模型列表；可指定真实上游 ID、显示名、`openai` / `chatgpt` / `claude` 路由及能力，适用于无法通过 `/models` 发现的私有模型。
+- 模型刷新按路由独立容错；某个协议暂时不可用时，会保留该路由上一次成功的模型快照，并继续更新其他路由。
+- `weavenet-copilot.requestTimeoutSeconds`：等待响应头的秒数。模型发现 GET 最多安全重试一次，聊天 POST 不做网络盲重试。
+- `weavenet-copilot.streamIdleTimeoutSeconds`：流式响应数据块之间允许的空闲秒数。
+- `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数，同时转发到 OpenAI 兼容和 Claude 请求。
+- `weavenet-copilot.claudePromptCachingTTL`：Claude 缓存断点 TTL，支持 `5m` 和 `1h`。自动模式会覆盖 system、tools 和最近两条用户消息。
+
+协议兼容层同时支持标准 SSE、无空格 `data:`、CRLF、完整 JSON 响应、reasoning、usage 和增量工具调用。只有在没有任何上游处理证据时，流式请求才允许安全降级为非流式请求。
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 

@@ -5,6 +5,7 @@ import type {
   ToolDefinition,
   ToolCall,
 } from '../relay/types';
+import { sanitizeJsonSchema } from '../relay/schema';
 
 const SYSTEM_ROLE = 3;
 
@@ -91,8 +92,7 @@ export function convertTools(
     function: {
       name: tool.name,
       description: tool.description,
-      parameters: tool.inputSchema as Record<string, unknown> | undefined
-        ?? { type: 'object', properties: {} },
+      parameters: sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} },
     },
   }));
 }

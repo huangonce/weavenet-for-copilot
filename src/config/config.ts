@@ -1,12 +1,28 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION, DEFAULT_BASE_URL, LEGACY_BASE_URL } from '../constants';
 
+export interface ConfiguredModel {
+  id: string;
+  name?: string;
+  route: 'openai' | 'chatgpt' | 'claude';
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  toolCalling?: boolean;
+  imageInput?: boolean;
+  thinking?: boolean;
+}
+
 export interface ExtensionConfig {
   baseUrl: string;
   anthropicVersion: string;
   openaiPromptCaching: boolean;
   openaiPromptCacheKey: string;
   claudePromptCaching: 'automatic' | 'disabled';
+  claudePromptCachingTTL: '5m' | '1h';
+  temperature?: number;
+  topP?: number;
+  requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
   debug: boolean;
   modelNamePrefix: string;
   includeModels: RegExp[];
@@ -20,6 +36,7 @@ export interface ExtensionConfig {
   disabledImageInputModels: RegExp[];
   metadataRefreshHours: number;
   requestHeaders: Record<string, string>;
+  models: ConfiguredModel[];
 }
 
 export function getConfig(): ExtensionConfig {
@@ -31,6 +48,11 @@ export function getConfig(): ExtensionConfig {
     openaiPromptCaching: config.get<boolean>('openaiPromptCaching') ?? true,
     openaiPromptCacheKey: (config.get<string>('openaiPromptCacheKey') ?? '').trim(),
     claudePromptCaching: config.get<'automatic' | 'disabled'>('claudePromptCaching') ?? 'automatic',
+    claudePromptCachingTTL: config.get<'5m' | '1h'>('claudePromptCachingTTL') ?? '5m',
+    temperature: optionalNumber(config.get<number | null>('temperature'), 0, 2),
+    topP: optionalNumber(config.get<number | null>('topP'), 0, 1),
+    requestTimeoutMs: clamp(config.get<number>('requestTimeoutSeconds') ?? 60, 5, 300) * 1000,
+    streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
     debug: config.get<boolean>('debug') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
     includeModels: compileRegexList(config.get<string[]>('includeModels') ?? []),
@@ -44,6 +66,7 @@ export function getConfig(): ExtensionConfig {
     disabledImageInputModels: compileRegexList(config.get<string[]>('disabledImageInputModels') ?? []),
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
     requestHeaders: normalizeHeaders(config.get<Record<string, unknown>>('requestHeaders') ?? {}),
+    models: normalizeModels(config.get<unknown[]>('models') ?? []),
   };
 }
 
@@ -111,4 +134,40 @@ function normalizeHeaders(headers: Record<string, unknown>): Record<string, stri
     }
   }
   return result;
+}
+
+function optionalNumber(value: number | null | undefined, minimum: number, maximum: number): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? clamp(value, minimum, maximum)
+    : undefined;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function normalizeModels(values: unknown[]): ConfiguredModel[] {
+  const models: ConfiguredModel[] = [];
+  for (const value of values) {
+    if (!value || typeof value !== 'object') continue;
+    const record = value as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const route = record.route;
+    if (!id || (route !== 'openai' && route !== 'chatgpt' && route !== 'claude')) continue;
+    models.push({
+      id,
+      route,
+      name: typeof record.name === 'string' && record.name.trim() ? record.name.trim() : undefined,
+      maxInputTokens: positiveNumber(record.maxInputTokens),
+      maxOutputTokens: positiveNumber(record.maxOutputTokens),
+      toolCalling: typeof record.toolCalling === 'boolean' ? record.toolCalling : undefined,
+      imageInput: typeof record.imageInput === 'boolean' ? record.imageInput : undefined,
+      thinking: typeof record.thinking === 'boolean' ? record.thinking : undefined,
+    });
+  }
+  return models;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }

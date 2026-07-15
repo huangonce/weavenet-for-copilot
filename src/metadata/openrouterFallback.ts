@@ -75,10 +75,9 @@ export function scheduleOpenRouterRefresh(ttlMs: number, force = false): Promise
 /**
  * Normalizes the OpenRouter API response into our compact entry shape.
  *
- * Each OpenRouter model id looks like `vendor/model-name`; we strip the
- * vendor prefix because AIXRouter's own model ids are already vendor-agnostic
- * (e.g. `claude-sonnet-4.6`). We also keep the original full id as a second
- * entry so id-based exact matches still work for ambiguous names.
+ * Each OpenRouter model id looks like `vendor/model-name`; the compact entry
+ * keeps both the full id and the bare id. Bare-id enrichment is used only
+ * when exactly one catalog candidate exists, avoiding cross-vendor matches.
  */
 export function parseOpenRouterResponse(payload: OpenRouterResponse): OpenRouterCatalogEntry[] {
   const models = Array.isArray(payload?.data) ? payload.data : [];
@@ -155,7 +154,7 @@ function enrichModelFromOpenRouter(
 ): RoutedModel {
   const modelId = model.id.toLowerCase();
   const entry = entries.find((candidate) => candidate.fullId.toLowerCase() === modelId)
-    ?? entries.find((candidate) => candidate.id.toLowerCase() === modelId);
+    ?? uniqueBareIdEntry(entries, modelId);
   if (!entry) return model;
 
   const maxInputTokens = model.maxInputTokens ?? entry.maxInputTokens;
@@ -193,6 +192,14 @@ function enrichModelFromOpenRouter(
     contextWindows,
     metadataSources: sources,
   };
+}
+
+function uniqueBareIdEntry(
+  entries: readonly OpenRouterCatalogEntry[],
+  modelId: string,
+): OpenRouterCatalogEntry | undefined {
+  const candidates = entries.filter((candidate) => candidate.id.toLowerCase() === modelId);
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function sourceForMissing<T>(

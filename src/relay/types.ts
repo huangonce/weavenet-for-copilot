@@ -14,7 +14,12 @@ export interface RelayModel {
 export type ModelProtocol = 'openai' | 'claude';
 
 export interface RoutedModel extends RelayModel {
+  /** Unique id exposed to VS Code. */
+  pickerId: string;
+  /** Model id sent unchanged to the relay. */
+  upstreamId: string;
   protocol: ModelProtocol;
+  route: 'openai' | 'chatgpt' | 'claude';
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;
@@ -91,10 +96,12 @@ export interface ToolCall {
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
-  stream: true;
+  stream: boolean;
   tools?: ToolDefinition[];
-  tool_choice?: 'auto';
+  tool_choice?: 'auto' | 'required';
   max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
   context_window?: number;
   reasoning_effort?: ReasoningEffort;
   prompt_cache_key?: string;
@@ -123,6 +130,7 @@ export interface StreamChunk {
     delta?: {
       content?: string | null;
       reasoning_content?: string | null;
+      reasoning?: string | null;
       tool_calls?: Array<{
         index: number;
         id?: string;
@@ -137,9 +145,22 @@ export interface StreamChunk {
   }>;
 }
 
+export interface OpenAIFullResponse extends StreamChunk {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ text?: string }> | null;
+      reasoning_content?: string | null;
+      reasoning?: string | null;
+      tool_calls?: ToolCall[];
+    };
+    finish_reason?: string | null;
+  }>;
+}
+
 export interface ClaudeContentBlockText {
   type: 'text';
   text: string;
+  cache_control?: ClaudeCacheControl;
 }
 
 export interface ClaudeContentBlockImage {
@@ -149,6 +170,7 @@ export interface ClaudeContentBlockImage {
     media_type: string;
     data: string;
   };
+  cache_control?: ClaudeCacheControl;
 }
 
 export interface ClaudeContentBlockToolUse {
@@ -156,12 +178,14 @@ export interface ClaudeContentBlockToolUse {
   id: string;
   name: string;
   input: unknown;
+  cache_control?: ClaudeCacheControl;
 }
 
 export interface ClaudeContentBlockToolResult {
   type: 'tool_result';
   tool_use_id: string;
   content: string;
+  cache_control?: ClaudeCacheControl;
 }
 
 export type ClaudeContentBlock =
@@ -179,6 +203,7 @@ export interface ClaudeToolDefinition {
   name: string;
   description?: string;
   input_schema?: Record<string, unknown>;
+  cache_control?: ClaudeCacheControl;
 }
 
 export interface ClaudeRequest {
@@ -186,14 +211,17 @@ export interface ClaudeRequest {
   max_tokens: number;
   messages: ClaudeMessage[];
   system?: string | ClaudeContentBlockText[];
-  stream: true;
+  stream: boolean;
   tools?: ClaudeToolDefinition[];
-  cache_control?: ClaudeCacheControl;
+  tool_choice?: { type: 'auto' | 'any' };
+  temperature?: number;
+  top_p?: number;
   thinking?: ClaudeThinking;
 }
 
 export interface ClaudeCacheControl {
   type: 'ephemeral';
+  ttl?: '1h';
 }
 
 export interface ClaudeThinking {
@@ -232,4 +260,12 @@ export interface ClaudeStreamEvent {
     input?: unknown;
   };
   index?: number;
+  content?: Array<{
+    type?: string;
+    text?: string;
+    thinking?: string;
+    id?: string;
+    name?: string;
+    input?: unknown;
+  }>;
 }

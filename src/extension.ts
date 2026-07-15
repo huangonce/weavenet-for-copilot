@@ -12,7 +12,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.lm.registerLanguageModelChatProvider(VENDOR, provider),
-    onMetadataChanged(() => provider.refreshModelPicker()),
+    onMetadataChanged(() => void provider.refreshModels().catch(() => provider.refreshModelPicker())),
     vscode.commands.registerCommand('weavenet-copilot.setOpenAIKey', () => provider.configureOpenAIKey()),
     vscode.commands.registerCommand('weavenet-copilot.setChatGPTKey', () => provider.configureChatGPTKey()),
     vscode.commands.registerCommand('weavenet-copilot.setClaudeKey', () => provider.configureClaudeKey()),

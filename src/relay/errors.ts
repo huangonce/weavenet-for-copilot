@@ -3,6 +3,9 @@ export class RelayRequestError extends Error {
     message: string,
     readonly status: number,
     readonly responseKind: 'json' | 'sse' | 'html' | 'text' | 'empty',
+    readonly upstreamCode?: string,
+    readonly upstreamType?: string,
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = 'RelayRequestError';
@@ -27,12 +30,16 @@ export function createRelayRequestError(
 ): RelayRequestError {
   const responseKind = classifyResponse(contentType, body);
   const upstreamMessage = extractUpstreamMessage(body, responseKind);
+  const detail = extractUpstreamDetail(body, responseKind);
 
   if (upstreamMessage && isContextWindowError(upstreamMessage)) {
     return new RelayRequestError(
       "The request exceeds this model's context window. Start a new chat or reduce attached files and workspace context.",
       status,
       responseKind,
+      detail.code,
+      detail.type,
+      detail.requestId,
     );
   }
 
@@ -41,11 +48,11 @@ export function createRelayRequestError(
     const hint = status === 502
       ? ' The upstream connection failed. If this occurred at the end of a long conversation, start a new chat or reduce attached context.'
       : '';
-    return new RelayRequestError(`Relay gateway returned ${statusLabel}.${hint}`, status, responseKind);
+    return new RelayRequestError(`Relay gateway returned ${statusLabel}.${hint}`, status, responseKind, detail.code, detail.type, detail.requestId);
   }
 
-  const detail = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
-  return new RelayRequestError(`Relay request failed: ${statusLabel}${detail}`, status, responseKind);
+  const suffix = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
+  return new RelayRequestError(`Relay request failed: ${statusLabel}${suffix}`, status, responseKind, detail.code, detail.type, detail.requestId);
 }
 
 export function createRelayStreamError(
@@ -116,6 +123,34 @@ function messageFromJson(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function extractUpstreamDetail(
+  body: string,
+  responseKind: RelayRequestError['responseKind'],
+): { code?: string; type?: string; requestId?: string } {
+  if (responseKind !== 'json' && responseKind !== 'sse') return {};
+  const value = responseKind === 'sse'
+    ? body.split(/\r?\n/).find((line) => line.trim().startsWith('data:'))?.trim().slice('data:'.length).trim()
+    : body;
+  if (!value) return {};
+  try {
+    const payload = JSON.parse(value) as Record<string, unknown>;
+    const error = payload.error && typeof payload.error === 'object'
+      ? payload.error as Record<string, unknown>
+      : payload;
+    return {
+      code: stringField(error.code),
+      type: stringField(error.type),
+      requestId: stringField(error.request_id) ?? stringField(payload.request_id),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? truncate(value.trim(), 100) : undefined;
 }
 
 function findMessage(value: unknown, depth = 0): string | undefined {
