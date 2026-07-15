@@ -13,6 +13,13 @@ export interface AbortContext {
   dispose(): void;
 }
 
+export interface JsonResponse<T> {
+  readonly value: T;
+  readonly status: number;
+  readonly contentType: string;
+  readonly requestId?: string;
+}
+
 export async function throwIfNotOk(response: Response): Promise<void> {
   if (response.ok) {
     return;
@@ -24,6 +31,7 @@ export async function throwIfNotOk(response: Response): Promise<void> {
     response.statusText,
     response.headers.get('content-type') ?? '',
     text,
+    response.headers.get('x-request-id') ?? undefined,
   );
 }
 
@@ -74,6 +82,16 @@ export async function fetchJsonWithRetry<T>(
   token?: CancellationToken,
   maxBodyBytes = 10 * 1024 * 1024,
 ): Promise<T> {
+  return (await fetchJsonWithRetryMetadata<T>(url, init, timeoutMs, token, maxBodyBytes)).value;
+}
+
+export async function fetchJsonWithRetryMetadata<T>(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  token?: CancellationToken,
+  maxBodyBytes = 10 * 1024 * 1024,
+): Promise<JsonResponse<T>> {
   const method = (init.method ?? 'GET').toUpperCase();
   if (method !== 'GET') {
     throw new Error(`fetchJsonWithRetry only supports GET requests, received ${method}.`);
@@ -96,7 +114,7 @@ async function fetchJsonOnce<T>(
   timeoutMs: number,
   token?: CancellationToken,
   maxBodyBytes = 10 * 1024 * 1024,
-): Promise<T> {
+): Promise<JsonResponse<T>> {
   const context = createAbortContext(token, timeoutMs);
   try {
     const response = await fetch(url, { ...init, signal: context.signal });
@@ -107,9 +125,15 @@ async function fetchJsonOnce<T>(
         response.statusText,
         response.headers.get('content-type') ?? '',
         body,
+        response.headers.get('x-request-id') ?? undefined,
       );
     }
-    return JSON.parse(body) as T;
+    return {
+      value: JSON.parse(body) as T,
+      status: response.status,
+      contentType: response.headers.get('content-type') ?? 'unknown',
+      requestId: response.headers.get('x-request-id') ?? undefined,
+    };
   } catch (error) {
     if (context.signal.reason instanceof RelayTimeoutError) throw context.signal.reason;
     throw error;

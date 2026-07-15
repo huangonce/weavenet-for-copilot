@@ -52,3 +52,17 @@ export class EventEmitter<T> {
   fire(_value?: T): void {}
   dispose(): void {}
 }
+
+export const window = {
+  showInformationMessage: async (_message: string): Promise<undefined> => undefined,
+};
+
+export const workspace = {
+  getConfiguration: (_section?: string): unknown => ({}),
+};
+
+export enum ConfigurationTarget {
+  Global = 1,
+  Workspace = 2,
+  WorkspaceFolder = 3,
+}

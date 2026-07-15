@@ -2,9 +2,9 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "huangonce",
-  "icon": "images/icon.png",
+  "icon": "resources/icon.png",
   "author": "huangonce",
   "license": "MIT",
   "pricing": "Free",
@@ -51,28 +51,52 @@
     ],
     "commands": [
       {
-        "command": "weavenet-copilot.setOpenAIKey",
-        "title": "%command.setOpenAIKey%"
+        "command": "weavenet-copilot.setRelayKey",
+        "title": "%command.setRelayKey%"
       },
       {
-        "command": "weavenet-copilot.setChatGPTKey",
-        "title": "%command.setChatGPTKey%"
+        "command": "weavenet-copilot.clearRelayKey",
+        "title": "%command.clearRelayKey%"
       },
       {
-        "command": "weavenet-copilot.setClaudeKey",
-        "title": "%command.setClaudeKey%"
+        "command": "weavenet-copilot.switchProfile",
+        "title": "%command.switchProfile%"
       },
       {
-        "command": "weavenet-copilot.clearOpenAIKey",
-        "title": "%command.clearOpenAIKey%"
+        "command": "weavenet-copilot.createProfile",
+        "title": "%command.createProfile%"
       },
       {
-        "command": "weavenet-copilot.clearChatGPTKey",
-        "title": "%command.clearChatGPTKey%"
+        "command": "weavenet-copilot.addConnection",
+        "title": "%command.addConnection%"
       },
       {
-        "command": "weavenet-copilot.clearClaudeKey",
-        "title": "%command.clearClaudeKey%"
+        "command": "weavenet-copilot.editConnection",
+        "title": "%command.editConnection%"
+      },
+      {
+        "command": "weavenet-copilot.copyConnection",
+        "title": "%command.copyConnection%"
+      },
+      {
+        "command": "weavenet-copilot.deleteConnection",
+        "title": "%command.deleteConnection%"
+      },
+      {
+        "command": "weavenet-copilot.clearAllConnections",
+        "title": "%command.clearAllConnections%"
+      },
+      {
+        "command": "weavenet-copilot.testConnection",
+        "title": "%command.testConnection%"
+      },
+      {
+        "command": "weavenet-copilot.setDefaultConnection",
+        "title": "%command.setDefaultConnection%"
+      },
+      {
+        "command": "weavenet-copilot.manageConnections",
+        "title": "%command.manageConnections%"
       },
       {
         "command": "weavenet-copilot.refreshModels",
@@ -94,10 +118,92 @@
     "configuration": {
       "title": "%configuration.title%",
       "properties": {
-        "weavenet-copilot.baseUrl": {
+        "weavenet-copilot.activeProfile": {
           "type": "string",
-          "default": "https://hk-sub2api.huangonce.com/v1",
-          "description": "%configuration.baseUrl.description%"
+          "default": "",
+          "scope": "application",
+          "description": "%configuration.activeProfile.description%"
+        },
+        "weavenet-copilot.profiles": {
+          "type": "array",
+          "default": [],
+          "scope": "application",
+          "description": "%configuration.profiles.description%",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "baseUrl"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "baseUrl": {
+                "type": "string"
+              },
+              "requestHeaders": {
+                "type": "object"
+              },
+              "includeModels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "excludeModels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "models": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "route"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "route": {
+                      "type": "string",
+                      "enum": [
+                        "openai",
+                        "chatgpt",
+                        "claude"
+                      ]
+                    },
+                    "maxInputTokens": {
+                      "type": "number",
+                      "minimum": 1
+                    },
+                    "maxOutputTokens": {
+                      "type": "number",
+                      "minimum": 1
+                    },
+                    "toolCalling": {
+                      "type": "boolean"
+                    },
+                    "imageInput": {
+                      "type": "boolean"
+                    },
+                    "thinking": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
         },
         "weavenet-copilot.anthropicVersion": {
           "type": "string",
@@ -305,6 +411,7 @@
     "watch": "npm run clean && tsc -watch -p ./",
     "test": "vitest run",
     "test:watch": "vitest",
+    "package:list": "vsce ls",
     "package": "vsce package",
     "publish:marketplace": "vsce publish --skip-duplicate"
   },

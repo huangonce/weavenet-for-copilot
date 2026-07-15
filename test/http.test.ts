@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJsonWithRetry, readWithIdleTimeout } from '../src/relay/http';
+import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, readWithIdleTimeout } from '../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -45,6 +45,18 @@ describe('relay HTTP safety', () => {
       }));
     await expect(fetchJsonWithRetry('https://example.test/models', {}, 100)).resolves.toEqual({ data: [] });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns safe HTTP response metadata for a successful model request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_models' },
+    }));
+    await expect(fetchJsonWithRetryMetadata('https://example.test/models', {}, 100)).resolves.toEqual({
+      value: { data: [] },
+      status: 200,
+      contentType: 'application/json',
+      requestId: 'req_models',
+    });
   });
 
   it('cancels while reading a JSON body without retrying', async () => {

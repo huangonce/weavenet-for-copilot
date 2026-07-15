@@ -1,6 +1,6 @@
 # WeaveNet for Copilot
 
-把你自己的 sub2api 中转站模型接入 GitHub Copilot Chat 的模型选择器，同时保持 Claude 走 Claude 原生协议、其他模型走 OpenAI 协议。
+把你的 OpenAI 兼容 AI Relay 模型接入 GitHub Copilot Chat 的模型选择器，同时保持 Claude 走 Claude 原生协议、其他模型走 OpenAI 协议。
 
 ## 项目结构
 
@@ -8,7 +8,7 @@
 src/
   extension.ts       VS Code 激活与命令注册
   constants.ts       扩展常量与 SecretStorage key
-  auth/              OpenAI、ChatGPT、Claude API Key 管理
+  auth/              Relay API Key 管理
   config/            VS Code 配置读取与校验
   copilot/           Copilot provider 与请求转换
   relay/             中转站 HTTP/SSE 客户端、模型与协议类型
@@ -18,39 +18,45 @@ src/
 ## 使用方式
 
 1. 安装本地 VSIX 扩展。
-2. 默认中转站地址是 `https://hk-sub2api.huangonce.com/v1`。如需使用原入口或其他部署地址，再修改 `weavenet-copilot.baseUrl`。
-3. 在 sub2api 里创建三个用户密钥：
-   - OpenAI 密钥：绑定 `aixroute openai` 分组，只包含非 `gpt-*`、非 `claude-*` 模型。
-   - ChatGPT 密钥：绑定 GPT 专用分组，只包含 `gpt-*` 模型。
-   - Claude 密钥：绑定 `aixroute claude` 分组。
-4. 在 VS Code 命令面板运行 `WeaveNet: Set OpenAI API Key`，填入 OpenAI 分组密钥。
-5. 运行 `WeaveNet: Set ChatGPT API Key`，填入 GPT 分组密钥。
-6. 运行 `WeaveNet: Set Claude API Key`，填入 Claude 分组密钥。
-7. 运行 `WeaveNet: Refresh Models`，然后在 Copilot Chat 模型选择器里选择 `WeaveNet ...` 模型。
-8. 需要立即更新 OpenRouter 能力目录时，运行 `WeaveNet: Refresh Model Metadata`。
+2. 在你的 Relay 中创建一把可访问所需模型的 API Key。
+3. 首次启动时，扩展会显示一次非阻塞提示；点击 **Add Relay Connection**，输入连接名称、Relay Base URL 和 API Key。也可在命令面板运行 `WeaveNet: Add Relay Connection`。
+4. 运行 `WeaveNet: Refresh Models`，然后在 Copilot Chat 模型选择器里选择 `WeaveNet ...` 模型。
+5. 需要立即更新 OpenRouter 能力目录时，运行 `WeaveNet: Refresh Model Metadata`。
+
+### Relay 连接管理
+
+可用配置档在工作、中转站或模型集之间快速切换，而不必反复改写设置：
+
+1. 在命令面板运行 `WeaveNet: Add Relay Connection`，依次填写名称、Relay API 地址和 API Key。
+2. 使用 `WeaveNet: Manage Relay Connections` 新增、编辑、复制、测试、删除连接或设置默认连接。状态栏会显示当前连接和模型刷新状态。
+
+每个连接可选地覆盖 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接只有一把 Relay API Key，密钥不会写入 `settings.json`，而是按连接隔离存储在 VS Code SecretStorage。复制连接不会复制其 API Key。
 
 ## 命令
 
-- `WeaveNet: Set OpenAI API Key`：设置非 GPT、非 Claude 模型使用的 OpenAI 分组密钥。
-- `WeaveNet: Set ChatGPT API Key`：设置 `gpt-*` 模型使用的 GPT 专用分组密钥。
-- `WeaveNet: Set Claude API Key`：设置 Claude 原生 `/messages` 协议使用的分组密钥。
-- `WeaveNet: Clear OpenAI API Key`：删除已保存的 OpenAI 分组密钥。
-- `WeaveNet: Clear ChatGPT API Key`：删除已保存的 GPT 专用分组密钥。
-- `WeaveNet: Clear Claude API Key`：删除已保存的 Claude 分组密钥。
-- `WeaveNet: Refresh Models`：重新从三个分组拉取模型列表。
+- `WeaveNet: Add Relay Connection`：新建 Relay 连接，收集地址和 API Key 后自动设为默认连接。
+- `WeaveNet: Manage Relay Connections`：打开连接管理菜单。
+- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、额外请求头、模型过滤规则和固定模型。改名时会迁移该连接的 API Key。
+- `WeaveNet: Copy Relay Connection`：复制不含 API Key 的连接配置。
+- `WeaveNet: Test Relay Connection`：通过 `/models` 测试地址、认证和模型发现；发现 `claude-*` 模型时也会以最小请求验证 Claude `/messages`。结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。
+- `WeaveNet: Set Default Relay Connection`：选择 Copilot 使用的连接。
+- `WeaveNet: Delete Relay Connection`：永久删除连接配置及其 API Key。
+- `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
+- `WeaveNet: Set Relay API Key`：设置当前连接的唯一 API Key。
+- `WeaveNet: Clear Relay API Key`：删除当前连接的 API Key。
+- `WeaveNet: Refresh Models`：使用当前 Relay API Key 刷新模型列表。
 - `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
 - `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
 - `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
 
 ## 协议路由
 
-插件会用三个密钥分别拉取模型列表，并在本地合并展示：
+插件使用当前 Relay 的同一把 API Key 获取模型，并按模型协议发送请求：
 
-- `gpt-*` 模型：走 `POST /chat/completions`，使用 ChatGPT 分组密钥。
-- 其他非 `claude-*` 模型：走 `POST /chat/completions`，使用 OpenAI 分组密钥。
-- `claude-*` 模型：走 Anthropic-compatible `POST /messages`，使用 Claude 分组密钥。
+- OpenAI 兼容模型：走 `POST /chat/completions`，使用 `Authorization: Bearer` 认证。
+- Claude 模型：走 Anthropic-compatible `POST /messages`，使用 `x-api-key` 认证。
 
-这样可以避免 Claude 模型被错误地转成 OpenAI 协议，减少缓存或原生能力失效的问题。
+同一把密钥只因目标协议不同而采用对应的请求头；这样可避免 Claude 模型被错误地转成 OpenAI 协议，减少缓存或原生能力失效的问题。
 
 ## 模型能力与参考价格
 
@@ -62,7 +68,8 @@ src/
 
 ## 常用设置
 
-- `weavenet-copilot.baseUrl`：sub2api API 地址，默认 `https://hk-sub2api.huangonce.com/v1`。为迁移旧默认值，显式配置的旧默认入口会自动更新为香港入口；其他自定义地址保持不变。
+- `weavenet-copilot.activeProfile`：当前使用的 Relay 连接名称；仅全局保存，且仅在没有任何连接时为空。
+- `weavenet-copilot.profiles`：全局保存的 Relay 连接列表。每项至少包含 `name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
@@ -90,6 +97,10 @@ src/
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 
 API Key 会存储在 VS Code SecretStorage 中。
+
+请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；这两个命令会同时清除对应 API Key。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
+
+从旧版单一 Relay 配置首次升级到连接配置档版本时，扩展会执行一次性清理：删除旧版顶层 Base URL 与旧版 API Key，并要求重新创建 Relay 连接。完成标记保存在 VS Code 全局状态中，后续升级不会重复执行，也不会删除新版连接配置或连接专属 API Key。
 
 ## 隐私与安全
 

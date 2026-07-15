@@ -31,10 +31,12 @@ export function createRelayRequestError(
   statusText: string,
   contentType: string,
   body: string,
+  responseRequestId?: string,
 ): RelayRequestError {
   const responseKind = classifyResponse(contentType, body);
   const upstreamMessage = extractUpstreamMessage(body, responseKind);
   const detail = extractUpstreamDetail(body, responseKind);
+  const requestId = detail.requestId ?? normalizeRequestId(responseRequestId);
 
   if (upstreamMessage && isContextWindowError(upstreamMessage)) {
     return new RelayRequestError(
@@ -43,7 +45,7 @@ export function createRelayRequestError(
       responseKind,
       detail.code,
       detail.type,
-      detail.requestId,
+      requestId,
     );
   }
 
@@ -52,11 +54,11 @@ export function createRelayRequestError(
     const hint = status === 502
       ? ' The upstream connection failed. If this occurred at the end of a long conversation, start a new chat or reduce attached context.'
       : '';
-    return new RelayRequestError(`Relay gateway returned ${statusLabel}.${hint}`, status, responseKind, detail.code, detail.type, detail.requestId);
+    return new RelayRequestError(`Relay gateway returned ${statusLabel}.${hint}`, status, responseKind, detail.code, detail.type, requestId);
   }
 
   const suffix = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
-  return new RelayRequestError(`Relay request failed: ${statusLabel}${suffix}`, status, responseKind, detail.code, detail.type, detail.requestId);
+  return new RelayRequestError(`Relay request failed: ${statusLabel}${suffix}`, status, responseKind, detail.code, detail.type, requestId);
 }
 
 export function createRelayStreamError(
@@ -184,6 +186,10 @@ function detailFromValue(value: unknown): { code?: string; type?: string; reques
 
 function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? truncate(value.trim(), 100) : undefined;
+}
+
+function normalizeRequestId(value: string | undefined): string | undefined {
+  return value ? stringField(value) : undefined;
 }
 
 function findMessage(value: unknown, depth = 0): string | undefined {

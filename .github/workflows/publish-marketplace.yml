@@ -38,6 +38,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Inspect extension package contents
+        run: npm run package:list
+
       - name: Package extension
         run: npm run package -- --out weavenet-for-copilot.vsix
 

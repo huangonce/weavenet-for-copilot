@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.0 - 2026-07-15
+
+- Replaced the built-in Default Relay with named Relay connections, including add, edit, copy, test, delete, clear-all, and set-default workflows with isolated SecretStorage API keys.
+- Added visible connection status and structured connection diagnostics for safe endpoints, HTTP status, response type, request IDs, and Claude `/messages` compatibility.
+- Replaced ambiguous legacy Relay migration with a one-time reset of the pre-profile Base URL and legacy API keys. Existing profile connections and profile-scoped keys are never removed by this upgrade step.
+- Moved the extension icon to `resources`, tightened the VSIX contents, and added package-content inspection to Marketplace publishing.
+
 ## 0.2.1 - 2026-07-15
 
 - Increased the default relay response-header timeout from 60 to 120 seconds for slower reasoning and long-context requests.

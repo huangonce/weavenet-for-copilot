@@ -43,4 +43,13 @@ describe('model routing', () => {
       toolCalling: true,
     });
   });
+
+  it('routes each model from a single discovery catalog by its protocol', () => {
+    const models = [
+      toRoutedModel({ id: 'gpt-5.4' }, 'openai', 'openai'),
+      toRoutedModel({ id: 'claude-sonnet-4' }, 'claude', 'openai'),
+    ];
+    expect(models.map((model) => model.protocol)).toEqual(['openai', 'claude']);
+    expect(models.map((model) => model.route)).toEqual(['openai', 'openai']);
+  });
 });

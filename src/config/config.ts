@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { CONFIG_SECTION, DEFAULT_BASE_URL, LEGACY_BASE_URL } from '../constants';
+import { CONFIG_SECTION } from '../constants';
 
 export interface ConfiguredModel {
   id: string;
@@ -12,7 +12,17 @@ export interface ConfiguredModel {
   thinking?: boolean;
 }
 
+export interface ConnectionProfile {
+  name: string;
+  baseUrl: string;
+  requestHeaders?: Record<string, string>;
+  includeModels?: string[];
+  excludeModels?: string[];
+  models?: ConfiguredModel[];
+}
+
 export interface ExtensionConfig {
+  profileName?: string;
   baseUrl: string;
   anthropicVersion: string;
   openaiPromptCaching: boolean;
@@ -39,11 +49,19 @@ export interface ExtensionConfig {
   models: ConfiguredModel[];
 }
 
+export interface ProfileConfiguration {
+  activeProfile: string;
+  profiles: ConnectionProfile[];
+}
+
 export function getConfig(): ExtensionConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  const { activeProfile, profiles } = getProfileConfiguration();
+  const connection = selectActiveProfile(profiles, activeProfile);
 
   return {
-    baseUrl: normalizeBaseUrl(config.get<string>('baseUrl') ?? ''),
+    profileName: connection?.name,
+    baseUrl: connection?.baseUrl ?? '',
     anthropicVersion: (config.get<string>('anthropicVersion') ?? '2023-06-01').trim() || '2023-06-01',
     openaiPromptCaching: config.get<boolean>('openaiPromptCaching') ?? true,
     openaiPromptCacheKey: (config.get<string>('openaiPromptCacheKey') ?? '').trim(),
@@ -55,8 +73,8 @@ export function getConfig(): ExtensionConfig {
     streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
     debug: config.get<boolean>('debug') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
-    includeModels: compileRegexList(config.get<string[]>('includeModels') ?? []),
-    excludeModels: compileRegexList(config.get<string[]>('excludeModels') ?? []),
+    includeModels: compileRegexList(connection?.includeModels ?? []),
+    excludeModels: compileRegexList(connection?.excludeModels ?? []),
     maxInputTokens: Math.max(1, config.get<number>('maxInputTokens') ?? 128000),
     maxOutputTokens: Math.max(1, config.get<number>('maxOutputTokens') ?? 16384),
     sendMaxTokens: config.get<boolean>('sendMaxTokens') ?? false,
@@ -65,46 +83,19 @@ export function getConfig(): ExtensionConfig {
     imageInputModels: compileRegexList(config.get<string[]>('imageInputModels') ?? []),
     disabledImageInputModels: compileRegexList(config.get<string[]>('disabledImageInputModels') ?? []),
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
-    requestHeaders: normalizeHeaders(config.get<Record<string, unknown>>('requestHeaders') ?? {}),
-    models: normalizeModels(config.get<unknown[]>('models') ?? []),
+    requestHeaders: connection?.requestHeaders ?? {},
+    models: connection?.models ?? [],
   };
 }
 
-/**
- * Migrates only the former bundled endpoint. Other user-selected endpoints
- * remain untouched, including workspace-specific overrides.
- */
-export async function migrateLegacyBaseUrl(): Promise<boolean> {
-  let migrated = false;
-  const migrate = async (
-    configuration: vscode.WorkspaceConfiguration,
-    target: vscode.ConfigurationTarget,
-    value: unknown,
-  ): Promise<void> => {
-    if (typeof value !== 'string' || normalizeBaseUrl(value) !== LEGACY_BASE_URL) {
-      return;
-    }
-
-    await configuration.update('baseUrl', DEFAULT_BASE_URL, target);
-    migrated = true;
+export function getProfileConfiguration(): ProfileConfiguration {
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  const profiles = normalizeConnectionProfiles(config.inspect<unknown[]>('profiles')?.globalValue ?? []);
+  const activeProfile = selectActiveProfile(profiles, config.inspect<string>('activeProfile')?.globalValue ?? '');
+  return {
+    activeProfile: activeProfile?.name ?? profiles[0]?.name ?? '',
+    profiles,
   };
-
-  const globalConfiguration = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  const globalInspection = globalConfiguration.inspect<string>('baseUrl');
-  await migrate(globalConfiguration, vscode.ConfigurationTarget.Global, globalInspection?.globalValue);
-  await migrate(globalConfiguration, vscode.ConfigurationTarget.Workspace, globalInspection?.workspaceValue);
-
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const folderConfiguration = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
-    const folderInspection = folderConfiguration.inspect<string>('baseUrl');
-    await migrate(
-      folderConfiguration,
-      vscode.ConfigurationTarget.WorkspaceFolder,
-      folderInspection?.workspaceFolderValue,
-    );
-  }
-
-  return migrated;
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -166,6 +157,49 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
     });
   }
   return models;
+}
+
+export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfile[] {
+  const profiles: ConnectionProfile[] = [];
+  const seenNames = new Set<string>();
+  for (const value of values) {
+    if (!value || typeof value !== 'object') continue;
+    const record = value as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    const baseUrl = typeof record.baseUrl === 'string' ? normalizeBaseUrl(record.baseUrl) : '';
+    if (!name || !baseUrl || seenNames.has(name)) continue;
+    seenNames.add(name);
+    const includeModels = stringArray(record.includeModels);
+    const excludeModels = stringArray(record.excludeModels);
+    const models = Array.isArray(record.models) ? normalizeModels(record.models) : undefined;
+    profiles.push({
+      name,
+      baseUrl,
+      requestHeaders: objectHeaders(record.requestHeaders),
+      includeModels,
+      excludeModels,
+      models,
+    });
+  }
+  return profiles;
+}
+
+export function selectActiveProfile(
+  profiles: readonly ConnectionProfile[],
+  activeProfileName: string,
+): ConnectionProfile | undefined {
+  const name = activeProfileName.trim();
+  return name ? profiles.find((profile) => profile.name === name) : undefined;
+}
+
+function objectHeaders(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return normalizeHeaders(value as Record<string, unknown>);
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
 }
 
 function positiveNumber(value: unknown): number | undefined {

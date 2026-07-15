@@ -7,10 +7,13 @@ import {
   CONFIG_SECTION,
   LEGACY_API_KEY_SECRET,
   OPENAI_API_KEY_SECRET,
+  RELAY_API_KEY_SECRET,
 } from '../constants';
 import { clampClaudeTemperature, convertClaudeMessages, convertClaudeTools } from '../relay/claude';
 import { RelayClient } from '../relay/client';
+import { RelayEndpointTestResult } from '../relay/client';
 import { RelayRequestError, RelayStreamError } from '../relay/errors';
+import { RelayTimeoutError } from '../relay/http';
 import {
   assignUniquePickerIds,
   enrichModelsWithMetadata,
@@ -52,8 +55,37 @@ interface RequestDiagnostics {
   failed(error: unknown): void;
 }
 
+export interface ConnectionStatus {
+  connectionName?: string;
+  host?: string;
+  phase: 'unconfigured' | 'keyMissing' | 'refreshing' | 'ready' | 'degraded' | 'error';
+  modelCount: number;
+  checkedAt?: number;
+  message?: string;
+}
+
+export interface ConnectionTestResult {
+  connectionName: string;
+  host: string;
+  modelCount: number;
+  elapsedMs: number;
+  endpoint: string;
+  models: RelayEndpointTestResult;
+  claudeMessages?: RelayEndpointTestResult;
+  claudeMessagesError?: ConnectionTestFailure;
+}
+
+export interface ConnectionTestFailure {
+  readonly category: 'url' | 'network' | 'timeout' | 'authentication' | 'notFound' | 'rateLimited' | 'server' | 'http' | 'unknown';
+  readonly message: string;
+  readonly status?: number;
+  readonly responseType?: RelayRequestError['responseKind'];
+  readonly requestId?: string;
+}
+
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
+  private readonly connectionStatusEmitter = new vscode.EventEmitter<ConnectionStatus>();
   private readonly output = vscode.window.createOutputChannel('WeaveNet');
   private readonly auth: AuthManager;
   private cachedModels: RoutedModel[] = [];
@@ -61,13 +93,18 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private refreshModelsTask: Promise<void> | undefined;
   private modelRefreshGeneration = 0;
   private readonly refreshWarnings = new Set<string>();
+  private cacheConnectionName: string | undefined;
+  private lastRefreshPartial = false;
+  private connectionStatus: ConnectionStatus = { phase: 'unconfigured', modelCount: 0 };
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
+  readonly onDidChangeConnectionStatus = this.connectionStatusEmitter.event;
 
   constructor(context: vscode.ExtensionContext) {
     this.auth = new AuthManager(context.secrets);
     context.subscriptions.push(
       this.changeEmitter,
+      this.connectionStatusEmitter,
       this.output,
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(CONFIG_SECTION)) {
@@ -75,53 +112,105 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         }
       }),
       context.secrets.onDidChange((event) => {
-        if (
-          event.key === OPENAI_API_KEY_SECRET ||
-          event.key === CHATGPT_API_KEY_SECRET ||
-          event.key === CLAUDE_API_KEY_SECRET ||
-          event.key === LEGACY_API_KEY_SECRET
-        ) {
+        if (isWeaveNetSecretKey(event.key)) {
           void this.refreshModels();
         }
       }),
     );
   }
 
-  async configureOpenAIKey(): Promise<void> {
-    if (await this.auth.promptForApiKey('openai')) {
+  async configureRelayKey(): Promise<void> {
+    if (await this.promptForRelayKey(getConfig().profileName)) {
       await this.refreshModels();
     }
   }
 
-  async configureClaudeKey(): Promise<void> {
-    if (await this.auth.promptForApiKey('claude')) {
-      await this.refreshModels();
+  async promptForRelayKey(profileName?: string): Promise<boolean> {
+    return this.auth.promptForApiKey(profileName);
+  }
+
+  async hasRelayKey(profileName?: string): Promise<boolean> {
+    return this.auth.hasApiKey(profileName);
+  }
+
+  async moveRelayKey(fromProfileName: string | undefined, toProfileName: string): Promise<boolean> {
+    return this.auth.moveApiKey(fromProfileName, toProfileName);
+  }
+
+  async clearRelayKey(): Promise<void> {
+    await this.auth.clearApiKey(getConfig().profileName);
+    await this.refreshModels();
+  }
+
+  async clearRelayKeyForProfile(profileName: string): Promise<void> {
+    await this.auth.clearProfileApiKey(profileName);
+  }
+
+  async clearAllRelayKeys(profileNames: readonly string[]): Promise<void> {
+    await this.auth.clearAllRelayApiKeys(profileNames);
+  }
+
+  async testConnection(profileName: string, baseUrl: string, requestHeaders: Record<string, string> = {}): Promise<ConnectionTestResult> {
+    const host = safeHost(baseUrl) ?? 'unknown host';
+    const endpoint = safeEndpoint(baseUrl, '/models');
+    if (!safeHost(baseUrl)) {
+      throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must be a valid http(s) URL.' });
     }
-  }
-
-  async configureChatGPTKey(): Promise<void> {
-    if (await this.auth.promptForApiKey('chatgpt')) {
-      await this.refreshModels();
+    const apiKey = await this.auth.getApiKey(profileName);
+    if (!apiKey) {
+      this.setConnectionStatus({ connectionName: profileName, host, phase: 'keyMissing', modelCount: 0 });
+      throw new ConnectionTestError({ category: 'authentication', message: 'API key is required for this connection.' });
     }
-  }
-
-  async clearOpenAIKey(): Promise<void> {
-    await this.auth.clearApiKey('openai');
-    await this.refreshModels();
-  }
-
-  async clearClaudeKey(): Promise<void> {
-    await this.auth.clearApiKey('claude');
-    await this.refreshModels();
-  }
-
-  async clearChatGPTKey(): Promise<void> {
-    await this.auth.clearApiKey('chatgpt');
-    await this.refreshModels();
+    const startedAt = Date.now();
+    try {
+      const client = new RelayClient({
+        baseUrl,
+        apiKey,
+        requestHeaders,
+        requestTimeoutMs: getConfig().requestTimeoutMs,
+        streamIdleTimeoutMs: getConfig().streamIdleTimeoutMs,
+      });
+      const { models, diagnostic } = await client.testModels();
+      const modelCount = Array.isArray(models.data) ? models.data.length : 0;
+      const claudeModel = models.data?.find((model) => isClaudeModel(model.id));
+      let claudeMessages: RelayEndpointTestResult | undefined;
+      let claudeMessagesError: ConnectionTestFailure | undefined;
+      if (claudeModel) {
+        try {
+          claudeMessages = await client.testClaudeMessages(claudeModel.id);
+        } catch (error) {
+          claudeMessagesError = describeConnectionTestError(error);
+        }
+      }
+      const result = { connectionName: profileName, host, modelCount, elapsedMs: Date.now() - startedAt, endpoint, models: diagnostic, claudeMessages, claudeMessagesError };
+      this.setConnectionStatus({ connectionName: profileName, host, phase: 'ready', modelCount, checkedAt: Date.now() });
+      return result;
+    } catch (error) {
+      const failure = describeConnectionTestError(error);
+      this.setConnectionStatus({ connectionName: profileName, host, phase: 'error', modelCount: 0, checkedAt: Date.now(), message: failure.message });
+      throw new ConnectionTestError(failure);
+    }
   }
 
   async refreshModels(): Promise<void> {
     this.modelRefreshGeneration++;
+    const config = getConfig();
+    const connectionChanged = config.profileName !== this.cacheConnectionName;
+    if (connectionChanged) {
+      this.cachedModels = [];
+      this.routeModelSnapshots.clear();
+      this.cacheConnectionName = config.profileName;
+      this.changeEmitter.fire();
+    }
+    if (!config.profileName || !config.baseUrl) {
+      this.setConnectionStatus({ phase: 'unconfigured', modelCount: 0 });
+      return;
+    }
+    if (!await this.auth.hasApiKey(config.profileName)) {
+      this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'keyMissing', modelCount: 0 });
+      return;
+    }
+    this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'refreshing', modelCount: this.cachedModels.length });
     if (this.refreshModelsTask) {
       return this.refreshModelsTask;
     }
@@ -141,6 +230,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         await this.refreshModelsInternal(generation);
       } catch (error) {
         if (generation === this.modelRefreshGeneration) {
+          const config = getConfig();
+          this.setConnectionStatus({
+            ...connectionStatusFor(config),
+            phase: 'error',
+            modelCount: 0,
+            checkedAt: Date.now(),
+            message: connectionErrorMessage(error),
+          });
           throw error;
         }
       }
@@ -162,6 +259,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     this.cachedModels = models;
+    this.cacheConnectionName = config.profileName;
+    this.setConnectionStatus({
+      ...connectionStatusFor(config),
+      phase: this.lastRefreshPartial ? 'degraded' : 'ready',
+      modelCount: models.length,
+      checkedAt: Date.now(),
+      message: this.lastRefreshPartial ? 'Some Relay model routes could not be refreshed.' : undefined,
+    });
     this.changeEmitter.fire();
     vscode.window.showInformationMessage(`WeaveNet loaded ${this.cachedModels.length} model(s).`);
   }
@@ -171,6 +276,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
     const config = getConfig();
+
+    if (this.cacheConnectionName !== config.profileName) {
+      this.cachedModels = [];
+      this.routeModelSnapshots.clear();
+      this.cacheConnectionName = config.profileName;
+    }
 
     if (this.cachedModels.length === 0 && config.baseUrl) {
       const generation = this.modelRefreshGeneration;
@@ -186,10 +297,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       }
     }
 
-    const keyAvailability = new Map<RoutedModel['route'], boolean>(await Promise.all(
-      (['openai', 'chatgpt', 'claude'] as const).map(async (route) => [route, await this.auth.hasApiKey(route)] as const),
-    ));
-    return this.cachedModels.map((model) => toChatInformation(model, config, keyAvailability.get(model.route) === true));
+    const hasApiKey = await this.auth.hasApiKey(config.profileName);
+    return this.cachedModels.map((model) => toChatInformation(model, config, hasApiKey));
   }
 
   async provideLanguageModelChatResponse(
@@ -201,7 +310,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   ): Promise<void> {
     const config = getConfig();
     if (!config.baseUrl) {
-      throw new Error('weavenet-copilot.baseUrl is not configured.');
+      throw new Error('No WeaveNet Relay connection is configured.');
+    }
+    if (this.cacheConnectionName !== config.profileName) {
+      throw new Error('The active Relay connection changed. Refresh models and select a model again.');
     }
 
     const routedModel = this.cachedModels.find((entry) => entry.pickerId === model.id);
@@ -232,11 +344,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!routedModel) {
       throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
     }
-    const protocol = routedModel.route;
-    const apiKey = await this.auth.getApiKey(protocol);
+    const apiKey = await this.auth.getApiKey(config.profileName);
     if (!apiKey) {
-      const command = protocol === 'chatgpt' ? 'WeaveNet: Set ChatGPT API Key' : 'WeaveNet: Set OpenAI API Key';
-      throw new Error(`WeaveNet ${protocol === 'chatgpt' ? 'ChatGPT' : 'OpenAI'} API key is not configured. Run ${command}.`);
+      throw new Error('WeaveNet Relay API key is not configured. Run WeaveNet: Set Relay API Key.');
     }
 
     const tools = !routedModel || supportsToolCallingForModel(routedModel, config)
@@ -333,9 +443,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!routedModel) {
       throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
     }
-    const apiKey = await this.auth.getApiKey(routedModel.route);
+    const apiKey = await this.auth.getApiKey(config.profileName);
     if (!apiKey) {
-      throw new Error('WeaveNet Claude API key is not configured. Run WeaveNet: Set Claude API Key.');
+      throw new Error('WeaveNet Relay API key is not configured. Run WeaveNet: Set Relay API Key.');
     }
 
     const converted = convertClaudeMessages(messages, {
@@ -425,6 +535,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
   refreshModelPicker(): void {
     this.changeEmitter.fire();
+  }
+
+  getConnectionStatus(): ConnectionStatus {
+    return this.connectionStatus;
   }
 
   logMetadata(message: string): void {
@@ -561,31 +675,13 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     const refreshMs = config.metadataRefreshHours * 3_600_000;
     void scheduleOpenRouterRefresh(refreshMs);
 
-    const [openaiKey, chatgptKey, claudeKey] = await Promise.all([
-      this.auth.getApiKey('openai'),
-      this.auth.getApiKey('chatgpt'),
-      this.auth.getApiKey('claude'),
-    ]);
+    const apiKey = await this.auth.getApiKey(config.profileName);
     const routes: Array<{ readonly name: RoutedModel['route']; readonly task: Promise<RoutedModel[]> }> = [];
 
-    if (openaiKey) {
+    if (apiKey) {
       routes.push({
         name: 'openai',
-        task: this.loadModelsForProtocol('openai', 'openai', openaiKey, config, token)
-            .then((models) => models.filter((model) => !isGPTModel(model.id) && !isClaudeModel(model.id))),
-      });
-    }
-    if (chatgptKey) {
-      routes.push({
-        name: 'chatgpt',
-        task: this.loadModelsForProtocol('openai', 'chatgpt', chatgptKey, config, token)
-          .then((models) => models.filter((model) => isGPTModel(model.id))),
-      });
-    }
-    if (claudeKey) {
-      routes.push({
-        name: 'claude',
-        task: this.loadModelsForProtocol('claude', 'claude', claudeKey, config, token),
+        task: this.loadModelsForProtocol('openai', 'openai', apiKey, config, token),
       });
     }
 
@@ -617,8 +713,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       throw new Error('All model routes failed to refresh.');
     }
 
+    this.lastRefreshPartial = failedRouteCount > 0;
     const routed = assignUniquePickerIds(dedupeModels(loaded));
     return routed;
+  }
+
+  private setConnectionStatus(status: ConnectionStatus): void {
+    this.connectionStatus = status;
+    this.connectionStatusEmitter.fire(status);
   }
 
   private reportRouteRefreshFailure(route: RoutedModel['route'], error: unknown): void {
@@ -657,7 +759,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     });
     const response = await client.listModels(token);
     const routed = (response.data ?? []).map((model: RelayModel) =>
-        toRoutedModel(model, protocol === 'claude' || isClaudeModel(model.id) ? 'claude' : 'openai', route),
+      toRoutedModel(model, isClaudeModel(model.id) ? 'claude' : 'openai', route),
     );
     const filtered = filterModels(enrichModelsWithMetadata(routed), config, protocol);
     this.debug(config, `Models loaded: protocol=${protocol}, count=${filtered.length}, elapsedMs=${Date.now() - startedAt}`);
@@ -683,6 +785,66 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
     return tokens;
   }
+}
+
+function connectionStatusFor(config: ReturnType<typeof getConfig>): Pick<ConnectionStatus, 'connectionName' | 'host'> {
+  return { connectionName: config.profileName, host: safeHost(config.baseUrl) };
+}
+
+function safeHost(baseUrl: string): string | undefined {
+  try {
+    const url = new URL(baseUrl);
+    return (url.protocol === 'https:' || url.protocol === 'http:') ? url.host || undefined : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeEndpoint(baseUrl: string, path: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.search = '';
+    url.hash = '';
+    url.username = '';
+    url.password = '';
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`;
+    return url.toString();
+  } catch {
+    return path;
+  }
+}
+
+export class ConnectionTestError extends Error {
+  constructor(readonly failure: ConnectionTestFailure) {
+    super(failure.message);
+    this.name = 'ConnectionTestError';
+  }
+}
+
+export function describeConnectionTestError(error: unknown): ConnectionTestFailure {
+  if (error instanceof ConnectionTestError) return error.failure;
+  if (error instanceof RelayRequestError) {
+    const common = { status: error.status, responseType: error.responseKind, requestId: error.requestId };
+    if (error.status === 401 || error.status === 403) return { ...common, category: 'authentication', message: 'API key was rejected or lacks permission.' };
+    if (error.status === 404) return { ...common, category: 'notFound', message: 'The Relay does not expose a compatible endpoint at this path.' };
+    if (error.status === 429) return { ...common, category: 'rateLimited', message: 'The Relay is rate-limiting requests. Try again later.' };
+    if (error.status >= 500) return { ...common, category: 'server', message: 'The Relay or its upstream returned a server error.' };
+    return { ...common, category: 'http', message: `The Relay returned HTTP ${error.status}.` };
+  }
+  if (error instanceof RelayTimeoutError) return { category: 'timeout', message: 'The Relay timed out before completing the request.' };
+  if (error instanceof TypeError) return { category: 'network', message: 'Could not reach the Relay. Check the URL, DNS, TLS certificate, proxy, and network connection.' };
+  return { category: 'unknown', message: 'The Relay connection could not be completed.' };
+}
+
+function connectionErrorMessage(error: unknown): string {
+  if (error instanceof RelayRequestError) {
+    if (error.status === 401 || error.status === 403) return 'Authentication was rejected by the Relay.';
+    if (error.status === 404) return 'The Relay does not expose a compatible /models endpoint.';
+    if (error.status === 429) return 'The Relay is rate-limiting requests.';
+    if (error.status >= 500) return 'The Relay or its upstream returned a server error.';
+    return `The Relay returned HTTP ${error.status}.`;
+  }
+  return 'The Relay connection could not be completed.';
 }
 
 function countOpenAIImages(request: ChatRequest): number {
@@ -727,12 +889,33 @@ function isGPTModel(modelId: string): boolean {
   return modelId.toLowerCase().startsWith('gpt-');
 }
 
+function isWeaveNetSecretKey(key: string): boolean {
+  return key === RELAY_API_KEY_SECRET || key.startsWith(`${RELAY_API_KEY_SECRET}.profile.`) || key === LEGACY_API_KEY_SECRET || [
+    OPENAI_API_KEY_SECRET,
+    CHATGPT_API_KEY_SECRET,
+    CLAUDE_API_KEY_SECRET,
+  ].some((secretKey) => key === secretKey);
+}
+
 function formatLogError(error: unknown): string {
   if (error instanceof RelayRequestError) {
-    return `RelayRequestError(status=${error.status}, responseKind=${error.responseKind})`;
+    const details = [
+      `status=${error.status}`,
+      `responseKind=${error.responseKind}`,
+      error.upstreamType ? `upstreamType=${error.upstreamType}` : undefined,
+      error.upstreamCode ? `upstreamCode=${error.upstreamCode}` : undefined,
+      error.requestId ? `requestId=${error.requestId}` : undefined,
+    ].filter(Boolean).join(', ');
+    return `RelayRequestError(${details})`;
   }
   if (error instanceof RelayStreamError) {
-    return `RelayStreamError(protocol=${error.protocol})`;
+    const details = [
+      `protocol=${error.protocol}`,
+      error.upstreamType ? `upstreamType=${error.upstreamType}` : undefined,
+      error.upstreamCode ? `upstreamCode=${error.upstreamCode}` : undefined,
+      error.requestId ? `requestId=${error.requestId}` : undefined,
+    ].filter(Boolean).join(', ');
+    return `RelayStreamError(${details})`;
   }
   const message = error instanceof Error ? error.message : String(error);
   return `${error instanceof Error ? error.name : 'UnknownError'}(${message.replace(/\s+/g, ' ').trim().slice(0, 200)})`;
