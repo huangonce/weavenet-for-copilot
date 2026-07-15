@@ -16,6 +16,10 @@ export class RelayStreamError extends Error {
   constructor(
     message: string,
     readonly protocol: 'OpenAI' | 'Claude',
+    readonly upstreamCode?: string,
+    readonly upstreamType?: string,
+    readonly requestId?: string,
+    readonly rateLimited = false,
   ) {
     super(message);
     this.name = 'RelayStreamError';
@@ -57,17 +61,33 @@ export function createRelayRequestError(
 
 export function createRelayStreamError(
   protocol: RelayStreamError['protocol'],
-  upstreamMessage?: string,
+  upstreamError?: unknown,
 ): RelayStreamError {
+  const detail = detailFromValue(upstreamError);
+  const upstreamMessage = typeof upstreamError === 'string'
+    ? upstreamError
+    : findMessage(upstreamError);
+  const rateLimited = isRateLimited(detail.code, detail.type, upstreamMessage);
   if (upstreamMessage && isContextWindowError(upstreamMessage)) {
     return new RelayStreamError(
       "The request exceeds this model's context window. Start a new chat or reduce attached files and workspace context.",
       protocol,
+      detail.code,
+      detail.type,
+      detail.requestId,
+      rateLimited,
     );
   }
 
-  const detail = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
-  return new RelayStreamError(`Relay ${protocol} stream failed${detail}`, protocol);
+  const messageDetail = upstreamMessage ? ` - ${truncate(upstreamMessage, 300)}` : '';
+  return new RelayStreamError(
+    `Relay ${protocol} stream failed${messageDetail}`,
+    protocol,
+    detail.code,
+    detail.type,
+    detail.requestId,
+    rateLimited,
+  );
 }
 
 export function createIncompleteStreamError(
@@ -149,6 +169,19 @@ function extractUpstreamDetail(
   }
 }
 
+function detailFromValue(value: unknown): { code?: string; type?: string; requestId?: string } {
+  if (!value || typeof value !== 'object') return {};
+  const payload = value as Record<string, unknown>;
+  const error = payload.error && typeof payload.error === 'object'
+    ? payload.error as Record<string, unknown>
+    : payload;
+  return {
+    code: stringField(error.code),
+    type: stringField(error.type),
+    requestId: stringField(error.request_id) ?? stringField(payload.request_id),
+  };
+}
+
 function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? truncate(value.trim(), 100) : undefined;
 }
@@ -168,6 +201,12 @@ function findMessage(value: unknown, depth = 0): string | undefined {
 
 function isContextWindowError(message: string): boolean {
   return /context window|context length|maximum context|input exceeds.*context|too many tokens/i.test(message);
+}
+
+function isRateLimited(code?: string, type?: string, message?: string): boolean {
+  return /rate.?limit|quota|insufficient.?credit|billing|payment.?required/i.test(
+    [code, type, message].filter(Boolean).join(' '),
+  );
 }
 
 function truncate(value: string, limit: number): string {

@@ -51,7 +51,7 @@ export function getConfig(): ExtensionConfig {
     claudePromptCachingTTL: config.get<'5m' | '1h'>('claudePromptCachingTTL') ?? '5m',
     temperature: optionalNumber(config.get<number | null>('temperature'), 0, 2),
     topP: optionalNumber(config.get<number | null>('topP'), 0, 1),
-    requestTimeoutMs: clamp(config.get<number>('requestTimeoutSeconds') ?? 60, 5, 300) * 1000,
+    requestTimeoutMs: clamp(config.get<number>('requestTimeoutSeconds') ?? 120, 5, 300) * 1000,
     streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
     debug: config.get<boolean>('debug') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',

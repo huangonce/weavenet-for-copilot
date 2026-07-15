@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyLastTwoUserCacheControl,
+  clampClaudeTemperature,
+  convertClaudeMessages,
   normalizeClaudeImageMediaType,
   processClaudeFullResponse,
   processClaudeSseLine,
   processClaudeStream,
 } from '../src/relay/claude';
+import * as vscode from 'vscode';
 import type { StreamCallbacks } from '../src/relay/client';
 import type { ClaudeMessage, ToolCall } from '../src/relay/types';
 
@@ -66,6 +69,29 @@ describe('Claude response parsing', () => {
     });
     expect(cb.onProcessingStarted).toHaveBeenCalledWith('Claude');
   });
+
+  it('prefers streamed tool arguments over a non-empty initial input', () => {
+    const cb = callbacks();
+    const state = { parts: 0, started: false };
+    const tools = new Map<number, ToolCall>();
+    processClaudeSseLine('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"search","input":{"stale":true}}}', tools, cb, state);
+    processClaudeSseLine('data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"q\\":\\"docs\\"}"}}', tools, cb, state);
+    processClaudeSseLine('data: {"type":"content_block_stop","index":0}', tools, cb, state);
+    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'search', arguments: '{"q":"docs"}' },
+    }));
+  });
+
+  it('uses initial tool input when no argument delta arrives', () => {
+    const cb = callbacks();
+    const state = { parts: 0, started: false };
+    const tools = new Map<number, ToolCall>();
+    processClaudeSseLine('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"search","input":{"q":"docs"}}}', tools, cb, state);
+    processClaudeSseLine('data: {"type":"content_block_stop","index":0}', tools, cb, state);
+    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'search', arguments: '{"q":"docs"}' },
+    }));
+  });
 });
 
 describe('Claude conversion helpers', () => {
@@ -86,5 +112,40 @@ describe('Claude conversion helpers', () => {
     expect((messages[0].content[0] as { cache_control?: unknown }).cache_control).toBeUndefined();
     expect((messages[2].content[0] as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect((messages[3].content[0] as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('drops orphan and interrupted Claude tool chains while preserving matched parallel results', () => {
+    const assistant = (parts: unknown[]) => ({
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: parts,
+    }) as vscode.LanguageModelChatRequestMessage;
+    const user = (parts: unknown[]) => ({
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: parts,
+    }) as vscode.LanguageModelChatRequestMessage;
+    const converted = convertClaudeMessages([
+      user([new vscode.LanguageModelToolResultPart('orphan', [new vscode.LanguageModelTextPart('ignored')])]),
+      assistant([
+        new vscode.LanguageModelToolCallPart('call_1', 'first', {}),
+        new vscode.LanguageModelToolCallPart('call_2', 'second', {}),
+      ]),
+      user([new vscode.LanguageModelToolResultPart('call_1', [new vscode.LanguageModelTextPart('done')])]),
+      user([new vscode.LanguageModelTextPart('continue without second result')]),
+    ], { supportsImageInput: false });
+
+    expect(converted.messages).toEqual([
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'first', input: {} }] },
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: 'done' },
+        { type: 'text', text: 'continue without second result' },
+      ] },
+    ]);
+  });
+
+  it('clamps Claude temperature to its supported range', () => {
+    expect(clampClaudeTemperature(-0.5)).toBe(0);
+    expect(clampClaudeTemperature(0.7)).toBe(0.7);
+    expect(clampClaudeTemperature(1.5)).toBe(1);
+    expect(clampClaudeTemperature(undefined)).toBeUndefined();
   });
 });

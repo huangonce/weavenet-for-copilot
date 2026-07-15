@@ -41,7 +41,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
   );
 
-  await vscode.extensions.getExtension('github.copilot-chat')?.activate();
+  const copilotChat = vscode.extensions.getExtension('github.copilot-chat');
+  if (copilotChat) {
+    void Promise.resolve(copilotChat.activate()).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      provider.logMetadata(`[copilot-chat] activation failed: ${message.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+    });
+  }
   if (migratedBaseUrl) {
     void vscode.window.showInformationMessage(
       'WeaveNet API endpoint was updated to the Hong Kong gateway for improved connectivity.',

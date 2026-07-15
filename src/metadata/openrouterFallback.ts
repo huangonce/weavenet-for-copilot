@@ -14,6 +14,8 @@ import { getCachedData, scheduleRefresh } from './metadataCache.js';
 
 export const OPENROUTER_CACHE_KEY = 'weavenet.metadata.openrouter.v3';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/models';
+export const OPENROUTER_MAX_BODY_BYTES = 10 * 1024 * 1024;
+export const OPENROUTER_MAX_ENTRIES = 10_000;
 
 interface OpenRouterModel {
   readonly id?: string;
@@ -66,6 +68,7 @@ export function scheduleOpenRouterRefresh(ttlMs: number, force = false): Promise
       url: OPENROUTER_API_URL,
       ttlMs,
       label: 'openrouter',
+      maxBodyBytes: OPENROUTER_MAX_BODY_BYTES,
       parse: (body) => parseOpenRouterResponse(JSON.parse(body) as OpenRouterResponse),
     },
     { force },
@@ -81,6 +84,9 @@ export function scheduleOpenRouterRefresh(ttlMs: number, force = false): Promise
  */
 export function parseOpenRouterResponse(payload: OpenRouterResponse): OpenRouterCatalogEntry[] {
   const models = Array.isArray(payload?.data) ? payload.data : [];
+  if (models.length > OPENROUTER_MAX_ENTRIES) {
+    throw new Error(`OpenRouter catalog exceeds ${OPENROUTER_MAX_ENTRIES} entries`);
+  }
   const entries: OpenRouterCatalogEntry[] = [];
 
   for (const m of models) {
@@ -101,11 +107,13 @@ function toEntry(model: OpenRouterModel): OpenRouterCatalogEntry | undefined {
   const fullId = model.id?.trim();
   const id = fullId ? stripVendor(fullId) : '';
   if (!id) return undefined;
-  const params = new Set(model.supported_parameters ?? []);
-  const inputModalities = new Set(model.architecture?.input_modalities ?? []);
+  const params = new Set(Array.isArray(model.supported_parameters) ? model.supported_parameters.filter(isString) : []);
+  const inputModalities = new Set(Array.isArray(model.architecture?.input_modalities)
+    ? model.architecture.input_modalities.filter(isString)
+    : []);
   const maxInputTokens =
-    model.top_provider?.context_length ?? model.context_length ?? undefined;
-  const maxOutputTokens = model.top_provider?.max_completion_tokens ?? undefined;
+    positiveFinite(model.context_length) ?? positiveFinite(model.top_provider?.context_length);
+  const maxOutputTokens = positiveFinite(model.top_provider?.max_completion_tokens);
   return {
     id,
     fullId: fullId!,
@@ -144,8 +152,41 @@ function toReferencePricing(pricing: OpenRouterModel['pricing']): ReferencePrici
  */
 export function enrichModelsWithOpenRouter(models: RoutedModel[]): RoutedModel[] {
   const entries = getCachedData<OpenRouterCatalogEntry[]>(OPENROUTER_CACHE_KEY);
-  if (!entries || entries.length === 0) return models;
+  if (!isValidCatalog(entries) || entries.length === 0) return models;
   return models.map((model) => enrichModelFromOpenRouter(model, entries));
+}
+
+function isValidCatalog(value: unknown): value is OpenRouterCatalogEntry[] {
+  return Array.isArray(value) && value.length <= OPENROUTER_MAX_ENTRIES && value.every((entry) =>
+    Boolean(entry)
+    && typeof entry === 'object'
+    && isNonEmptyString((entry as OpenRouterCatalogEntry).id)
+    && isNonEmptyString((entry as OpenRouterCatalogEntry).fullId)
+    && validOptionalPositive((entry as OpenRouterCatalogEntry).maxInputTokens)
+    && validOptionalPositive((entry as OpenRouterCatalogEntry).maxOutputTokens)
+    && validOptionalBoolean((entry as OpenRouterCatalogEntry).vision)
+    && validOptionalBoolean((entry as OpenRouterCatalogEntry).toolCalling)
+    && validOptionalBoolean((entry as OpenRouterCatalogEntry).reasoning));
+}
+
+function positiveFinite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function validOptionalPositive(value: unknown): boolean {
+  return value === undefined || positiveFinite(value) !== undefined;
+}
+
+function validOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function enrichModelFromOpenRouter(
@@ -165,8 +206,17 @@ function enrichModelFromOpenRouter(
   const referencePricing = model.referencePricing ?? entry.referencePricing;
   const contextWindows = model.contextWindows?.length
     ? model.contextWindows
-    : contextWindowsFromLimit(maxInputTokens);
+    : entry.maxInputTokens !== undefined ? contextWindowsFromLimit(entry.maxInputTokens) : undefined;
   const tier: ModelMetadataSource = 'openrouter';
+
+  const filledFromOpenRouter = model.maxInputTokens === undefined && entry.maxInputTokens !== undefined
+    || model.maxOutputTokens === undefined && entry.maxOutputTokens !== undefined
+    || model.imageInput === undefined && entry.vision !== undefined
+    || model.toolCalling === undefined && entry.toolCalling !== undefined
+    || model.thinking === undefined && entry.reasoning !== undefined
+    || model.referencePricing === undefined && entry.referencePricing !== undefined
+    || !model.contextWindows?.length && Boolean(contextWindows?.length);
+  if (!filledFromOpenRouter) return model;
 
   const sources: ModelMetadataSources = {
     ...model.metadataSources,

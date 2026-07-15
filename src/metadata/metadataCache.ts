@@ -28,6 +28,8 @@ export interface RefreshSpec<T> {
   readonly ttlMs: number;
   /** Parses the response body into the cached shape. Must be synchronous and fast. */
   readonly parse: (body: string) => T;
+  /** Maximum UTF-8 response body size. Defaults to 10 MiB. */
+  readonly maxBodyBytes?: number;
   /** Optional label for log lines. */
   readonly label?: string;
 }
@@ -52,8 +54,8 @@ export function initMetadataCache(context: vscode.ExtensionContext, debug?: (mes
  * older than {@link ttlMs}. The default preserves non-expiring reads.
  */
 export function getCachedData<T>(key: string, ttlMs = Number.POSITIVE_INFINITY): T | undefined {
-  const entry = extensionContext?.globalState.get<CacheEntry<T>>(key);
-  if (!entry || Date.now() - (entry.fetchedAt ?? 0) > ttlMs) return undefined;
+  const entry = validCacheEntry<T>(extensionContext?.globalState.get<unknown>(key));
+  if (!entry || Date.now() - entry.fetchedAt > ttlMs) return undefined;
   return entry.data;
 }
 
@@ -72,7 +74,7 @@ export function findRoutedModel<T extends { readonly id: string; readonly picker
 
 /** Returns the cache timestamp for diagnostic logging. */
 export function getCachedFetchedAt(key: string): number | undefined {
-  return extensionContext?.globalState.get<CacheEntry<unknown>>(key)?.fetchedAt;
+  return validCacheEntry(extensionContext?.globalState.get<unknown>(key))?.fetchedAt;
 }
 
 /**
@@ -93,7 +95,7 @@ export function scheduleRefresh<T>(spec: RefreshSpec<T>, options?: { force?: boo
   const existing = inflight.get(spec.key);
   if (existing) return existing;
 
-  const stored = extensionContext.globalState.get<CacheEntry<T>>(spec.key);
+  const stored = validCacheEntry<T>(extensionContext.globalState.get<unknown>(spec.key));
   const isStale = !stored || Date.now() - stored.fetchedAt > spec.ttlMs;
   if (!isStale && !options?.force) return undefined;
 
@@ -136,7 +138,7 @@ async function runRefresh<T>(spec: RefreshSpec<T>, stored: CacheEntry<T> | undef
       return;
     }
 
-    const body = await response.text();
+    const body = await readLimitedText(response, spec.maxBodyBytes ?? 10 * 1024 * 1024);
     let parsed: T;
     try {
       parsed = spec.parse(body);
@@ -156,6 +158,37 @@ async function runRefresh<T>(spec: RefreshSpec<T>, stored: CacheEntry<T> | undef
     changeEmitter.fire();
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function validCacheEntry<T>(value: unknown): CacheEntry<T> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const entry = value as Partial<CacheEntry<T>>;
+  if (!Object.hasOwn(entry, 'data')
+    || !Number.isFinite(entry.fetchedAt)
+    || entry.fetchedAt! < 0
+    || entry.fetchedAt! > Date.now() + 5 * 60_000) return undefined;
+  return entry as CacheEntry<T>;
+}
+
+async function readLimitedText(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let body = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) throw new Error(`response body exceeds ${maxBytes} bytes`);
+      body += decoder.decode(value, { stream: true });
+    }
+    return body + decoder.decode();
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
   }
 }
 

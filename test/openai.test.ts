@@ -16,7 +16,7 @@ function callbacks() {
 describe('OpenAI response parsing', () => {
   it('accepts data without a space and reports reasoning, usage, and terminal finish', () => {
     const cb = callbacks();
-    const state = { parts: 0, started: false, terminal: false };
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
     const tools = new Map<number, ToolCall>();
     processOpenAISseLine(
       'data:{"choices":[{"delta":{"reasoning_content":"think","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}',
@@ -33,7 +33,7 @@ describe('OpenAI response parsing', () => {
 
   it('assembles incremental tool arguments', () => {
     const cb = callbacks();
-    const state = { parts: 0, started: false, terminal: false };
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
     const tools = new Map<number, ToolCall>();
     processOpenAISseLine(
       'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"q\\":"}}]}}]}',
@@ -50,6 +50,39 @@ describe('OpenAI response parsing', () => {
     expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
       id: 'call_1',
       function: { name: 'search', arguments: '{"q":"docs"}' },
+    }));
+  });
+
+  it('uses the latest complete tool name and serializes object arguments', () => {
+    const cb = callbacks();
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    const tools = new Map<number, ToolCall>();
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"search","arguments":{"q":"docs"}}},{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}',
+      tools,
+      cb,
+      state,
+    );
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"\\"README.md\\"}"}},{"index":1,"function":{"name":"search"}}]},"finish_reason":"tool_calls"}]}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onToolCall.mock.calls.map(([call]) => call)).toEqual([
+      expect.objectContaining({ id: 'call_1', function: { name: 'read', arguments: '{"path":"README.md"}' } }),
+      expect.objectContaining({ id: 'call_2', function: { name: 'search', arguments: '{"q":"docs"}' } }),
+    ]);
+  });
+
+  it('combines truly fragmented tool names without duplicating full snapshots', () => {
+    const cb = callbacks();
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    const tools = new Map<number, ToolCall>();
+    processOpenAISseLine('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"get_"}}]}}]}', tools, cb, state);
+    processOpenAISseLine('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"weather"}}]},"finish_reason":"tool_calls"}]}', tools, cb, state);
+    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'get_weather', arguments: '' },
     }));
   });
 

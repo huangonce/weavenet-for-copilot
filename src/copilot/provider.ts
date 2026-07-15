@@ -8,7 +8,7 @@ import {
   LEGACY_API_KEY_SECRET,
   OPENAI_API_KEY_SECRET,
 } from '../constants';
-import { convertClaudeMessages, convertClaudeTools } from '../relay/claude';
+import { clampClaudeTemperature, convertClaudeMessages, convertClaudeTools } from '../relay/claude';
 import { RelayClient } from '../relay/client';
 import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import {
@@ -358,19 +358,24 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       streamIdleTimeoutMs: config.streamIdleTimeoutMs,
     });
 
+    const thinking = toClaudeThinking(
+      getConfiguredReasoningEffort(routedModel, options),
+      model.maxOutputTokens ?? config.maxOutputTokens,
+    );
     const request: ClaudeRequest = {
       model: routedModel.upstreamId,
       max_tokens: model.maxOutputTokens ?? config.maxOutputTokens,
       messages: converted.messages,
       system: converted.system,
       stream: true,
-      temperature: config.temperature,
-      top_p: config.topP,
+      temperature: thinking ? undefined : clampClaudeTemperature(config.temperature),
+      top_p: thinking ? undefined : config.topP,
       ...(tools?.length ? {
         tools,
-        tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? { type: 'any' } : undefined,
+        // Anthropic extended thinking is incompatible with forced tool choice.
+        tool_choice: !thinking && options.toolMode === vscode.LanguageModelChatToolMode.Required ? { type: 'any' } : undefined,
       } : {}),
-      ...(toClaudeThinking(getConfiguredReasoningEffort(routedModel, options), model.maxOutputTokens ?? config.maxOutputTokens)),
+      ...thinking,
     };
     this.logClaudeRequest(config, request);
     const diagnostics = this.createRequestDiagnostics(config, 'Claude', model.id, request.messages.length, request.tools?.length ?? 0);
@@ -733,19 +738,31 @@ function formatLogError(error: unknown): string {
   return `${error instanceof Error ? error.name : 'UnknownError'}(${message.replace(/\s+/g, ' ').trim().slice(0, 200)})`;
 }
 
-function toLanguageModelError(error: unknown): Error {
+export function toLanguageModelError(error: unknown): Error {
   if (error instanceof vscode.LanguageModelError || error instanceof vscode.CancellationError) return error;
   if (error instanceof RelayRequestError) {
     const suffix = [error.upstreamCode, error.requestId].filter(Boolean).join('/');
     const message = suffix ? `${error.message} [${suffix}]` : error.message;
+    if (error.status === 401) return vscode.LanguageModelError.NoPermissions(message);
+    if (error.status === 404) return vscode.LanguageModelError.NotFound(message);
+    if (error.status === 403 || error.status === 429 || isQuotaError(error.upstreamCode, error.upstreamType, message)) {
+      return vscode.LanguageModelError.Blocked(message);
+    }
     return new vscode.LanguageModelError(message, {
       cause: error,
     });
   }
   if (error instanceof RelayStreamError) {
+    if (error.rateLimited || isQuotaError(error.upstreamCode, error.upstreamType, error.message)) {
+      return vscode.LanguageModelError.Blocked(error.message);
+    }
     return new vscode.LanguageModelError(error.message, { cause: error });
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function isQuotaError(...values: Array<string | undefined>): boolean {
+  return /rate.?limit|quota|insufficient.?credit|billing|payment.?required/i.test(values.filter(Boolean).join(' '));
 }
 
 function hashString(value: string): string {

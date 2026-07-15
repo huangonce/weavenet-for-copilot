@@ -124,7 +124,9 @@ export interface StreamChunk {
   usage?: OpenAIUsage;
   error?: {
     type?: string;
+    code?: string;
     message?: string;
+    request_id?: string;
   };
   choices?: Array<{
     delta?: {
@@ -240,7 +242,9 @@ export interface ClaudeStreamEvent {
   type?: string;
   error?: {
     type?: string;
+    code?: string;
     message?: string;
+    request_id?: string;
   };
   message?: {
     id?: string;

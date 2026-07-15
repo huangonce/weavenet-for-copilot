@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.2.1 - 2026-07-15
+
+- Increased the default relay response-header timeout from 60 to 120 seconds for slower reasoning and long-context requests.
+- Hardened Claude tool-result chains, streaming tool arguments, extended-thinking sampling constraints, and OpenAI incremental tool calls.
+- Extended model-discovery timeout and cancellation through body reads, added response/catalog limits, and strengthened metadata cache validation.
+- Added structured relay error mapping, isolated Copilot Chat activation failures, and required compilation and tests before Marketplace publishing.
+
 ## 0.2.0 - 2026-07-15
 
 - Added independent route refresh, fixed/private model definitions, unique picker IDs, and explicit upstream routing.

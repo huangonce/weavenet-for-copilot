@@ -72,6 +72,7 @@ export async function fetchJsonWithRetry<T>(
   init: RequestInit,
   timeoutMs: number,
   token?: CancellationToken,
+  maxBodyBytes = 10 * 1024 * 1024,
 ): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase();
   if (method !== 'GET') {
@@ -80,15 +81,86 @@ export async function fetchJsonWithRetry<T>(
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await fetchWithResponseTimeout(url, init, timeoutMs, token);
-      await throwIfNotOk(response);
-      return await response.json() as T;
+      return await fetchJsonOnce<T>(url, init, timeoutMs, token, maxBodyBytes);
     } catch (error) {
       lastError = error;
       if (token?.isCancellationRequested || attempt > 0 || !isRetryableGetError(error)) throw error;
     }
   }
   throw lastError;
+}
+
+async function fetchJsonOnce<T>(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  token?: CancellationToken,
+  maxBodyBytes = 10 * 1024 * 1024,
+): Promise<T> {
+  const context = createAbortContext(token, timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: context.signal });
+    const body = await readResponseTextWithSignal(response, context.signal, maxBodyBytes);
+    if (!response.ok) {
+      throw createRelayRequestError(
+        response.status,
+        response.statusText,
+        response.headers.get('content-type') ?? '',
+        body,
+      );
+    }
+    return JSON.parse(body) as T;
+  } catch (error) {
+    if (context.signal.reason instanceof RelayTimeoutError) throw context.signal.reason;
+    throw error;
+  } finally {
+    context.dispose();
+  }
+}
+
+async function readResponseTextWithSignal(response: Response, signal: AbortSignal, maxBodyBytes: number): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let result = '';
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await readWithAbortSignal(reader, signal);
+      if (done) break;
+      bytes += byteLength(value);
+      if (bytes > maxBodyBytes) throw new Error(`Relay response body exceeds ${maxBodyBytes} bytes.`);
+      result += decoder.decode(value, { stream: true });
+    }
+    return result + decoder.decode();
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
+  }
+}
+
+function byteLength(value: unknown): number {
+  if (value instanceof Uint8Array) return value.byteLength;
+  return Buffer.byteLength(String(value));
+}
+
+async function readWithAbortSignal<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<T>> {
+  if (signal.aborted) throw signal.reason ?? cancellationError();
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason ?? cancellationError());
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 export async function readWithIdleTimeout<T>(

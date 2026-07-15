@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "huangonce",
   "icon": "images/icon.png",
   "author": "huangonce",
@@ -158,7 +158,7 @@
         },
         "weavenet-copilot.requestTimeoutSeconds": {
           "type": "number",
-          "default": 60,
+          "default": 120,
           "minimum": 5,
           "maximum": 300,
           "description": "%configuration.requestTimeoutSeconds.description%"

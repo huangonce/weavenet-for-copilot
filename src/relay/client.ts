@@ -38,9 +38,13 @@ export class RelayClient {
   constructor(private readonly options: RelayClientOptions) {}
 
   async listModels(token?: CancellationToken): Promise<ModelsResponse> {
-    return fetchJsonWithRetry<ModelsResponse>(`${this.options.baseUrl}/models`, {
+    const response = await fetchJsonWithRetry<ModelsResponse>(`${this.options.baseUrl}/models`, {
       headers: this.headers(),
     }, this.options.requestTimeoutMs, token);
+    if (response.data !== undefined && (!Array.isArray(response.data) || response.data.length > 10_000)) {
+      throw new Error('Relay model catalog has an invalid or excessive data array.');
+    }
+    return response;
   }
 
   async streamChatCompletion(

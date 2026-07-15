@@ -32,18 +32,45 @@ export function convertClaudeMessages(
 ): { system?: string | ClaudeContentBlockText[]; messages: ClaudeMessage[] } {
   const result: ClaudeMessage[] = [];
   const system: string[] = [];
+  const pendingToolUseIds = new Set<string>();
+  let pendingToolUseMessage: ClaudeMessage | undefined;
+
+  const discardPendingToolUses = () => {
+    if (!pendingToolUseMessage || pendingToolUseIds.size === 0) {
+      pendingToolUseIds.clear();
+      pendingToolUseMessage = undefined;
+      return;
+    }
+    const content = toBlocks(pendingToolUseMessage.content).filter((block) =>
+      block.type !== 'tool_use' || !pendingToolUseIds.has(block.id));
+    pendingToolUseMessage.content = content;
+    if (content.length === 0) {
+      const index = result.indexOf(pendingToolUseMessage);
+      if (index >= 0) result.splice(index, 1);
+    }
+    pendingToolUseIds.clear();
+    pendingToolUseMessage = undefined;
+  };
+
   for (const message of messages) {
     const role = mapClaudeRole(message.role);
     const blocks: ClaudeContentBlock[] = [];
     let textContent = '';
+    let interruptsToolChain = false;
+    if (role === 'assistant' || role === 'system') discardPendingToolUses();
     for (const part of message.content) {
       if (part instanceof vscode.LanguageModelTextPart) {
         textContent += part.value;
         blocks.push({ type: 'text', text: part.value });
+        interruptsToolChain = role === 'user';
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
         blocks.push({ type: 'tool_use', id: part.callId, name: part.name, input: part.input ?? {} });
+        if (role === 'assistant') pendingToolUseIds.add(part.callId);
       } else if (part instanceof vscode.LanguageModelToolResultPart) {
-        blocks.push({ type: 'tool_result', tool_use_id: part.callId, content: stringifyToolResult(part.content) });
+        if (role === 'user' && pendingToolUseIds.has(part.callId)) {
+          blocks.push({ type: 'tool_result', tool_use_id: part.callId, content: stringifyToolResult(part.content) });
+          pendingToolUseIds.delete(part.callId);
+        }
       } else if (options.supportsImageInput && part instanceof vscode.LanguageModelDataPart) {
         const mediaType = normalizeClaudeImageMediaType(part.mimeType);
         if (mediaType) {
@@ -51,15 +78,20 @@ export function convertClaudeMessages(
             type: 'image',
             source: { type: 'base64', media_type: mediaType, data: Buffer.from(part.data).toString('base64') },
           });
+          interruptsToolChain = role === 'user';
         }
       }
     }
+    if (interruptsToolChain) discardPendingToolUses();
     if (role === 'system') {
       if (textContent) system.push(textContent);
     } else if (blocks.length) {
       result.push({ role: role === 'assistant' ? 'assistant' : 'user', content: blocks });
+      if (role === 'assistant' && pendingToolUseIds.size > 0) pendingToolUseMessage = result.at(-1);
+      if (role === 'user' && pendingToolUseIds.size === 0) pendingToolUseMessage = undefined;
     }
   }
+  discardPendingToolUses();
   const merged = mergeAdjacentClaudeMessages(result);
   if (options.promptCaching) applyLastTwoUserCacheControl(merged, options.cacheTTL ?? '5m');
   return {
@@ -176,7 +208,7 @@ export function processClaudeSseLine(
   const data = trimmed.slice('data:'.length).trim();
   if (!data || data === '[DONE]') return data === '[DONE]';
   const event = parseClaudeJson(data);
-  if (event.type === 'error' || event.error) throw createRelayStreamError('Claude', event.error?.message);
+  if (event.type === 'error' || event.error) throw createRelayStreamError('Claude', event.error ?? event);
   if ((event.type === 'message_start'
     || event.type === 'message_delta'
     || event.type === 'content_block_start'
@@ -190,11 +222,14 @@ export function processClaudeSseLine(
   if (event.usage) callbacks.onClaudeUsage?.(event.usage, event.message?.id);
   if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
     const index = event.index ?? tools.size;
-    tools.set(index, {
+    const tool: PendingClaudeToolCall = {
       id: event.content_block.id ?? `toolu_${index}`,
       type: 'function',
-      function: { name: event.content_block.name ?? '', arguments: JSON.stringify(event.content_block.input ?? {}) },
-    });
+      function: { name: event.content_block.name ?? '', arguments: '' },
+      argumentsFallback: JSON.stringify(event.content_block.input ?? {}),
+      sawArgumentDelta: false,
+    };
+    tools.set(index, tool);
   } else if (event.type === 'content_block_delta') {
     if (event.delta?.type === 'text_delta' && event.delta.text) {
       callbacks.onContent(event.delta.text);
@@ -205,7 +240,11 @@ export function processClaudeSseLine(
     } else if (event.delta?.type === 'input_json_delta' && event.delta.partial_json) {
       const tool = tools.get(event.index ?? 0);
       if (tool) {
-        if (tool.function.arguments === '{}') tool.function.arguments = '';
+        const pending = tool as PendingClaudeToolCall;
+        if (!pending.sawArgumentDelta) {
+          tool.function.arguments = '';
+          pending.sawArgumentDelta = true;
+        }
         tool.function.arguments += event.delta.partial_json;
       }
     }
@@ -213,6 +252,7 @@ export function processClaudeSseLine(
     const index = event.index ?? 0;
     const tool = tools.get(index);
     if (tool) {
+      finalizeClaudeToolCall(tool);
       callbacks.onToolCall(tool);
       state.parts++;
       tools.delete(index);
@@ -226,7 +266,7 @@ export function processClaudeSseLine(
 export async function processClaudeFullResponse(response: Response, callbacks: StreamCallbacks, idleTimeoutMs = 60_000, token?: CancellationToken): Promise<void> {
   const body = await readResponseText(response, idleTimeoutMs, token);
   const payload = parseClaudeJson(body);
-  if (payload.error) throw createRelayStreamError('Claude', payload.error.message);
+  if (payload.error) throw createRelayStreamError('Claude', payload.error);
   if (payload.usage) callbacks.onClaudeUsage?.(payload.usage, payload.message?.id);
   let parts = 0;
   for (const block of payload.content ?? []) {
@@ -253,6 +293,10 @@ export function normalizeClaudeImageMediaType(value: string): string | undefined
     ? 'image/jpeg'
     : value.trim().toLowerCase();
   return CLAUDE_IMAGE_TYPES.has(normalized) ? normalized : undefined;
+}
+
+export function clampClaudeTemperature(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : Math.max(0, Math.min(1, value));
 }
 
 export function applyLastTwoUserCacheControl(messages: ClaudeMessage[], ttl: '5m' | '1h'): void {
@@ -286,11 +330,26 @@ function flushToolCalls(tools: Map<number, ToolCall>, callbacks: StreamCallbacks
   let count = 0;
   for (const [, tool] of [...tools].sort(([a], [b]) => a - b)) {
     if (!tool.function.name) continue;
+    finalizeClaudeToolCall(tool);
     callbacks.onToolCall(tool);
     count++;
   }
   tools.clear();
   return count;
+}
+
+type PendingClaudeToolCall = ToolCall & {
+  argumentsFallback?: string;
+  sawArgumentDelta?: boolean;
+};
+
+function finalizeClaudeToolCall(tool: ToolCall): void {
+  const pending = tool as PendingClaudeToolCall;
+  if (!pending.sawArgumentDelta && pending.argumentsFallback !== undefined) {
+    tool.function.arguments = pending.argumentsFallback;
+  }
+  delete pending.argumentsFallback;
+  delete pending.sawArgumentDelta;
 }
 
 function parseClaudeJson(value: string): ClaudeStreamEvent {

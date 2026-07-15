@@ -120,7 +120,7 @@ export function processOpenAISseLine(
   if (data === '[DONE]') return true;
   if (!data) return false;
   const chunk = parseOpenAIStreamJson(data);
-  if (chunk.error) throw createRelayStreamError('OpenAI', chunk.error.message);
+  if (chunk.error) throw createRelayStreamError('OpenAI', chunk.error);
   if (chunk.usage) {
     if (!state.started) {
       state.started = true;
@@ -161,7 +161,7 @@ export async function processOpenAIFullResponse(response: Response, callbacks: S
   } catch {
     throw createRelayStreamError('OpenAI', 'received malformed JSON from the relay');
   }
-  if (payload.error) throw createRelayStreamError('OpenAI', payload.error.message);
+  if (payload.error) throw createRelayStreamError('OpenAI', payload.error);
   if (payload.usage) callbacks.onOpenAIUsage?.(payload.usage);
   const message = payload.choices?.[0]?.message;
   let parts = 0;
@@ -186,9 +186,21 @@ function mergeToolCallDeltas(
       type: 'function' as const,
       function: { name: '', arguments: '' },
     };
-    current.id = delta.id ?? current.id;
-    current.function.name += delta.function?.name ?? '';
-    current.function.arguments += delta.function?.arguments ?? '';
+    if (delta.id) current.id = delta.id;
+    if (delta.function?.name) {
+      const nameDelta = delta.function.name;
+      if (!current.function.name) current.function.name = nameDelta;
+      else if (nameDelta === current.function.name || current.function.name.startsWith(nameDelta)) {
+        // Ignore repeated complete snapshots and stale prefixes.
+      } else if (nameDelta.startsWith(current.function.name)) current.function.name = nameDelta;
+      else current.function.name += nameDelta;
+    }
+    const argumentsDelta: unknown = delta.function?.arguments;
+    if (typeof argumentsDelta === 'string') {
+      current.function.arguments += argumentsDelta;
+    } else if (argumentsDelta !== undefined && argumentsDelta !== null) {
+      current.function.arguments = JSON.stringify(argumentsDelta);
+    }
     pendingToolCalls.set(delta.index, current);
   }
 }
