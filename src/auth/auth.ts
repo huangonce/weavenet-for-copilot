@@ -20,6 +20,15 @@ export class AuthManager {
   }
 
   async promptForApiKey(profileName?: string): Promise<boolean> {
+    const apiKey = await this.promptForApiKeyValue(profileName);
+    if (!apiKey) return false;
+    await this.storeApiKey(profileName, apiKey);
+    const relayLabel = profileName ? `“${profileName}”` : 'Default Relay';
+    vscode.window.showInformationMessage(`WeaveNet API key for ${relayLabel} saved.`);
+    return true;
+  }
+
+  async promptForApiKeyValue(profileName?: string): Promise<string | undefined> {
     const relayLabel = profileName ? `“${profileName}”` : 'Default Relay';
     const apiKey = await vscode.window.showInputBox({
       prompt: `Enter the API key for ${relayLabel}`,
@@ -29,13 +38,11 @@ export class AuthManager {
       validateInput: (value) => (value.trim() ? undefined : 'API key is required'),
     });
 
-    if (!apiKey) {
-      return false;
-    }
+    return apiKey?.trim() || undefined;
+  }
 
+  async storeApiKey(profileName: string | undefined, apiKey: string): Promise<void> {
     await this.secrets.store(secretKey(profileName), apiKey.trim());
-    vscode.window.showInformationMessage(`WeaveNet API key for ${relayLabel} saved.`);
-    return true;
   }
 
   async clearApiKey(profileName?: string): Promise<void> {
@@ -46,11 +53,25 @@ export class AuthManager {
   }
 
   async moveApiKey(fromProfileName: string | undefined, toProfileName: string): Promise<boolean> {
-    const apiKey = await this.getApiKey(fromProfileName);
-    if (!apiKey) return false;
-    await this.secrets.store(secretKey(toProfileName), apiKey);
-    await this.secrets.delete(secretKey(fromProfileName));
-    return true;
+    const fromKey = secretKey(fromProfileName);
+    const toKey = secretKey(toProfileName);
+    if (fromKey === toKey) return Boolean(await this.getApiKey(fromProfileName));
+
+    const [apiKey, destinationValue] = await Promise.all([this.secrets.get(fromKey), this.secrets.get(toKey)]);
+    if (!apiKey?.trim()) return false;
+    if (destinationValue !== undefined) {
+      throw new Error('The destination connection already has an API key. Clear it before renaming this connection.');
+    }
+
+    try {
+      await this.secrets.store(toKey, apiKey);
+      await this.secrets.delete(fromKey);
+      return true;
+    } catch (error) {
+      await restoreSecret(this.secrets, fromKey, apiKey);
+      await restoreSecret(this.secrets, toKey, destinationValue);
+      throw error;
+    }
   }
 
   async clearProfileApiKey(profileName: string): Promise<void> {
@@ -73,9 +94,13 @@ export class AuthManager {
     const existing = await Promise.all(uniqueKeys.map(async (key) => ({ key, value: await this.secrets.get(key) })));
     const snapshots = existing.filter((entry): entry is { key: string; value: string } => entry.value !== undefined);
     try {
-      await Promise.all(uniqueKeys.map((key) => this.secrets.delete(key)));
+      for (const key of uniqueKeys) {
+        await this.secrets.delete(key);
+      }
     } catch (error) {
-      await Promise.all(snapshots.map(({ key, value }) => Promise.resolve(this.secrets.store(key, value)).catch(() => undefined)));
+      for (const { key, value } of snapshots) {
+        await Promise.resolve(this.secrets.store(key, value)).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -83,4 +108,12 @@ export class AuthManager {
 
 function secretKey(profileName?: string): string {
   return profileName ? `${RELAY_API_KEY_SECRET}.profile.${encodeURIComponent(profileName)}` : RELAY_API_KEY_SECRET;
+}
+
+async function restoreSecret(secrets: vscode.SecretStorage, key: string, value: string | undefined): Promise<void> {
+  if (value === undefined) {
+    await secrets.delete(key);
+  } else {
+    await secrets.store(key, value);
+  }
 }

@@ -1,5 +1,18 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION } from '../constants';
+import { normalizeRelayBaseUrl } from '../relay/url';
+
+const RESERVED_REQUEST_HEADERS = new Set([
+  'accept',
+  'anthropic-version',
+  'authorization',
+  'connection',
+  'content-length',
+  'content-type',
+  'host',
+  'transfer-encoding',
+  'x-api-key',
+]);
 
 export interface ConfiguredModel {
   id: string;
@@ -98,10 +111,6 @@ export function getProfileConfiguration(): ProfileConfiguration {
   };
 }
 
-function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
-
 function compileRegexList(values: string[]): RegExp[] {
   const result: RegExp[] = [];
   for (const value of values) {
@@ -120,8 +129,9 @@ function compileRegexList(values: string[]): RegExp[] {
 function normalizeHeaders(headers: Record<string, unknown>): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    if (typeof value === 'string' && key.trim()) {
-      result[key] = value;
+    const normalizedKey = key.trim();
+    if (typeof value === 'string' && normalizedKey && !isReservedRelayHeader(normalizedKey)) {
+      result[normalizedKey] = value;
     }
   }
   return result;
@@ -166,7 +176,7 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     if (!value || typeof value !== 'object') continue;
     const record = value as Record<string, unknown>;
     const name = typeof record.name === 'string' ? record.name.trim() : '';
-    const baseUrl = typeof record.baseUrl === 'string' ? normalizeBaseUrl(record.baseUrl) : '';
+    const baseUrl = typeof record.baseUrl === 'string' ? normalizeRelayBaseUrl(record.baseUrl) ?? '' : '';
     if (!name || !baseUrl || seenNames.has(name)) continue;
     seenNames.add(name);
     const includeModels = stringArray(record.includeModels);
@@ -182,6 +192,11 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     });
   }
   return profiles;
+}
+
+/** Headers owned by the extension and never configurable per connection. */
+export function isReservedRelayHeader(name: string): boolean {
+  return RESERVED_REQUEST_HEADERS.has(name.trim().toLowerCase());
 }
 
 export function selectActiveProfile(

@@ -23,16 +23,32 @@ class InMemoryState {
 
 describe('legacy installation reset', () => {
   const settings = new Map<string, unknown>();
+  const workspaceSettings = new Map<string, unknown>();
+  const folderSettings = new Map<string, unknown>();
 
   beforeEach(() => {
     settings.clear();
-    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-      inspect: <T>(key: string) => ({ globalValue: settings.get(key) as T | undefined }),
-      update: async (key: string, value: unknown) => {
-        if (value === undefined) settings.delete(key);
-        else settings.set(key, value);
-      },
-    } as never);
+    workspaceSettings.clear();
+    folderSettings.clear();
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockImplementation((_section?: string, resource?: { toString(): string }) => {
+      const values = resource ? folderSettings : settings;
+      return {
+        inspect: <T>(key: string) => resource
+          ? ({ workspaceFolderValue: values.get(key) as T | undefined })
+          : ({ globalValue: settings.get(key) as T | undefined, workspaceValue: workspaceSettings.get(key) as T | undefined }),
+        update: async (key: string, value: unknown, target?: vscode.ConfigurationTarget) => {
+          const destination = target === vscode.ConfigurationTarget.Workspace
+            ? workspaceSettings
+            : target === vscode.ConfigurationTarget.WorkspaceFolder || resource
+              ? folderSettings
+              : settings;
+          if (value === undefined) destination.delete(key);
+          else destination.set(key, value);
+        },
+      } as never;
+    });
+    vi.stubGlobal('workspaceFolders', undefined);
+    Object.defineProperty(vscode.workspace, 'workspaceFolders', { configurable: true, value: undefined });
   });
 
   it('clears only pre-profile state and records a completion marker', async () => {
@@ -80,6 +96,27 @@ describe('legacy installation reset', () => {
       removedBaseUrl: false,
       removedSecretCount: 0,
     });
+    expect(globalState.get(LEGACY_RESET_MARKER)).toBe(true);
+  });
+
+  it('clears legacy Base URL values from global, workspace, and folder scopes', async () => {
+    const secrets = new InMemorySecrets();
+    const globalState = new InMemoryState();
+    settings.set('baseUrl', 'https://global.example.com/v1');
+    workspaceSettings.set('baseUrl', 'https://workspace.example.com/v1');
+    folderSettings.set('baseUrl', 'https://folder.example.com/v1');
+    Object.defineProperty(vscode.workspace, 'workspaceFolders', {
+      configurable: true,
+      value: [{ uri: { toString: () => 'file:///workspace/folder' } }],
+    });
+
+    await expect(resetLegacyInstallation({ secrets, globalState } as never)).resolves.toMatchObject({
+      cleaned: true,
+      removedBaseUrl: true,
+    });
+    expect(settings.get('baseUrl')).toBeUndefined();
+    expect(workspaceSettings.get('baseUrl')).toBeUndefined();
+    expect(folderSettings.get('baseUrl')).toBeUndefined();
     expect(globalState.get(LEGACY_RESET_MARKER)).toBe(true);
   });
 });

@@ -8,8 +8,10 @@ import type {
   ToolCall,
 } from './types';
 import { streamClaudeMessages } from './claude';
+import { isReservedRelayHeader } from '../config/config';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, throwIfNotOk } from './http';
 import { streamOpenAIChatCompletion } from './openai';
+import { relayEndpointUrl } from './url';
 
 export interface RelayClientOptions {
   baseUrl: string;
@@ -45,7 +47,7 @@ export class RelayClient {
   constructor(private readonly options: RelayClientOptions) {}
 
   async listModels(token?: CancellationToken): Promise<ModelsResponse> {
-    const response = await fetchJsonWithRetry<ModelsResponse>(`${this.options.baseUrl}/models`, {
+    const response = await fetchJsonWithRetry<ModelsResponse>(this.endpoint('models'), {
       headers: this.headers(),
     }, this.options.requestTimeoutMs, token);
     if (response.data !== undefined && (!Array.isArray(response.data) || response.data.length > 10_000)) {
@@ -55,7 +57,7 @@ export class RelayClient {
   }
 
   async testModels(token?: CancellationToken): Promise<{ models: ModelsResponse; diagnostic: RelayEndpointTestResult }> {
-    const response = await fetchJsonWithRetryMetadata<ModelsResponse>(`${this.options.baseUrl}/models`, {
+    const response = await fetchJsonWithRetryMetadata<ModelsResponse>(this.endpoint('models'), {
       headers: this.headers(),
     }, this.options.requestTimeoutMs, token);
     if (response.value.data !== undefined && (!Array.isArray(response.value.data) || response.value.data.length > 10_000)) {
@@ -68,7 +70,7 @@ export class RelayClient {
   }
 
   async testClaudeMessages(model: string, token?: CancellationToken): Promise<RelayEndpointTestResult> {
-    const response = await fetchWithResponseTimeout(`${this.options.baseUrl}/messages`, {
+    const response = await fetchWithResponseTimeout(this.endpoint('messages'), {
       method: 'POST',
       headers: {
         ...this.headersFor('x-api-key'),
@@ -123,16 +125,25 @@ export class RelayClient {
   }
 
   private headersFor(authScheme: 'bearer' | 'x-api-key'): Record<string, string> {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(this.options.requestHeaders)) {
+      if (isReservedRelayHeader(key)) continue;
+      try {
+        headers.set(key, value);
+      } catch {
+        // Ignore malformed user-provided headers from manually edited settings.
+      }
+    }
     if (authScheme === 'x-api-key') {
-      return {
-        ...this.options.requestHeaders,
-        'x-api-key': this.options.apiKey,
-      };
+      headers.set('x-api-key', this.options.apiKey);
+      return Object.fromEntries(headers.entries());
     }
 
-    return {
-      ...this.options.requestHeaders,
-      Authorization: `Bearer ${this.options.apiKey}`,
-    };
+    headers.set('authorization', `Bearer ${this.options.apiKey}`);
+    return Object.fromEntries(headers.entries());
+  }
+
+  private endpoint(path: string): string {
+    return relayEndpointUrl(this.options.baseUrl, path);
   }
 }

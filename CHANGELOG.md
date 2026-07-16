@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.3.1 - 2026-07-16
+
+- Made connection creation and renaming recover safely across configuration and SecretStorage failures, while serializing connection mutations.
+- Fixed secret-deletion rollback races and expanded the one-time legacy reset to clean global, workspace, and workspace-folder legacy Base URL values.
+- Isolated model-refresh snapshots by active connection to prevent stale models from another Relay appearing after a connection switch.
+- Validated Relay base URLs and constructed endpoints canonically; protected Relay authentication and protocol headers from profile overrides.
+- Restricted model-refresh diagnostics to debug-gated, structured error summaries without raw upstream messages.
+
 ## 0.3.0 - 2026-07-15
 
 - Replaced the built-in Default Relay with named Relay connections, including add, edit, copy, test, delete, clear-all, and set-default workflows with isolated SecretStorage API keys.

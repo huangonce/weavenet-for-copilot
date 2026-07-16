@@ -4,6 +4,7 @@ import type { StreamCallbacks } from './client';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
 import { sanitizeJsonSchema } from './schema';
+import { relayEndpointUrl } from './url';
 import type {
   ClaudeCacheControl, ClaudeContentBlock, ClaudeContentBlockText, ClaudeMessage,
   ClaudeRequest, ClaudeStreamEvent, ClaudeToolDefinition, ToolCall,
@@ -155,7 +156,7 @@ async function fetchClaude(
   request: ClaudeRequest,
   token?: CancellationToken,
 ): Promise<Response> {
-  return fetchWithResponseTimeout(`${options.baseUrl}/messages`, {
+  return fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'messages'), {
     method: 'POST',
     headers: {
       ...options.headers,

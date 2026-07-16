@@ -24,6 +24,12 @@ export interface LegacyResetResult {
   readonly removedSecretCount: number;
 }
 
+interface BaseUrlSnapshot {
+  readonly configuration: vscode.WorkspaceConfiguration;
+  readonly target: vscode.ConfigurationTarget;
+  readonly value: string;
+}
+
 /**
  * Removes the pre-profile connection state once. Profile configuration and
  * profile-scoped secrets are deliberately outside this cleanup boundary.
@@ -34,7 +40,7 @@ export async function resetLegacyInstallation(context: vscode.ExtensionContext):
   }
 
   const configuration = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  const previousBaseUrl = configuration.inspect<string>('baseUrl')?.globalValue;
+  const baseUrlSnapshots = collectBaseUrlSnapshots(configuration);
   const inspectedSecrets = await Promise.all(legacySecretKeys.map(async (key) => ({
     key,
     value: await context.secrets.get(key),
@@ -42,22 +48,45 @@ export async function resetLegacyInstallation(context: vscode.ExtensionContext):
   const secretSnapshots = inspectedSecrets.flatMap(({ key, value }) => value === undefined ? [] : [{ key, value }]);
 
   try {
-    if (previousBaseUrl !== undefined) {
-      await configuration.update('baseUrl', undefined, vscode.ConfigurationTarget.Global);
+    for (const snapshot of baseUrlSnapshots) {
+      await snapshot.configuration.update('baseUrl', undefined, snapshot.target);
     }
-    await Promise.all(legacySecretKeys.map((key) => context.secrets.delete(key)));
+    for (const key of legacySecretKeys) {
+      await context.secrets.delete(key);
+    }
     await context.globalState.update(LEGACY_RESET_MARKER, true);
   } catch (error) {
-    if (previousBaseUrl !== undefined) {
-      await Promise.resolve(configuration.update('baseUrl', previousBaseUrl, vscode.ConfigurationTarget.Global)).catch(() => undefined);
+    for (const snapshot of baseUrlSnapshots) {
+      await Promise.resolve(snapshot.configuration.update('baseUrl', snapshot.value, snapshot.target)).catch(() => undefined);
     }
-    await Promise.all(secretSnapshots.map(({ key, value }) => Promise.resolve(context.secrets.store(key, value)).catch(() => undefined)));
+    for (const { key, value } of secretSnapshots) {
+      await Promise.resolve(context.secrets.store(key, value)).catch(() => undefined);
+    }
     throw error;
   }
 
   return {
-    cleaned: previousBaseUrl !== undefined || secretSnapshots.length > 0,
-    removedBaseUrl: previousBaseUrl !== undefined,
+    cleaned: baseUrlSnapshots.length > 0 || secretSnapshots.length > 0,
+    removedBaseUrl: baseUrlSnapshots.length > 0,
     removedSecretCount: secretSnapshots.length,
   };
+}
+
+function collectBaseUrlSnapshots(configuration: vscode.WorkspaceConfiguration): BaseUrlSnapshot[] {
+  const snapshots: BaseUrlSnapshot[] = [];
+  const inspected = configuration.inspect<string>('baseUrl');
+  if (inspected?.globalValue !== undefined) {
+    snapshots.push({ configuration, target: vscode.ConfigurationTarget.Global, value: inspected.globalValue });
+  }
+  if (inspected?.workspaceValue !== undefined) {
+    snapshots.push({ configuration, target: vscode.ConfigurationTarget.Workspace, value: inspected.workspaceValue });
+  }
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const folderConfiguration = vscode.workspace.getConfiguration(CONFIG_SECTION, folder.uri);
+    const value = folderConfiguration.inspect<string>('baseUrl')?.workspaceFolderValue;
+    if (value !== undefined) {
+      snapshots.push({ configuration: folderConfiguration, target: vscode.ConfigurationTarget.WorkspaceFolder, value });
+    }
+  }
+  return snapshots;
 }

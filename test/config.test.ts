@@ -41,4 +41,31 @@ describe('connection profiles', () => {
     expect(normalizeConnectionProfiles([])).toEqual([]);
     expect(selectActiveProfile([], '')).toBeUndefined();
   });
+
+  it('rejects unsafe endpoint forms and protected request headers', () => {
+    const profiles = normalizeConnectionProfiles([
+      { name: 'Credentials', baseUrl: 'https://key@relay.example.com/v1' },
+      { name: 'Query', baseUrl: 'https://relay.example.com/v1?token=secret' },
+      { name: 'Fragment', baseUrl: 'https://relay.example.com/v1#secret' },
+      {
+        name: 'Safe',
+        baseUrl: 'https://relay.example.com/v1/',
+        requestHeaders: {
+          Authorization: 'Bearer attacker-value',
+          'X-API-Key': 'attacker-value',
+          'Content-Type': 'text/plain',
+          'X-Tenant': 'team-a',
+        },
+      },
+    ]);
+
+    expect(profiles).toEqual([{
+      name: 'Safe',
+      baseUrl: 'https://relay.example.com/v1',
+      requestHeaders: { 'X-Tenant': 'team-a' },
+      includeModels: undefined,
+      excludeModels: undefined,
+      models: undefined,
+    }]);
+  });
 });

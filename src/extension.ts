@@ -5,8 +5,10 @@ import { ConnectionProfile, getConfig, getProfileConfiguration, normalizeConnect
 import { initMetadataCache, onMetadataChanged } from './metadata/metadataCache';
 import { scheduleOpenRouterRefresh } from './metadata/openrouterFallback';
 import { resetLegacyInstallation } from './migration/legacyReset';
+import { normalizeRelayBaseUrl } from './relay/url';
 
 const configurationSection = 'weavenet-copilot';
+let connectionMutation = Promise.resolve();
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   let legacyDataRemoved = false;
@@ -87,16 +89,33 @@ async function manageConnections(provider: WeaveNetChatProvider): Promise<void> 
 }
 
 async function addConnection(provider: WeaveNetChatProvider): Promise<void> {
-  const name = await vscode.window.showInputBox({ prompt: 'Connection name', placeHolder: 'e.g. Work relay', ignoreFocusOut: true, validateInput: validateProfileName });
-  if (!name) return;
-  const baseUrl = await promptBaseUrl();
-  if (!baseUrl) return;
-  const profile: ConnectionProfile = { name: name.trim(), baseUrl };
-  if (!await provider.promptForRelayKey(profile.name)) return;
-  const { profiles } = getProfileConfiguration();
-  await saveProfiles([...profiles, profile], profile.name);
-  await provider.refreshModels();
-  void vscode.window.showInformationMessage(`WeaveNet connection “${profile.name}” created and activated.`);
+  await runConnectionMutation(async () => {
+    const name = await vscode.window.showInputBox({ prompt: 'Connection name', placeHolder: 'e.g. Work relay', ignoreFocusOut: true, validateInput: validateProfileName });
+    if (!name) return;
+    const baseUrl = await promptBaseUrl();
+    if (!baseUrl) return;
+    const profile: ConnectionProfile = { name: name.trim(), baseUrl };
+    const apiKey = await provider.promptForRelayKeyValue(profile.name);
+    if (!apiKey) return;
+    const { profiles, activeProfile } = getProfileConfiguration();
+    if (profiles.some((entry) => entry.name === profile.name)) {
+      void vscode.window.showErrorMessage('A connection with this name already exists.');
+      return;
+    }
+    let configurationSaved = false;
+    try {
+      await saveProfiles([...profiles, profile], profile.name);
+      configurationSaved = true;
+      await provider.storeRelayKey(profile.name, apiKey);
+    } catch (error) {
+      if (configurationSaved) await restoreProfiles(profiles, activeProfile);
+      await provider.clearRelayKeyForProfile(profile.name).catch(() => undefined);
+      void vscode.window.showErrorMessage(`WeaveNet could not create “${profile.name}”: ${errorMessage(error)}`);
+      return;
+    }
+    await provider.refreshModels();
+    void vscode.window.showInformationMessage(`WeaveNet connection “${profile.name}” created and activated.`);
+  });
 }
 
 async function setDefaultConnection(provider: WeaveNetChatProvider): Promise<void> {
@@ -117,24 +136,43 @@ async function configureActiveRelay(provider: WeaveNetChatProvider): Promise<voi
 }
 
 async function editConnection(provider: WeaveNetChatProvider): Promise<void> {
-  const oldProfile = await pickProfile('Select a connection to edit');
-  if (!oldProfile) return;
-  const value = await vscode.window.showInputBox({
-    prompt: 'Edit connection JSON (API keys are stored separately)', value: JSON.stringify(oldProfile), ignoreFocusOut: true,
-    validateInput: (input) => parseSingleProfile(input, oldProfile.name) ? undefined : 'Enter one valid connection object with name and baseUrl.',
+  await runConnectionMutation(async () => {
+    const oldProfile = await pickProfile('Select a connection to edit');
+    if (!oldProfile) return;
+    const value = await vscode.window.showInputBox({
+      prompt: 'Edit connection JSON (API keys are stored separately)', value: JSON.stringify(oldProfile), ignoreFocusOut: true,
+      validateInput: (input) => parseSingleProfile(input, oldProfile.name) ? undefined : 'Enter one valid connection object with name and baseUrl.',
+    });
+    if (!value) return;
+    const profile = parseSingleProfile(value, oldProfile.name);
+    if (!profile) return;
+    const { profiles, activeProfile } = getProfileConfiguration();
+    if (!profiles.some((entry) => entry.name === oldProfile.name)) {
+      void vscode.window.showErrorMessage('This connection was changed while editing. Please try again.');
+      return;
+    }
+    if (profile.name !== oldProfile.name && profiles.some((entry) => entry.name === profile.name)) {
+      void vscode.window.showErrorMessage('A connection with this name already exists.');
+      return;
+    }
+    const updated = profiles.map((entry) => entry.name === oldProfile.name ? profile : entry);
+    const nextActiveProfile = activeProfile === oldProfile.name ? profile.name : activeProfile;
+    let keyMoveAttempted = false;
+    try {
+      if (profile.name !== oldProfile.name) {
+        keyMoveAttempted = true;
+        await provider.moveRelayKey(oldProfile.name, profile.name);
+      }
+      await saveProfiles(updated, nextActiveProfile);
+    } catch (error) {
+      if (keyMoveAttempted) {
+        await provider.moveRelayKey(profile.name, oldProfile.name).catch(() => undefined);
+      }
+      void vscode.window.showErrorMessage(`WeaveNet could not update “${oldProfile.name}”: ${errorMessage(error)}`);
+      return;
+    }
+    await provider.refreshModels();
   });
-  if (!value) return;
-  const profile = parseSingleProfile(value, oldProfile.name);
-  if (!profile) return;
-  const { profiles, activeProfile } = getProfileConfiguration();
-  if (profile.name !== oldProfile.name && profiles.some((entry) => entry.name === profile.name)) {
-    void vscode.window.showErrorMessage('A connection with this name already exists.');
-    return;
-  }
-  const updated = profiles.map((entry) => entry.name === oldProfile.name ? profile : entry);
-  await saveProfiles(updated, activeProfile === oldProfile.name ? profile.name : activeProfile);
-  if (profile.name !== oldProfile.name) await provider.moveRelayKey(oldProfile.name, profile.name);
-  await provider.refreshModels();
 }
 
 async function copyConnection(provider: WeaveNetChatProvider): Promise<void> {
@@ -281,12 +319,16 @@ function validateProfileName(value: string): string | undefined {
 }
 
 async function promptBaseUrl(): Promise<string | undefined> {
-  const value = await vscode.window.showInputBox({ prompt: 'Relay API base URL', placeHolder: 'https://relay.example.com/v1', ignoreFocusOut: true, validateInput: (input) => isValidBaseUrl(input) ? undefined : 'Enter a valid http(s) URL.' });
-  return value ? normalizeBaseUrl(value) : undefined;
+  const value = await vscode.window.showInputBox({ prompt: 'Relay API base URL', placeHolder: 'https://relay.example.com/v1', ignoreFocusOut: true, validateInput: (input) => normalizeRelayBaseUrl(input) ? undefined : 'Enter an http(s) URL without credentials, query parameters, or fragments.' });
+  return value ? normalizeRelayBaseUrl(value) : undefined;
 }
 
-function isValidBaseUrl(value: string): boolean { try { const url = new URL(value.trim()); return url.protocol === 'https:' || url.protocol === 'http:'; } catch { return false; } }
-function normalizeBaseUrl(value: string): string { return value.trim().replace(/\/+$/, ''); }
+function runConnectionMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = connectionMutation.then(operation, operation);
+  connectionMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : 'Unknown error.'; }
 function formatConnectionFailure(failure: ConnectionTestFailure): string {
   return [

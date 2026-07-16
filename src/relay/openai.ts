@@ -3,6 +3,7 @@ import type { StreamCallbacks } from './client';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
 import type { ChatRequest, OpenAIFullResponse, StreamChunk, ToolCall } from './types';
+import { relayEndpointUrl } from './url';
 
 export interface OpenAIRequestOptions {
   readonly baseUrl: string;
@@ -68,7 +69,7 @@ async function fetchOpenAI(
 ): Promise<Response> {
   // Never retry network-level POST failures. The upstream may already have
   // accepted the request, which could duplicate billing or tool execution.
-  return fetchWithResponseTimeout(`${options.baseUrl}/chat/completions`, {
+  return fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'chat/completions'), {
     method: 'POST',
     headers: { ...options.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(request),

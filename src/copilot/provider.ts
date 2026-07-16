@@ -55,6 +55,13 @@ interface RequestDiagnostics {
   failed(error: unknown): void;
 }
 
+interface ModelLoadResult {
+  readonly models: RoutedModel[];
+  readonly snapshots: Map<RoutedModel['route'], RoutedModel[]>;
+  readonly partial: boolean;
+  readonly failedRoutes: Array<{ route: RoutedModel['route']; error: unknown }>;
+}
+
 export interface ConnectionStatus {
   connectionName?: string;
   host?: string;
@@ -92,9 +99,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly routeModelSnapshots = new Map<RoutedModel['route'], RoutedModel[]>();
   private refreshModelsTask: Promise<void> | undefined;
   private modelRefreshGeneration = 0;
-  private readonly refreshWarnings = new Set<string>();
-  private cacheConnectionName: string | undefined;
-  private lastRefreshPartial = false;
+  private cacheConnectionKey: string | undefined;
   private connectionStatus: ConnectionStatus = { phase: 'unconfigured', modelCount: 0 };
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
@@ -127,6 +132,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
   async promptForRelayKey(profileName?: string): Promise<boolean> {
     return this.auth.promptForApiKey(profileName);
+  }
+
+  async promptForRelayKeyValue(profileName?: string): Promise<string | undefined> {
+    return this.auth.promptForApiKeyValue(profileName);
+  }
+
+  async storeRelayKey(profileName: string, apiKey: string): Promise<void> {
+    await this.auth.storeApiKey(profileName, apiKey);
   }
 
   async hasRelayKey(profileName?: string): Promise<boolean> {
@@ -195,11 +208,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   async refreshModels(): Promise<void> {
     this.modelRefreshGeneration++;
     const config = getConfig();
-    const connectionChanged = config.profileName !== this.cacheConnectionName;
+    const connectionKey = modelConnectionKey(config);
+    const connectionChanged = connectionKey !== this.cacheConnectionKey;
     if (connectionChanged) {
       this.cachedModels = [];
       this.routeModelSnapshots.clear();
-      this.cacheConnectionName = config.profileName;
+      this.cacheConnectionKey = connectionKey;
       this.changeEmitter.fire();
     }
     if (!config.profileName || !config.baseUrl) {
@@ -246,6 +260,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
   private async refreshModelsInternal(generation: number): Promise<void> {
     const config = getConfig();
+    const connectionKey = modelConnectionKey(config);
     if (!config.baseUrl) {
       if (generation === this.modelRefreshGeneration) {
         this.changeEmitter.fire();
@@ -253,19 +268,23 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       return;
     }
 
-    const models = await this.loadAllModels(config);
-    if (generation !== this.modelRefreshGeneration) {
+    const previousSnapshots = new Map(this.routeModelSnapshots);
+    const result = await this.loadAllModels(config, previousSnapshots);
+    if (!this.isCurrentRefresh(generation, connectionKey)) {
       return;
     }
 
-    this.cachedModels = models;
-    this.cacheConnectionName = config.profileName;
+    this.cachedModels = result.models;
+    this.routeModelSnapshots.clear();
+    for (const [route, snapshot] of result.snapshots) this.routeModelSnapshots.set(route, snapshot);
+    this.cacheConnectionKey = connectionKey;
+    for (const failure of result.failedRoutes) this.reportRouteRefreshFailure(config, failure.route, failure.error);
     this.setConnectionStatus({
       ...connectionStatusFor(config),
-      phase: this.lastRefreshPartial ? 'degraded' : 'ready',
-      modelCount: models.length,
+      phase: result.partial ? 'degraded' : 'ready',
+      modelCount: result.models.length,
       checkedAt: Date.now(),
-      message: this.lastRefreshPartial ? 'Some Relay model routes could not be refreshed.' : undefined,
+      message: result.partial ? 'Some Relay model routes could not be refreshed.' : undefined,
     });
     this.changeEmitter.fire();
     vscode.window.showInformationMessage(`WeaveNet loaded ${this.cachedModels.length} model(s).`);
@@ -275,30 +294,16 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     _options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
+    void token;
+    try {
+      await this.refreshModels();
+    } catch (error) {
+      this.debug(getConfig(), `Model picker refresh failed: ${formatLogError(error)}`);
+    }
     const config = getConfig();
-
-    if (this.cacheConnectionName !== config.profileName) {
-      this.cachedModels = [];
-      this.routeModelSnapshots.clear();
-      this.cacheConnectionName = config.profileName;
-    }
-
-    if (this.cachedModels.length === 0 && config.baseUrl) {
-      const generation = this.modelRefreshGeneration;
-      try {
-        const models = await this.loadAllModels(config, token);
-        if (generation === this.modelRefreshGeneration) {
-          this.cachedModels = models;
-        }
-      } catch (error) {
-        if (generation === this.modelRefreshGeneration) {
-          console.error('Failed to load WeaveNet models', error);
-        }
-      }
-    }
-
     const hasApiKey = await this.auth.hasApiKey(config.profileName);
-    return this.cachedModels.map((model) => toChatInformation(model, config, hasApiKey));
+    const models = this.cacheConnectionKey === modelConnectionKey(config) ? this.cachedModels : [];
+    return models.map((model) => toChatInformation(model, config, hasApiKey));
   }
 
   async provideLanguageModelChatResponse(
@@ -312,7 +317,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!config.baseUrl) {
       throw new Error('No WeaveNet Relay connection is configured.');
     }
-    if (this.cacheConnectionName !== config.profileName) {
+    if (this.cacheConnectionKey !== modelConnectionKey(config)) {
       throw new Error('The active Relay connection changed. Refresh models and select a model again.');
     }
 
@@ -670,8 +675,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
   private async loadAllModels(
     config: ReturnType<typeof getConfig>,
+    previousSnapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]> = new Map(),
     token?: vscode.CancellationToken,
-  ): Promise<RoutedModel[]> {
+  ): Promise<ModelLoadResult> {
     const refreshMs = config.metadataRefreshHours * 3_600_000;
     void scheduleOpenRouterRefresh(refreshMs);
 
@@ -687,18 +693,19 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
     const results = await Promise.allSettled(routes.map((route) => route.task));
     const loaded: RoutedModel[] = [];
+    const snapshots = new Map(previousSnapshots);
+    const failedRoutes: Array<{ route: RoutedModel['route']; error: unknown }> = [];
     let failedRouteCount = 0;
     for (let index = 0; index < results.length; index++) {
       const result = results[index];
       const route = routes[index].name;
       if (result.status === 'fulfilled') {
-        this.routeModelSnapshots.set(route, result.value);
-        this.clearRouteRefreshWarnings(route);
+        snapshots.set(route, result.value);
         loaded.push(...result.value);
       } else {
         failedRouteCount++;
-        this.reportRouteRefreshFailure(route, result.reason);
-        loaded.push(...(this.routeModelSnapshots.get(route) ?? []));
+        failedRoutes.push({ route, error: result.reason });
+        loaded.push(...(snapshots.get(route) ?? []));
       }
     }
 
@@ -713,9 +720,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       throw new Error('All model routes failed to refresh.');
     }
 
-    this.lastRefreshPartial = failedRouteCount > 0;
     const routed = assignUniquePickerIds(dedupeModels(loaded));
-    return routed;
+    return { models: routed, snapshots, partial: failedRouteCount > 0, failedRoutes };
+  }
+
+  private isCurrentRefresh(generation: number, connectionKey: string): boolean {
+    return generation === this.modelRefreshGeneration && modelConnectionKey(getConfig()) === connectionKey;
   }
 
   private setConnectionStatus(status: ConnectionStatus): void {
@@ -723,21 +733,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.connectionStatusEmitter.fire(status);
   }
 
-  private reportRouteRefreshFailure(route: RoutedModel['route'], error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const key = `${route}:${message}`;
-    if (!this.refreshWarnings.has(key)) {
-      this.refreshWarnings.add(key);
-      this.output.appendLine(
-        `[models] ${route} route unavailable; continuing with successful routes: ${message.slice(0, 240)}`,
-      );
-    }
-  }
-
-  private clearRouteRefreshWarnings(route: RoutedModel['route']): void {
-    for (const key of this.refreshWarnings) {
-      if (key.startsWith(`${route}:`)) this.refreshWarnings.delete(key);
-    }
+  private reportRouteRefreshFailure(config: ReturnType<typeof getConfig>, route: RoutedModel['route'], error: unknown): void {
+    this.debug(config, `[models] ${route} route unavailable; continuing with successful routes: ${formatLogError(error)}`);
   }
 
   private async loadModelsForProtocol(
@@ -789,6 +786,17 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
 function connectionStatusFor(config: ReturnType<typeof getConfig>): Pick<ConnectionStatus, 'connectionName' | 'host'> {
   return { connectionName: config.profileName, host: safeHost(config.baseUrl) };
+}
+
+function modelConnectionKey(config: ReturnType<typeof getConfig>): string {
+  return JSON.stringify({
+    profileName: config.profileName,
+    baseUrl: config.baseUrl,
+    requestHeaders: config.requestHeaders,
+    includeModels: config.includeModels.map((entry) => entry.source),
+    excludeModels: config.excludeModels.map((entry) => entry.source),
+    models: config.models,
+  });
 }
 
 function safeHost(baseUrl: string): string | undefined {
@@ -917,8 +925,9 @@ function formatLogError(error: unknown): string {
     ].filter(Boolean).join(', ');
     return `RelayStreamError(${details})`;
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return `${error instanceof Error ? error.name : 'UnknownError'}(${message.replace(/\s+/g, ' ').trim().slice(0, 200)})`;
+  if (error instanceof RelayTimeoutError) return 'RelayTimeoutError';
+  if (error instanceof TypeError) return 'NetworkError';
+  return error instanceof Error ? error.name : 'UnknownError';
 }
 
 export function toLanguageModelError(error: unknown): Error {
