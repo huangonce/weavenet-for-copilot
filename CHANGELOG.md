@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.3 - 2026-07-16
+
+- Fixed repeated model catalog reloads by reusing resolved catalogs until connection, credential, or metadata changes explicitly invalidate them.
+- Refactored the Copilot provider into focused model discovery, OpenAI, Claude, connection, helper, and request diagnostics modules.
+- Strengthened Relay response and streaming reliability while preserving safe cancellation, error mapping, and request diagnostics.
+- Added ESLint checks, coverage-enabled CI, package inspection, tag/version validation, and a VS Code Extension Host smoke test.
+
 ## 0.3.2 - 2026-07-16
 
 - Refused Relay redirects for authenticated requests and reliably released JSON, OpenAI SSE, and Claude SSE stream readers across completion and failure paths.

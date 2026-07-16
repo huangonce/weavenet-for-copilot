@@ -2,6 +2,8 @@ src/**
 test/**
 vitest.config.ts
 tsconfig.json
+tsconfig.test.json
+eslint.config.mjs
 package-lock.json
 node_modules/**
 coverage/**

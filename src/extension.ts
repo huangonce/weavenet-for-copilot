@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import { VENDOR } from './constants';
-import { ConnectionStatus, ConnectionTestError, ConnectionTestFailure, WeaveNetChatProvider } from './copilot/provider';
-import { ConnectionProfile, getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from './config/config';
+import type { ConnectionStatus, ConnectionTestFailure } from './copilot/provider';
+import { ConnectionTestError, WeaveNetChatProvider } from './copilot/provider';
+import type { ConnectionProfile } from './config/config';
+import { getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from './config/config';
 import { initMetadataCache, onMetadataChanged } from './metadata/metadataCache';
 import { scheduleOpenRouterRefresh } from './metadata/openrouterFallback';
 import { resetLegacyInstallation } from './migration/legacyReset';
@@ -35,7 +37,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.lm.registerLanguageModelChatProvider(VENDOR, provider),
-    onMetadataChanged(() => void provider.refreshModels().catch(() => provider.refreshModelPicker())),
+    onMetadataChanged(() => void provider.refreshModels('invalidate').catch(() => provider.refreshModelPicker())),
     vscode.commands.registerCommand('weavenet-copilot.setRelayKey', () => configureActiveRelay(provider)),
     vscode.commands.registerCommand('weavenet-copilot.clearRelayKey', () => clearActiveRelayKey(provider)),
     vscode.commands.registerCommand('weavenet-copilot.switchProfile', () => setDefaultConnection(provider)),
@@ -48,12 +50,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('weavenet-copilot.testConnection', () => testConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.setDefaultConnection', () => setDefaultConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.manageConnections', () => manageConnections(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels()),
+    vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate')),
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', async () => {
       const refreshHours = getConfig().metadataRefreshHours;
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'WeaveNet: Refreshing model metadata', cancellable: false }, async () => {
         await (scheduleOpenRouterRefresh(refreshHours * 3_600_000, true) ?? Promise.resolve());
-        await provider.refreshModels();
+        await provider.refreshModels('invalidate');
       });
     }),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),

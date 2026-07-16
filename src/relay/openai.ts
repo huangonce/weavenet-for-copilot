@@ -1,8 +1,7 @@
 import type { CancellationToken } from 'vscode';
-import type { StreamCallbacks } from './client';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
-import type { ChatRequest, OpenAIFullResponse, StreamChunk, ToolCall } from './types';
+import type { ChatRequest, OpenAIFullResponse, StreamCallbacks, StreamChunk, ToolCall } from './types';
 import { relayEndpointUrl } from './url';
 
 export interface OpenAIRequestOptions {

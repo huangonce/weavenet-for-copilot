@@ -2,10 +2,8 @@ import type { CancellationToken } from 'vscode';
 import type {
   ChatRequest,
   ClaudeRequest,
-  ClaudeUsage,
   ModelsResponse,
-  OpenAIUsage,
-  ToolCall,
+  StreamCallbacks,
 } from './types';
 import { streamClaudeMessages } from './claude';
 import { isReservedRelayHeader } from '../config/config';
@@ -21,19 +19,6 @@ export interface RelayClientOptions {
   anthropicVersion?: string;
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
-}
-
-export interface StreamCallbacks {
-  onContent(text: string): void;
-  onReasoning(text: string): void;
-  onToolCall(toolCall: ToolCall): void;
-  onOpenAIUsage?(usage: OpenAIUsage): void;
-  onClaudeUsage?(usage: ClaudeUsage, responseId?: string): void;
-  /** HTTP response metadata only; authentication headers and bodies are never exposed. */
-  onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string): void;
-  onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
-  /** Called only when the protocol's normal terminal event is received. */
-  onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
 }
 
 export interface RelayEndpointTestResult {

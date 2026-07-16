@@ -113,10 +113,13 @@ API Key 会存储在 VS Code SecretStorage 中。
 
 ## 发布流程
 
-合并到 `main` 后，GitHub Actions 会自动编译、打包并发布到 Visual Studio Marketplace。发布前必须在 PR 中更新 `package.json` 和 `package-lock.json` 的版本号，并同步维护 `CHANGELOG.md`；Marketplace 不允许重复发布同一版本。
+合并到 `main` 只运行持续集成，不会发布。发布前必须更新 `package.json` 和 `package-lock.json` 的版本号，并同步维护 `CHANGELOG.md`；Marketplace 不允许重复发布同一版本。
 
 ```bash
 npm version patch --no-git-tag-version
+git commit -am "Release x.y.z"
+git tag vx.y.z
+git push origin main vx.y.z
 ```
 
-流水线使用仓库的 `VSCE_PAT` Actions Secret。重复版本会安全跳过，不会覆盖已发布版本。
+推送形如 `v0.3.3` 的语义化版本标签后，GitHub Actions 会校验标签与 `package.json` 版本一致，再执行 lint、编译、覆盖率门槛、真实 VS Code 扩展宿主冒烟测试、打包和 Marketplace 发布。流水线使用仓库的 `VSCE_PAT` Actions Secret；重复版本会安全跳过，不会覆盖已发布版本。

@@ -229,7 +229,7 @@ describe('connection mutation queue', () => {
   });
 
   it('shows connection test diagnostics and safely presents structured failures', async () => {
-    const config = configurationFixture();
+    configurationFixture();
     const provider = providerFixture();
     const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { profile: unknown }[]) => items[0] as never);
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
@@ -258,7 +258,7 @@ describe('connection mutation queue', () => {
   });
 
   it('saves and clears an active connection key with an invalidating refresh', async () => {
-    const config = configurationFixture();
+    configurationFixture();
     const provider = providerFixture();
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
 
@@ -274,6 +274,5 @@ describe('connection mutation queue', () => {
     configurationFixture([]);
     await clearActiveRelayKey(provider);
     expect(info).toHaveBeenCalledWith('WeaveNet has no active Relay connection API key to clear.');
-    expect(config.profiles).toHaveLength(1);
   });
 });

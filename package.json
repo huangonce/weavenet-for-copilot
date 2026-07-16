@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -409,19 +409,27 @@
     "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "compile": "npm run clean && tsc -p ./",
     "watch": "npm run clean && tsc -watch -p ./",
+    "lint": "eslint src test",
+    "lint:fix": "eslint src test --fix",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:integration": "npm run compile && node test/integration/run.cjs",
     "test:watch": "vitest",
     "package:list": "vsce ls",
     "package": "vsce package",
     "publish:marketplace": "vsce publish --skip-duplicate"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
     "@types/vscode": "^1.116.0",
     "@vitest/coverage-v8": "^4.1.10",
+    "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.1",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0",
     "vitest": "^4.1.10"
   }
 }

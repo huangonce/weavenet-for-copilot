@@ -1,13 +1,12 @@
 import type { CancellationToken } from 'vscode';
 import * as vscode from 'vscode';
-import type { StreamCallbacks } from './client';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
 import { sanitizeJsonSchema } from './schema';
 import { relayEndpointUrl } from './url';
 import type {
   ClaudeCacheControl, ClaudeContentBlock, ClaudeContentBlockText, ClaudeMessage,
-  ClaudeRequest, ClaudeStreamEvent, ClaudeToolDefinition, ToolCall,
+  ClaudeRequest, ClaudeStreamEvent, ClaudeToolDefinition, StreamCallbacks, ToolCall,
 } from './types';
 
 const SYSTEM_ROLE = 3;

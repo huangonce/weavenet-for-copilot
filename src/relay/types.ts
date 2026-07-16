@@ -273,3 +273,16 @@ export interface ClaudeStreamEvent {
     input?: unknown;
   }>;
 }
+
+export interface StreamCallbacks {
+  onContent(text: string): void;
+  onReasoning(text: string): void;
+  onToolCall(toolCall: ToolCall): void;
+  onOpenAIUsage?(usage: OpenAIUsage): void;
+  onClaudeUsage?(usage: ClaudeUsage, responseId?: string): void;
+  /** HTTP response metadata only; authentication headers and bodies are never exposed. */
+  onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string): void;
+  onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
+  /** Called only when the protocol's normal terminal event is received. */
+  onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+}

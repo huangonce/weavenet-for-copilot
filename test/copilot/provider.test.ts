@@ -103,6 +103,54 @@ describe('model refresh invalidation', () => {
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', connectionName: 'work', modelCount: 1 });
   });
 
+  it('reuses a resolved model catalog for sequential passive refreshes', async () => {
+    const { provider, secrets } = providerFixture();
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    await provider.refreshModels();
+    await provider.refreshModels();
+    await provider.provideLanguageModelChatInformation({} as never, {} as never);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', modelCount: 0 });
+  });
+
+  it('does not reload after a model change event causes VS Code to query the picker', async () => {
+    const { provider, secrets } = providerFixture();
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-test' }] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const pickerQueries: Promise<vscode.LanguageModelChatInformation[]>[] = [];
+    const subscription = provider.onDidChangeLanguageModelChatInformation(() => {
+      pickerQueries.push(provider.provideLanguageModelChatInformation({} as never, {} as never));
+    });
+
+    await provider.refreshModels();
+    await Promise.all(pickerQueries);
+    subscription.dispose();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('reloads a resolved model catalog when explicitly invalidated', async () => {
+    const { provider, secrets } = providerFixture();
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ data: [{ id: 'gpt-test' }] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+
+    await provider.refreshModels();
+    await provider.refreshModels('invalidate');
+
+    const modelRequests = fetchMock.mock.calls.filter(([input]) => String(input).includes('work.example.test'));
+    expect(modelRequests).toHaveLength(2);
+  });
+
   it('does not commit an old model result after the active key is deleted in flight', async () => {
     const { provider, secrets } = providerFixture();
     const key = `${RELAY_API_KEY_SECRET}.profile.work`;
@@ -271,7 +319,7 @@ describe('Provider chat responses', () => {
     const provider = await readyProvider(openAIModel);
     const information = await provider.provideLanguageModelChatInformation({} as never, token);
     expect(information).toEqual([expect.objectContaining({
-      id: 'gpt-test', isBYOK: true, capabilities: { toolCalling: false, imageInput: false },
+      id: 'gpt-test', isBYOK: true, capabilities: { toolCalling: true, imageInput: false },
     })]);
   });
 
