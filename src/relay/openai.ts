@@ -90,23 +90,27 @@ export async function processOpenAIStream(
   let buffer = '';
   let terminal = false;
 
-  while (!terminal) {
-    const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      terminal = processOpenAISseLine(line, pendingToolCalls, callbacks, state);
-      if (terminal) break;
+  try {
+    while (!terminal) {
+      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        terminal = processOpenAISseLine(line, pendingToolCalls, callbacks, state);
+        if (terminal) break;
+      }
     }
+    buffer += decoder.decode();
+    if (!terminal && buffer.trim()) {
+      terminal = processOpenAISseLine(buffer, pendingToolCalls, callbacks, state);
+    }
+    state.responseParts += flushToolCalls(pendingToolCalls, callbacks);
+    return { ...state, terminal };
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (!terminal && buffer.trim()) {
-    terminal = processOpenAISseLine(buffer, pendingToolCalls, callbacks, state);
-  }
-  state.responseParts += flushToolCalls(pendingToolCalls, callbacks);
-  return { ...state, terminal };
 }
 
 export function processOpenAISseLine(

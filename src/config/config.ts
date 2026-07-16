@@ -6,13 +6,21 @@ const RESERVED_REQUEST_HEADERS = new Set([
   'accept',
   'anthropic-version',
   'authorization',
+  'cookie',
   'connection',
   'content-length',
   'content-type',
   'host',
+  'keep-alive',
+  'proxy-authorization',
+  'te',
+  'trailer',
   'transfer-encoding',
+  'upgrade',
   'x-api-key',
 ]);
+const MAX_PROFILE_NAME_LENGTH = 100;
+const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export interface ConfiguredModel {
   id: string;
@@ -177,7 +185,7 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     const record = value as Record<string, unknown>;
     const name = typeof record.name === 'string' ? record.name.trim() : '';
     const baseUrl = typeof record.baseUrl === 'string' ? normalizeRelayBaseUrl(record.baseUrl) ?? '' : '';
-    if (!name || !baseUrl || seenNames.has(name)) continue;
+    if (!isValidProfileName(name) || !baseUrl || seenNames.has(name)) continue;
     seenNames.add(name);
     const includeModels = stringArray(record.includeModels);
     const excludeModels = stringArray(record.excludeModels);
@@ -192,6 +200,11 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     });
   }
   return profiles;
+}
+
+export function isValidProfileName(value: string): boolean {
+  const name = value.trim();
+  return Boolean(name) && name.length <= MAX_PROFILE_NAME_LENGTH && !UNSAFE_PROFILE_NAME.test(name);
 }
 
 /** Headers owned by the extension and never configurable per connection. */

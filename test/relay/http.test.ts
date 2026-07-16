@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, readWithIdleTimeout } from '../src/relay/http';
+import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readWithIdleTimeout } from '../../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('relay HTTP safety', () => {
+  it('refuses redirects for authenticated Relay requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+
+    await fetchWithResponseTimeout('https://example.test/models', {
+      headers: { Authorization: 'Bearer secret' },
+    }, 100);
+
+    expect(fetchMock).toHaveBeenCalledWith('https://example.test/models', expect.objectContaining({ redirect: 'error' }));
+  });
+
   it('rejects non-GET retry requests before sending them', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     await expect(fetchJsonWithRetry('https://example.test', { method: 'POST' }, 100)).rejects.toThrow('only supports GET');
@@ -102,6 +112,19 @@ describe('relay HTTP safety', () => {
     const pending = readWithIdleTimeout(reader, 1_000, token);
     cancelListener?.();
     await expect(pending).rejects.toMatchObject({ name: 'CancellationError' });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('releases a complete-response reader after a parsing callback throws', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn().mockResolvedValue({ value: new TextEncoder().encode('body'), done: false }),
+      cancel,
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    (reader.read as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('read failed'));
+    const response = { body: { getReader: () => reader } } as unknown as Response;
+
+    await expect(readResponseText(response, 100)).rejects.toThrow('read failed');
     expect(cancel).toHaveBeenCalledOnce();
   });
 });

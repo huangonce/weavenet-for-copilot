@@ -3,8 +3,8 @@ import * as vscode from 'vscode';
 import {
   OPENAI_API_KEY_SECRET,
   RELAY_API_KEY_SECRET,
-} from '../src/constants';
-import { LEGACY_RESET_MARKER, resetLegacyInstallation } from '../src/migration/legacyReset';
+} from '../../src/constants';
+import { LEGACY_RESET_MARKER, resetLegacyInstallation } from '../../src/migration/legacyReset';
 
 class InMemorySecrets {
   readonly values = new Map<string, string>();
@@ -12,6 +12,15 @@ class InMemorySecrets {
   async get(key: string): Promise<string | undefined> { return this.values.get(key); }
   async store(key: string, value: string): Promise<void> { this.values.set(key, value); }
   async delete(key: string): Promise<void> { this.values.delete(key); }
+}
+
+class FailingSecrets extends InMemorySecrets {
+  failDeleteKey: string | undefined;
+
+  override async delete(key: string): Promise<void> {
+    if (key === this.failDeleteKey) throw new Error('secret delete failed');
+    await super.delete(key);
+  }
 }
 
 class InMemoryState {
@@ -118,5 +127,33 @@ describe('legacy installation reset', () => {
     expect(workspaceSettings.get('baseUrl')).toBeUndefined();
     expect(folderSettings.get('baseUrl')).toBeUndefined();
     expect(globalState.get(LEGACY_RESET_MARKER)).toBe(true);
+  });
+
+  it('restores removed settings and secrets when a legacy secret cannot be deleted', async () => {
+    const secrets = new FailingSecrets();
+    const globalState = new InMemoryState();
+    settings.set('baseUrl', 'https://legacy.example.com/v1');
+    await secrets.store(RELAY_API_KEY_SECRET, 'relay-key');
+    await secrets.store(OPENAI_API_KEY_SECRET, 'openai-key');
+    secrets.failDeleteKey = OPENAI_API_KEY_SECRET;
+
+    await expect(resetLegacyInstallation({ secrets, globalState } as never)).rejects.toThrow('secret delete failed');
+    expect(settings.get('baseUrl')).toBe('https://legacy.example.com/v1');
+    expect(secrets.values.get(RELAY_API_KEY_SECRET)).toBe('relay-key');
+    expect(secrets.values.get(OPENAI_API_KEY_SECRET)).toBe('openai-key');
+    expect(globalState.get(LEGACY_RESET_MARKER)).toBeUndefined();
+  });
+
+  it('restores removed settings and secrets when recording the completion marker fails', async () => {
+    const secrets = new InMemorySecrets();
+    const globalState = new InMemoryState();
+    settings.set('baseUrl', 'https://legacy.example.com/v1');
+    await secrets.store(RELAY_API_KEY_SECRET, 'relay-key');
+    vi.spyOn(globalState, 'update').mockRejectedValueOnce(new Error('marker update failed'));
+
+    await expect(resetLegacyInstallation({ secrets, globalState } as never)).rejects.toThrow('marker update failed');
+    expect(settings.get('baseUrl')).toBe('https://legacy.example.com/v1');
+    expect(secrets.values.get(RELAY_API_KEY_SECRET)).toBe('relay-key');
+    expect(globalState.get(LEGACY_RESET_MARKER)).toBeUndefined();
   });
 });

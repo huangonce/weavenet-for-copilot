@@ -3,14 +3,16 @@ import {
   applyLastTwoUserCacheControl,
   clampClaudeTemperature,
   convertClaudeMessages,
+  convertClaudeTools,
   normalizeClaudeImageMediaType,
   processClaudeFullResponse,
   processClaudeSseLine,
   processClaudeStream,
-} from '../src/relay/claude';
+  streamClaudeMessages,
+} from '../../src/relay/claude';
 import * as vscode from 'vscode';
-import type { StreamCallbacks } from '../src/relay/client';
-import type { ClaudeMessage, ToolCall } from '../src/relay/types';
+import type { StreamCallbacks } from '../../src/relay/client';
+import type { ClaudeMessage, ToolCall } from '../../src/relay/types';
 
 function callbacks() {
   return {
@@ -68,6 +70,31 @@ describe('Claude response parsing', () => {
       parts: 0,
     });
     expect(cb.onProcessingStarted).toHaveBeenCalledWith('Claude');
+  });
+
+  it('preserves Unicode split across stream chunks and cancels after message_stop', async () => {
+    const encoded = new TextEncoder().encode([
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}',
+      '',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n'));
+    const split = encoded.findIndex((value, index) => index > 10 && value >= 0x80);
+    const chunks = [encoded.slice(0, split + 1), encoded.slice(split + 1)];
+    let readIndex = 0;
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn(async () => readIndex < chunks.length
+        ? { value: chunks[readIndex++], done: false }
+        : { value: undefined, done: true }),
+      cancel,
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    const response = { body: { getReader: () => reader } } as unknown as Response;
+    const cb = callbacks();
+
+    await expect(processClaudeStream(response, cb, 1_000)).resolves.toMatchObject({ terminal: true });
+    expect(cb.onContent).toHaveBeenCalledWith('你好');
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it('prefers streamed tool arguments over a non-empty initial input', () => {
@@ -147,5 +174,35 @@ describe('Claude conversion helpers', () => {
     expect(clampClaudeTemperature(0.7)).toBe(0.7);
     expect(clampClaudeTemperature(1.5)).toBe(1);
     expect(clampClaudeTemperature(undefined)).toBeUndefined();
+  });
+
+  it('converts system text, images, and cached Claude tools', () => {
+    const system = { role: 3, content: [new vscode.LanguageModelTextPart('system rules')] } as never;
+    const user = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1, 2]), 'image/jpg')],
+    } as never;
+    expect(convertClaudeMessages([system, user], { supportsImageInput: true, promptCaching: true, cacheTTL: '1h' }))
+      .toMatchObject({
+        system: [{ type: 'text', text: 'system rules', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+        messages: [{ role: 'user', content: [{ type: 'image', source: { media_type: 'image/jpeg', data: 'AQI=' }, cache_control: { type: 'ephemeral', ttl: '1h' } }] }],
+      });
+    expect(convertClaudeTools([{ name: 'search', description: 'Search', inputSchema: {} }] as never, true, '1h'))
+      .toMatchObject([{ name: 'search', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
+  });
+
+  it('falls back to a complete response after an empty non-terminal Claude stream', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('', { headers: { 'content-type': 'text/event-stream' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: 'fallback' }] }), {
+        headers: { 'content-type': 'application/json' },
+      }));
+    const cb = callbacks();
+    await streamClaudeMessages({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'claude-test', max_tokens: 16, messages: [], stream: true }, cb);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ stream: false });
+    expect(cb.onContent).toHaveBeenCalledWith('fallback');
   });
 });

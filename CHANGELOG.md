@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.3.2 - 2026-07-16
+
+- Refused Relay redirects for authenticated requests and reliably released JSON, OpenAI SSE, and Claude SSE stream readers across completion and failure paths.
+- Rejected malformed model catalogs, unsafe connection names, and orphaned destination API keys during connection copy or rename operations.
+- Expanded regression coverage for UTF-8 stream boundaries, model catalog validation, SecretStorage lifecycle safety, and connection workflows.
+
 ## 0.3.1 - 2026-07-16
 
 - Made connection creation and renaming recover safely across configuration and SecretStorage failures, while serializing connection mutations.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeJsonSchema } from '../src/relay/schema';
+import { sanitizeJsonSchema } from '../../src/relay/schema';
 
 describe('sanitizeJsonSchema', () => {
   it('removes editor-only schema fields recursively', () => {

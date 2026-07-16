@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -410,6 +410,7 @@
     "compile": "npm run clean && tsc -p ./",
     "watch": "npm run clean && tsc -watch -p ./",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "package:list": "vsce ls",
     "package": "vsce package",
@@ -418,6 +419,7 @@
   "devDependencies": {
     "@types/node": "^25.6.0",
     "@types/vscode": "^1.116.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "@vscode/vsce": "^3.9.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10"

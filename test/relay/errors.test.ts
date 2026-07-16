@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createRelayRequestError, createRelayStreamError } from '../src/relay/errors';
-import { describeConnectionTestError, toLanguageModelError } from '../src/copilot/provider';
+import { createRelayRequestError, createRelayStreamError } from '../../src/relay/errors';
+import { describeConnectionTestError, toLanguageModelError } from '../../src/copilot/provider';
 
 describe('relay error mapping', () => {
   it('preserves safe structured SSE error fields and maps rate limits', () => {

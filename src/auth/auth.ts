@@ -58,10 +58,10 @@ export class AuthManager {
     if (fromKey === toKey) return Boolean(await this.getApiKey(fromProfileName));
 
     const [apiKey, destinationValue] = await Promise.all([this.secrets.get(fromKey), this.secrets.get(toKey)]);
-    if (!apiKey?.trim()) return false;
     if (destinationValue !== undefined) {
       throw new Error('The destination connection already has an API key. Clear it before renaming this connection.');
     }
+    if (!apiKey?.trim()) return false;
 
     try {
       await this.secrets.store(toKey, apiKey);

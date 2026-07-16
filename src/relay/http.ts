@@ -66,7 +66,9 @@ export async function fetchWithResponseTimeout(
 ): Promise<Response> {
   const context = createAbortContext(token, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: context.signal });
+    // Relay requests may contain API keys and connection-scoped headers.
+    // Refuse redirects instead of risking forwarding them to another origin.
+    return await fetch(url, { ...init, redirect: 'error', signal: context.signal });
   } catch (error) {
     if (context.signal.reason instanceof RelayTimeoutError) throw context.signal.reason;
     throw error;
@@ -117,7 +119,7 @@ async function fetchJsonOnce<T>(
 ): Promise<JsonResponse<T>> {
   const context = createAbortContext(token, timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: context.signal });
+    const response = await fetch(url, { ...init, redirect: 'error', signal: context.signal });
     const body = await readResponseTextWithSignal(response, context.signal, maxBodyBytes);
     if (!response.ok) {
       throw createRelayRequestError(
@@ -157,9 +159,8 @@ async function readResponseTextWithSignal(response: Response, signal: AbortSigna
       result += decoder.decode(value, { stream: true });
     }
     return result + decoder.decode();
-  } catch (error) {
-    void reader.cancel().catch(() => undefined);
-    throw error;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
 }
 
@@ -235,12 +236,16 @@ export async function readResponseText(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let result = '';
-  while (true) {
-    const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-    if (done) break;
-    result += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
+      if (done) break;
+      result += decoder.decode(value, { stream: true });
+    }
+    return result + decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  return result + decoder.decode();
 }
 
 function isRetryableGetError(error: unknown): boolean {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeRelayBaseUrl, relayEndpointUrl } from '../src/relay/url';
+import { normalizeRelayBaseUrl, relayEndpointUrl } from '../../src/relay/url';
 
 describe('Relay URL handling', () => {
   it('normalizes an HTTP(S) base URL while preserving its API path', () => {

@@ -62,6 +62,20 @@ interface ModelLoadResult {
   readonly failedRoutes: Array<{ route: RoutedModel['route']; error: unknown }>;
 }
 
+type ModelRefreshIntent = 'passive' | 'invalidate';
+
+export function shouldInvalidateModelRefresh(
+  intent: ModelRefreshIntent,
+  taskConnectionKey: string | undefined,
+  connectionKey: string,
+): boolean {
+  return intent === 'invalidate' || taskConnectionKey !== connectionKey;
+}
+
+export function shouldApplyTestConnectionStatus(activeProfileName: string | undefined, testedProfileName: string): boolean {
+  return activeProfileName === testedProfileName;
+}
+
 export interface ConnectionStatus {
   connectionName?: string;
   host?: string;
@@ -99,6 +113,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly routeModelSnapshots = new Map<RoutedModel['route'], RoutedModel[]>();
   private refreshModelsTask: Promise<void> | undefined;
   private modelRefreshGeneration = 0;
+  private refreshTaskConnectionKey: string | undefined;
   private cacheConnectionKey: string | undefined;
   private connectionStatus: ConnectionStatus = { phase: 'unconfigured', modelCount: 0 };
 
@@ -113,12 +128,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.output,
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(CONFIG_SECTION)) {
-          void this.refreshModels();
+          void this.refreshModels('invalidate');
         }
       }),
       context.secrets.onDidChange((event) => {
         if (isWeaveNetSecretKey(event.key)) {
-          void this.refreshModels();
+          void this.refreshModels('invalidate');
         }
       }),
     );
@@ -126,7 +141,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
   async configureRelayKey(): Promise<void> {
     if (await this.promptForRelayKey(getConfig().profileName)) {
-      await this.refreshModels();
+      await this.refreshModels('invalidate');
     }
   }
 
@@ -171,7 +186,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
     const apiKey = await this.auth.getApiKey(profileName);
     if (!apiKey) {
-      this.setConnectionStatus({ connectionName: profileName, host, phase: 'keyMissing', modelCount: 0 });
+      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'keyMissing', modelCount: 0 });
       throw new ConnectionTestError({ category: 'authentication', message: 'API key is required for this connection.' });
     }
     const startedAt = Date.now();
@@ -196,17 +211,16 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         }
       }
       const result = { connectionName: profileName, host, modelCount, elapsedMs: Date.now() - startedAt, endpoint, models: diagnostic, claudeMessages, claudeMessagesError };
-      this.setConnectionStatus({ connectionName: profileName, host, phase: 'ready', modelCount, checkedAt: Date.now() });
+      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'ready', modelCount, checkedAt: Date.now() });
       return result;
     } catch (error) {
       const failure = describeConnectionTestError(error);
-      this.setConnectionStatus({ connectionName: profileName, host, phase: 'error', modelCount: 0, checkedAt: Date.now(), message: failure.message });
+      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'error', modelCount: 0, checkedAt: Date.now(), message: failure.message });
       throw new ConnectionTestError(failure);
     }
   }
 
-  async refreshModels(): Promise<void> {
-    this.modelRefreshGeneration++;
+  async refreshModels(intent: ModelRefreshIntent = 'passive'): Promise<void> {
     const config = getConfig();
     const connectionKey = modelConnectionKey(config);
     const connectionChanged = connectionKey !== this.cacheConnectionKey;
@@ -217,23 +231,30 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.changeEmitter.fire();
     }
     if (!config.profileName || !config.baseUrl) {
+      if (intent === 'invalidate' || !this.refreshModelsTask) this.requestModelRefresh(connectionKey);
       this.setConnectionStatus({ phase: 'unconfigured', modelCount: 0 });
+      if (this.refreshModelsTask) return this.refreshModelsTask;
       return;
     }
-    if (!await this.auth.hasApiKey(config.profileName)) {
-      this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'keyMissing', modelCount: 0 });
-      return;
-    }
-    this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'refreshing', modelCount: this.cachedModels.length });
     if (this.refreshModelsTask) {
+      if (shouldInvalidateModelRefresh(intent, this.refreshTaskConnectionKey, connectionKey)) {
+        this.requestModelRefresh(connectionKey);
+      }
       return this.refreshModelsTask;
     }
 
+    this.requestModelRefresh(connectionKey);
     this.refreshModelsTask = this.refreshModelsUntilCurrent()
       .finally(() => {
         this.refreshModelsTask = undefined;
+        this.refreshTaskConnectionKey = undefined;
       });
     return this.refreshModelsTask;
+  }
+
+  private requestModelRefresh(connectionKey: string): void {
+    this.modelRefreshGeneration++;
+    this.refreshTaskConnectionKey = connectionKey;
   }
 
   private async refreshModelsUntilCurrent(): Promise<void> {
@@ -267,6 +288,17 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       }
       return;
     }
+
+    if (!await this.auth.hasApiKey(config.profileName)) {
+      if (this.isCurrentRefresh(generation, connectionKey)) {
+        this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'keyMissing', modelCount: 0 });
+      }
+      return;
+    }
+    if (!this.isCurrentRefresh(generation, connectionKey)) {
+      return;
+    }
+    this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'refreshing', modelCount: this.cachedModels.length });
 
     const previousSnapshots = new Map(this.routeModelSnapshots);
     const result = await this.loadAllModels(config, previousSnapshots);
@@ -733,6 +765,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.connectionStatusEmitter.fire(status);
   }
 
+  private setTestConnectionStatus(profileName: string, status: ConnectionStatus): void {
+    if (shouldApplyTestConnectionStatus(getConfig().profileName, profileName)) this.setConnectionStatus(status);
+  }
+
   private reportRouteRefreshFailure(config: ReturnType<typeof getConfig>, route: RoutedModel['route'], error: unknown): void {
     this.debug(config, `[models] ${route} route unavailable; continuing with successful routes: ${formatLogError(error)}`);
   }
@@ -758,7 +794,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     const routed = (response.data ?? []).map((model: RelayModel) =>
       toRoutedModel(model, isClaudeModel(model.id) ? 'claude' : 'openai', route),
     );
-    const filtered = filterModels(enrichModelsWithMetadata(routed), config, protocol);
+    // A shared /models catalog may advertise both OpenAI-compatible and native
+    // Claude models. Route selection happens per model ID above, so filtering
+    // it again by the discovery route would hide Claude entries.
+    const filtered = filterModels(enrichModelsWithMetadata(routed), config);
     this.debug(config, `Models loaded: protocol=${protocol}, count=${filtered.length}, elapsedMs=${Date.now() - startedAt}`);
     return filtered;
   }
@@ -799,7 +838,7 @@ function modelConnectionKey(config: ReturnType<typeof getConfig>): string {
   });
 }
 
-function safeHost(baseUrl: string): string | undefined {
+export function safeHost(baseUrl: string): string | undefined {
   try {
     const url = new URL(baseUrl);
     return (url.protocol === 'https:' || url.protocol === 'http:') ? url.host || undefined : undefined;
@@ -808,7 +847,7 @@ function safeHost(baseUrl: string): string | undefined {
   }
 }
 
-function safeEndpoint(baseUrl: string, path: string): string {
+export function safeEndpoint(baseUrl: string, path: string): string {
   try {
     const url = new URL(baseUrl);
     url.search = '';
@@ -860,13 +899,13 @@ function countOpenAIImages(request: ChatRequest): number {
     count + (Array.isArray(message.content) ? message.content.filter((part) => part.type === 'image_url').length : 0), 0);
 }
 
-function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
+export function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
   if (!model?.thinking) return undefined;
   const value = options.modelOptions?.reasoningEffort ?? options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort;
   return isReasoningEffort(value) ? value : 'high';
 }
 
-function getConfiguredContextWindow(model: RoutedModel | undefined, options: ModelOptions): number | undefined {
+export function getConfiguredContextWindow(model: RoutedModel | undefined, options: ModelOptions): number | undefined {
   if (!model?.contextWindows?.length) return undefined;
   const value = options.modelOptions?.contextWindow ?? options.modelConfiguration?.contextWindow ?? options.configuration?.contextWindow;
   if (typeof value !== 'string' || value === 'default') return undefined;
@@ -878,7 +917,7 @@ function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max';
 }
 
-function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens: number): { thinking: ClaudeThinking } | undefined {
+export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens: number): { thinking: ClaudeThinking } | undefined {
   if (!effort) return undefined;
   const requested = { low: 1024, medium: 4096, high: 8192, xhigh: 12000, max: 16000 }[effort];
   const budget = Math.min(requested, Math.max(0, maxTokens - 1024));
@@ -979,7 +1018,7 @@ function dedupeModels(models: RoutedModel[]): RoutedModel[] {
   });
 }
 
-function parseToolArguments(value: string): object {
+export function parseToolArguments(value: string): object {
   if (!value.trim()) {
     return {};
   }
@@ -994,7 +1033,7 @@ function parseToolArguments(value: string): object {
   }
 }
 
-function estimateTextTokens(value: string): number {
+export function estimateTextTokens(value: string): number {
   let cjk = 0;
   let other = 0;
   for (const character of value) {

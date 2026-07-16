@@ -2,6 +2,10 @@ export class LanguageModelTextPart {
   constructor(readonly value: string) {}
 }
 
+export class LanguageModelThinkingPart {
+  constructor(readonly value: string) {}
+}
+
 export class LanguageModelToolCallPart {
   constructor(readonly callId: string, readonly name: string, readonly input: object) {}
 }
@@ -12,6 +16,10 @@ export class LanguageModelToolResultPart {
 
 export class LanguageModelDataPart {
   constructor(readonly data: Uint8Array, readonly mimeType: string) {}
+}
+
+export class ThemeIcon {
+  constructor(readonly id: string) {}
 }
 
 export enum LanguageModelChatMessageRole {
@@ -48,21 +56,49 @@ export class LanguageModelError extends Error {
 export class CancellationError extends Error {}
 
 export class EventEmitter<T> {
-  readonly event = () => ({ dispose() {} });
-  fire(_value?: T): void {}
-  dispose(): void {}
+  private readonly listeners = new Set<(value: T) => void>();
+
+  readonly event = (listener: (value: T) => void) => {
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  };
+
+  fire(value: T): void {
+    for (const listener of this.listeners) listener(value);
+  }
+
+  dispose(): void {
+    this.listeners.clear();
+  }
 }
 
 export const window = {
   showInformationMessage: async (_message: string): Promise<undefined> => undefined,
+  showErrorMessage: async (_message: string): Promise<undefined> => undefined,
+  showWarningMessage: async (_message: string): Promise<undefined> => undefined,
+  showInputBox: async (_options: unknown): Promise<string | undefined> => undefined,
+  showQuickPick: async <T>(_items: readonly T[], _options?: unknown): Promise<T | undefined> => undefined,
+  withProgress: async <T>(_options: unknown, task: () => Promise<T>): Promise<T> => task(),
+  createOutputChannel: (_name: string) => ({ appendLine(_value: string) {}, show(_preserveFocus?: boolean) {}, dispose() {} }),
 };
+
+export class StatusBarItem {
+  text = '';
+  tooltip: string | undefined;
+}
 
 export const workspace = {
   getConfiguration: (_section?: string): unknown => ({}),
+  onDidChangeConfiguration: (_listener: (event: { affectsConfiguration(section: string): boolean }) => void) => ({ dispose() {} }),
+  workspaceFolders: undefined as undefined | Array<{ uri: { toString(): string } }>,
 };
 
 export enum ConfigurationTarget {
   Global = 1,
   Workspace = 2,
   WorkspaceFolder = 3,
+}
+
+export enum ProgressLocation {
+  Notification = 15,
 }

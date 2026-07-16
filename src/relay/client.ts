@@ -50,9 +50,7 @@ export class RelayClient {
     const response = await fetchJsonWithRetry<ModelsResponse>(this.endpoint('models'), {
       headers: this.headers(),
     }, this.options.requestTimeoutMs, token);
-    if (response.data !== undefined && (!Array.isArray(response.data) || response.data.length > 10_000)) {
-      throw new Error('Relay model catalog has an invalid or excessive data array.');
-    }
+    validateModelCatalog(response);
     return response;
   }
 
@@ -60,9 +58,7 @@ export class RelayClient {
     const response = await fetchJsonWithRetryMetadata<ModelsResponse>(this.endpoint('models'), {
       headers: this.headers(),
     }, this.options.requestTimeoutMs, token);
-    if (response.value.data !== undefined && (!Array.isArray(response.value.data) || response.value.data.length > 10_000)) {
-      throw new Error('Relay model catalog has an invalid or excessive data array.');
-    }
+    validateModelCatalog(response.value);
     return {
       models: response.value,
       diagnostic: { endpoint: '/models', status: response.status, responseType: response.contentType, requestId: response.requestId },
@@ -145,5 +141,15 @@ export class RelayClient {
 
   private endpoint(path: string): string {
     return relayEndpointUrl(this.options.baseUrl, path);
+  }
+}
+
+function validateModelCatalog(response: ModelsResponse): void {
+  if (!response || typeof response !== 'object' || (
+    !Array.isArray(response.data)
+    || response.data.length > 10_000
+    || response.data.some((model) => !model || typeof model !== 'object' || typeof model.id !== 'string' || !model.id.trim())
+  )) {
+    throw new Error('Relay model catalog has an invalid or excessive data array.');
   }
 }

@@ -1,12 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { AuthManager } from '../src/auth/auth';
+import { describe, expect, it, vi } from 'vitest';
+import * as vscode from 'vscode';
+import { AuthManager } from '../../src/auth/auth';
 import {
   CHATGPT_API_KEY_SECRET,
   CLAUDE_API_KEY_SECRET,
   LEGACY_API_KEY_SECRET,
   OPENAI_API_KEY_SECRET,
   RELAY_API_KEY_SECRET,
-} from '../src/constants';
+} from '../../src/constants';
 
 class InMemorySecrets {
   readonly values = new Map<string, string>();
@@ -101,6 +102,16 @@ describe('Relay API key storage', () => {
     await expect(auth.getApiKey('Company')).resolves.toBe('existing-key');
   });
 
+  it('does not adopt a destination key when the renamed source has no key', async () => {
+    const secrets = new InMemorySecrets();
+    const auth = new AuthManager(secrets as never);
+    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Company`, 'orphan-key');
+
+    await expect(auth.moveApiKey('Work', 'Company')).rejects.toThrow('already has an API key');
+    await expect(auth.getApiKey('Work')).resolves.toBeUndefined();
+    await expect(auth.getApiKey('Company')).resolves.toBe('orphan-key');
+  });
+
   it('clears a selected connection key without touching other connections', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
@@ -149,5 +160,56 @@ describe('Relay API key storage', () => {
     await expect(auth.clearAllRelayApiKeys(['Work', 'Personal'])).rejects.toThrow('delete failed');
     await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
     await expect(auth.getApiKey('Personal')).resolves.toBe('personal-key');
+  });
+
+  it('normalizes empty values and handles same-profile moves without mutating storage', async () => {
+    const secrets = new InMemorySecrets();
+    const auth = new AuthManager(secrets as never);
+    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work%20relay`, '  work-key  ');
+    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Empty`, '   ');
+
+    await expect(auth.getApiKey('Work relay')).resolves.toBe('work-key');
+    await expect(auth.hasApiKey('Empty')).resolves.toBe(false);
+    await expect(auth.moveApiKey('Work relay', 'Work relay')).resolves.toBe(true);
+    await expect(auth.moveApiKey('Empty', 'Other')).resolves.toBe(false);
+  });
+
+  it('restores both key snapshots when storing the renamed destination fails', async () => {
+    const secrets = new FailingSecrets();
+    const auth = new AuthManager(secrets as never);
+    const sourceKey = `${RELAY_API_KEY_SECRET}.profile.Work`;
+    await secrets.store(sourceKey, 'work-key');
+    secrets.failStoreKey = `${RELAY_API_KEY_SECRET}.profile.Company`;
+
+    await expect(auth.moveApiKey('Work', 'Company')).rejects.toThrow('store failed');
+    await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
+    await expect(auth.getApiKey('Company')).resolves.toBeUndefined();
+  });
+
+  it('prompts, trims, stores, and reports an API key only when input is present', async () => {
+    const secrets = new InMemorySecrets();
+    const auth = new AuthManager(secrets as never);
+    const input = vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('  prompted-key  ');
+    const info = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await expect(auth.promptForApiKey('Work')).resolves.toBe(true);
+    expect(input).toHaveBeenCalledWith(expect.objectContaining({ password: true }));
+    await expect(auth.getApiKey('Work')).resolves.toBe('prompted-key');
+    expect(info).toHaveBeenCalledWith('WeaveNet API key for “Work” saved.');
+
+    input.mockResolvedValueOnce('   ');
+    await expect(auth.promptForApiKey()).resolves.toBe(false);
+  });
+
+  it('reports selected and default key clearing after deleting the corresponding secrets', async () => {
+    const secrets = new InMemorySecrets();
+    const auth = new AuthManager(secrets as never);
+    const info = vi.spyOn(vscode.window, 'showInformationMessage');
+    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key');
+
+    await auth.clearApiKey('Work');
+    expect(info).toHaveBeenCalledWith('WeaveNet API key for “Work” cleared.');
+    await auth.clearApiKey();
+    expect(info).toHaveBeenCalledWith('WeaveNet API key for Default Relay cleared.');
   });
 });

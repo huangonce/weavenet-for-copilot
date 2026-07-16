@@ -181,21 +181,25 @@ export async function processClaudeStream(
   const state = { parts: 0, started: false };
   let buffer = '';
   let terminal = false;
-  while (!terminal) {
-    const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      terminal = processClaudeSseLine(line, tools, callbacks, state);
-      if (terminal) break;
+  try {
+    while (!terminal) {
+      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        terminal = processClaudeSseLine(line, tools, callbacks, state);
+        if (terminal) break;
+      }
     }
+    buffer += decoder.decode();
+    if (!terminal && buffer.trim()) terminal = processClaudeSseLine(buffer, tools, callbacks, state);
+    state.parts += flushToolCalls(tools, callbacks);
+    return { ...state, terminal };
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (!terminal && buffer.trim()) terminal = processClaudeSseLine(buffer, tools, callbacks, state);
-  state.parts += flushToolCalls(tools, callbacks);
-  return { ...state, terminal };
 }
 
 export function processClaudeSseLine(

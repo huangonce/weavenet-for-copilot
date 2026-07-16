@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeConnectionProfiles, selectActiveProfile } from '../src/config/config';
+import { isValidProfileName, normalizeConnectionProfiles, selectActiveProfile } from '../../src/config/config';
 
 describe('connection profiles', () => {
   it('normalizes valid profiles and rejects invalid or duplicate entries', () => {
@@ -54,6 +54,10 @@ describe('connection profiles', () => {
           Authorization: 'Bearer attacker-value',
           'X-API-Key': 'attacker-value',
           'Content-Type': 'text/plain',
+          Cookie: 'session=attacker-value',
+          'Proxy-Authorization': 'Basic attacker-value',
+          TE: 'trailers',
+          Upgrade: 'websocket',
           'X-Tenant': 'team-a',
         },
       },
@@ -67,5 +71,15 @@ describe('connection profiles', () => {
       excludeModels: undefined,
       models: undefined,
     }]);
+  });
+
+  it('rejects control characters and excessive connection names', () => {
+    expect(isValidProfileName('Normal connection')).toBe(true);
+    expect(isValidProfileName('bad\nname')).toBe(false);
+    expect(isValidProfileName('x'.repeat(101))).toBe(false);
+    expect(normalizeConnectionProfiles([
+      { name: 'bad\nname', baseUrl: 'https://relay.example.test/v1' },
+      { name: 'x'.repeat(101), baseUrl: 'https://relay.example.test/v1' },
+    ])).toEqual([]);
   });
 });
