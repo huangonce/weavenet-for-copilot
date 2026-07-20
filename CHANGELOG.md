@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.4 - 2026-07-20
+
+- Added explicit structured Relay diagnostics for model discovery and OpenAI/Anthropic streaming and non-streaming protocol support.
+- Persisted safe diagnostic summaries by connection fingerprint while invalidating them when credentials change.
+- Improved status presentation and connection management with staged editing, optional API-key retention, and orphaned-key reuse.
+- Hardened bounded Relay response processing, cancellation handling, response metadata, and diagnostic cache cleanup.
+
 ## 0.3.3 - 2026-07-16
 
 - Fixed repeated model catalog reloads by reusing resolved catalogs until connection, credential, or metadata changes explicitly invalidate them.
