@@ -33,7 +33,30 @@ export interface SseChunkResult {
   readonly stopped: boolean;
 }
 
+export interface SafeResponseMetadata {
+  readonly status: number;
+  readonly responseType: string;
+  readonly requestId?: string;
+}
+
 const SSE_DECODE_SLICE_BYTES = 64 * 1024;
+const MAX_RESPONSE_TYPE_LENGTH = 200;
+const MAX_REQUEST_ID_LENGTH = 100;
+
+export function safeResponseMetadata(response: Response): SafeResponseMetadata {
+  return {
+    status: response.status,
+    responseType: safeHeaderValue(response.headers.get('content-type'), MAX_RESPONSE_TYPE_LENGTH) ?? 'unknown',
+    requestId: safeHeaderValue(response.headers.get('x-request-id'), MAX_REQUEST_ID_LENGTH),
+  };
+}
+
+function safeHeaderValue(value: string | null, maximumLength: number): string | undefined {
+  if (!value) return undefined;
+  const printable = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, '').trim();
+  if (!printable) return undefined;
+  return printable.length <= maximumLength ? printable : `${printable.slice(0, maximumLength - 3)}...`;
+}
 
 export function consumeSseChunk(
   value: Uint8Array | undefined,
@@ -198,11 +221,12 @@ async function fetchJsonOnce<T>(
         response.headers.get('x-request-id') ?? undefined,
       );
     }
+    const metadata = safeResponseMetadata(response);
     return {
       value: JSON.parse(body) as T,
       status: response.status,
-      contentType: response.headers.get('content-type') ?? 'unknown',
-      requestId: response.headers.get('x-request-id') ?? undefined,
+      contentType: metadata.responseType,
+      requestId: metadata.requestId,
     };
   } catch (error) {
     if (context.signal.reason instanceof RelayTimeoutError) throw context.signal.reason;

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AuthManager } from '../auth/auth';
-import { getConfig } from '../config/config';
+import { getConfig, getProfileConfiguration } from '../config/config';
+import type { ConfiguredModel, ConnectionProfile } from '../config/config';
 import {
   CHATGPT_API_KEY_SECRET,
   CLAUDE_API_KEY_SECRET,
@@ -12,16 +13,25 @@ import {
 import { RelayClient } from '../relay/client';
 import type { RelayEndpointTestResult } from '../relay/client';
 import { toChatInformation } from '../relay/models';
-import type { RoutedModel } from '../relay/types';
+import type { ModelsResponse, RoutedModel } from '../relay/types';
 import {
   ConnectionTestError,
   connectionErrorMessage,
   describeConnectionTestError,
-  safeEndpoint,
   safeHost,
-  shouldApplyTestConnectionStatus,
 } from './connection';
 import type { ConnectionTestFailure } from './connection';
+import {
+  deriveConnectionCapabilities,
+  deriveDiagnosticsOverall,
+} from './connectionDiagnostics';
+import type {
+  ConnectionDiagnosticsSnapshot,
+  ConnectionProbeId,
+  ConnectionProbeResult,
+  ConnectionProbeVerdict,
+} from './connectionDiagnostics';
+import { ConnectionDiagnosticsStore, fingerprintConnection } from './connectionDiagnosticsStore';
 import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
 import { provideClaudeResponse } from './claudeResponse';
@@ -61,20 +71,12 @@ export interface ConnectionStatus {
   host?: string;
   phase: 'unconfigured' | 'keyMissing' | 'refreshing' | 'ready' | 'degraded' | 'error';
   modelCount: number;
-  checkedAt?: number;
+  modelRefreshedAt?: number;
+  lastDiagnostics?: ConnectionDiagnosticsSnapshot;
   message?: string;
 }
 
-export interface ConnectionTestResult {
-  connectionName: string;
-  host: string;
-  modelCount: number;
-  elapsedMs: number;
-  endpoint: string;
-  models: RelayEndpointTestResult;
-  claudeMessages?: RelayEndpointTestResult;
-  claudeMessagesError?: ConnectionTestFailure;
-}
+export type ConnectionTestResult = ConnectionDiagnosticsSnapshot;
 
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
@@ -90,12 +92,16 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private resolvedCatalogConnectionKey: string | undefined;
   private refreshNotification: { connectionKey: string; generation: number } | undefined;
   private connectionStatus: ConnectionStatus = { phase: 'unconfigured', modelCount: 0 };
+  private readonly diagnosticsStore: ConnectionDiagnosticsStore;
+  private readonly connectionTestTasks = new Map<string, Promise<ConnectionTestResult>>();
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
   readonly onDidChangeConnectionStatus = this.connectionStatusEmitter.event;
 
   constructor(context: vscode.ExtensionContext) {
     this.auth = new AuthManager(context.secrets);
+    this.diagnosticsStore = new ConnectionDiagnosticsStore(context.globalState);
+    this.restoreActiveDiagnostics();
     context.subscriptions.push(
       this.changeEmitter,
       this.connectionStatusEmitter,
@@ -107,6 +113,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       }),
       context.secrets.onDidChange((event) => {
         if (isWeaveNetSecretKey(event.key)) {
+          void this.invalidateDiagnosticsForSecret(event.key);
           void this.refreshModels('invalidate');
         }
       }),
@@ -152,44 +159,100 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     await this.auth.clearAllRelayApiKeys(profileNames);
   }
 
-  async testConnection(profileName: string, baseUrl: string, requestHeaders: Record<string, string> = {}): Promise<ConnectionTestResult> {
-    const host = safeHost(baseUrl) ?? 'unknown host';
-    const endpoint = safeEndpoint(baseUrl, '/models');
-    if (!safeHost(baseUrl)) {
+  getConnectionDiagnostics(profile: ConnectionProfile): ConnectionDiagnosticsSnapshot | undefined {
+    return this.diagnosticsStore.get(profile, diagnosticsOptions());
+  }
+
+  async clearConnectionDiagnostics(profile: ConnectionProfile): Promise<void> {
+    await this.diagnosticsStore.delete(profile, diagnosticsOptions());
+  }
+
+  async clearAllConnectionDiagnostics(): Promise<void> {
+    await this.diagnosticsStore.clear();
+  }
+
+  async testConnection(profile: ConnectionProfile): Promise<ConnectionTestResult> {
+    const fingerprint = fingerprintConnection(profile, diagnosticsOptions());
+    const existing = this.connectionTestTasks.get(fingerprint);
+    if (existing) return existing;
+    const task = this.runConnectionTest(profile, fingerprint).finally(() => {
+      if (this.connectionTestTasks.get(fingerprint) === task) this.connectionTestTasks.delete(fingerprint);
+    });
+    this.connectionTestTasks.set(fingerprint, task);
+    return task;
+  }
+
+  private async runConnectionTest(profile: ConnectionProfile, fingerprint: string): Promise<ConnectionTestResult> {
+    const host = safeHost(profile.baseUrl) ?? 'unknown host';
+    if (!safeHost(profile.baseUrl)) {
       throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must be a valid http(s) URL.' });
     }
-    const apiKey = await this.auth.getApiKey(profileName);
+    const apiKey = await this.auth.getApiKey(profile.name);
     if (!apiKey) {
-      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'keyMissing', modelCount: 0 });
+      this.setTestConnectionStatus(fingerprint, { connectionName: profile.name, host, phase: 'keyMissing', modelCount: 0 });
       throw new ConnectionTestError({ category: 'authentication', message: 'API key is required for this connection.' });
     }
-    const startedAt = Date.now();
+    const testedAt = Date.now();
     try {
+      const config = getConfig();
       const client = new RelayClient({
-        baseUrl,
+        baseUrl: profile.baseUrl,
         apiKey,
-        requestHeaders,
-        requestTimeoutMs: getConfig().requestTimeoutMs,
-        streamIdleTimeoutMs: getConfig().streamIdleTimeoutMs,
+        requestHeaders: profile.requestHeaders ?? {},
+        anthropicVersion: config.anthropicVersion,
+        requestTimeoutMs: config.requestTimeoutMs,
+        streamIdleTimeoutMs: config.streamIdleTimeoutMs,
       });
+      const modelsStartedAt = Date.now();
       const { models, diagnostic } = await client.testModels();
       const modelCount = Array.isArray(models.data) ? models.data.length : 0;
-      const claudeModel = models.data?.find((model) => isClaudeModel(model.id));
-      let claudeMessages: RelayEndpointTestResult | undefined;
-      let claudeMessagesError: ConnectionTestFailure | undefined;
-      if (claudeModel) {
-        try {
-          claudeMessages = await client.testClaudeMessages(claudeModel.id);
-        } catch (error) {
-          claudeMessagesError = describeConnectionTestError(error);
-        }
+      const probes: ConnectionProbeResult[] = [successfulProbe('models', modelsStartedAt, diagnostic)];
+      const candidates = selectProbeCandidates(profile.models ?? [], models);
+      if (candidates.openai) {
+        const model = candidates.openai;
+        probes.push(await runProtocolProbe('openai.nonStreaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, false)));
+        probes.push(await runProtocolProbe('openai.streaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, true)));
+      } else {
+        probes.push(skippedProbe('openai.nonStreaming', '/chat/completions', 'noOpenAIModel'));
+        probes.push(skippedProbe('openai.streaming', '/chat/completions', 'noOpenAIModel'));
       }
-      const result = { connectionName: profileName, host, modelCount, elapsedMs: Date.now() - startedAt, endpoint, models: diagnostic, claudeMessages, claudeMessagesError };
-      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'ready', modelCount, checkedAt: Date.now() });
+      if (candidates.claude) {
+        const model = candidates.claude;
+        probes.push(await runProtocolProbe('claude.nonStreaming', '/messages', model, () => client.testClaudeMessages(model, false)));
+        probes.push(await runProtocolProbe('claude.streaming', '/messages', model, () => client.testClaudeMessages(model, true)));
+      } else {
+        probes.push(skippedProbe('claude.nonStreaming', '/messages', 'noClaudeModel'));
+        probes.push(skippedProbe('claude.streaming', '/messages', 'noClaudeModel'));
+      }
+      const completedAt = Date.now();
+      const result: ConnectionDiagnosticsSnapshot = {
+        schemaVersion: 1,
+        fingerprint,
+        connectionName: profile.name,
+        host,
+        testedAt,
+        completedAt,
+        elapsedMs: completedAt - testedAt,
+        overall: deriveDiagnosticsOverall(probes),
+        modelCount,
+        capabilities: deriveConnectionCapabilities(probes),
+        probes,
+      };
+      if (currentProfileFingerprint(profile.name) === fingerprint) {
+        await this.diagnosticsStore.update(result);
+        this.setTestConnectionStatus(fingerprint, {
+          connectionName: profile.name,
+          host,
+          phase: result.overall === 'success' ? 'ready' : 'degraded',
+          modelCount,
+          lastDiagnostics: result,
+          message: result.overall === 'degraded' ? 'Connection capabilities are partially available or unknown.' : undefined,
+        });
+      }
       return result;
     } catch (error) {
       const failure = describeConnectionTestError(error);
-      this.setTestConnectionStatus(profileName, { connectionName: profileName, host, phase: 'error', modelCount: 0, checkedAt: Date.now(), message: failure.message });
+      this.setTestConnectionStatus(fingerprint, { connectionName: profile.name, host, phase: 'error', modelCount: 0, message: failure.message });
       throw new ConnectionTestError(failure);
     }
   }
@@ -261,7 +324,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
             ...connectionStatusFor(config),
             phase: 'error',
             modelCount: 0,
-            checkedAt: Date.now(),
+            modelRefreshedAt: Date.now(),
             message: connectionErrorMessage(error),
           });
           throw error;
@@ -314,7 +377,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       ...connectionStatusFor(config),
       phase: result.partial ? 'degraded' : 'ready',
       modelCount: result.models.length,
-      checkedAt: Date.now(),
+      modelRefreshedAt: Date.now(),
       message: result.partial ? 'Some Relay model routes could not be refreshed.' : undefined,
     });
     this.changeEmitter.fire();
@@ -411,12 +474,40 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   private setConnectionStatus(status: ConnectionStatus): void {
-    this.connectionStatus = status;
-    this.connectionStatusEmitter.fire(status);
+    const merged = status.lastDiagnostics === undefined && status.connectionName === this.connectionStatus.connectionName
+      ? { ...status, lastDiagnostics: this.connectionStatus.lastDiagnostics }
+      : status;
+    this.connectionStatus = merged;
+    this.connectionStatusEmitter.fire(merged);
   }
 
-  private setTestConnectionStatus(profileName: string, status: ConnectionStatus): void {
-    if (shouldApplyTestConnectionStatus(getConfig().profileName, profileName)) this.setConnectionStatus(status);
+  private setTestConnectionStatus(fingerprint: string, status: ConnectionStatus): void {
+    if (currentActiveProfileFingerprint() === fingerprint) this.setConnectionStatus(status);
+  }
+
+  private restoreActiveDiagnostics(): void {
+    const { activeProfile, profiles } = getProfileConfiguration();
+    const profile = profiles.find((entry) => entry.name === activeProfile);
+    if (!profile) return;
+    const diagnostics = this.diagnosticsStore.get(profile, diagnosticsOptions());
+    if (diagnostics) {
+      this.connectionStatus = {
+        ...this.connectionStatus,
+        connectionName: profile.name,
+        host: safeHost(profile.baseUrl),
+        lastDiagnostics: diagnostics,
+      };
+    }
+  }
+
+  private async invalidateDiagnosticsForSecret(secretKey: string): Promise<void> {
+    const profileName = profileNameFromSecretKey(secretKey);
+    if (profileName) await this.diagnosticsStore.deleteProfile(profileName);
+    else await this.diagnosticsStore.clear();
+    if (!profileName || this.connectionStatus.connectionName === profileName) {
+      this.connectionStatus = { ...this.connectionStatus, lastDiagnostics: undefined };
+      this.connectionStatusEmitter.fire(this.connectionStatus);
+    }
   }
 
   private reportRouteRefreshFailure(config: ReturnType<typeof getConfig>, route: RoutedModel['route'], error: unknown): void {
@@ -461,6 +552,98 @@ function modelConnectionKey(config: ReturnType<typeof getConfig>): string {
 
 function isClaudeModel(modelId: string): boolean {
   return modelId.toLowerCase().startsWith('claude-');
+}
+
+function diagnosticsOptions(): { anthropicVersion: string } {
+  return { anthropicVersion: getConfig().anthropicVersion };
+}
+
+function currentActiveProfileFingerprint(): string | undefined {
+  const { activeProfile, profiles } = getProfileConfiguration();
+  const profile = profiles.find((entry) => entry.name === activeProfile);
+  return profile ? fingerprintConnection(profile, diagnosticsOptions()) : undefined;
+}
+
+function currentProfileFingerprint(profileName: string): string | undefined {
+  const profile = getProfileConfiguration().profiles.find((entry) => entry.name === profileName);
+  return profile ? fingerprintConnection(profile, diagnosticsOptions()) : undefined;
+}
+
+function selectProbeCandidates(
+  configured: readonly ConfiguredModel[],
+  models: ModelsResponse,
+): { openai?: string; claude?: string } {
+  const explicitOpenAI = configured.find((model) => model.route === 'openai' || model.route === 'chatgpt')?.id;
+  const explicitClaude = configured.find((model) => model.route === 'claude')?.id;
+  const catalog = models.data ?? [];
+  const claude = explicitClaude ?? catalog.find((model) => isClaudeModel(model.id))?.id;
+  const openai = explicitOpenAI ?? catalog.find((model) => model.id !== claude && !isClaudeModel(model.id))?.id;
+  return { openai, claude };
+}
+
+function successfulProbe(
+  probe: ConnectionProbeId,
+  startedAt: number,
+  diagnostic: RelayEndpointTestResult,
+  evidenceModelId?: string,
+): ConnectionProbeResult {
+  return {
+    probe,
+    verdict: 'supported',
+    endpointPath: diagnostic.endpoint,
+    startedAt,
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    status: diagnostic.status,
+    responseType: diagnostic.responseType,
+    requestId: diagnostic.requestId,
+    evidenceModelId,
+    termination: diagnostic.termination,
+  };
+}
+
+async function runProtocolProbe(
+  probe: ConnectionProbeId,
+  endpointPath: '/chat/completions' | '/messages',
+  evidenceModelId: string,
+  operation: () => Promise<RelayEndpointTestResult>,
+): Promise<ConnectionProbeResult> {
+  const startedAt = Date.now();
+  try {
+    return successfulProbe(probe, startedAt, await operation(), evidenceModelId);
+  } catch (error) {
+    const failure = describeConnectionTestError(error);
+    return {
+      probe,
+      verdict: probeVerdictForFailure(failure),
+      endpointPath,
+      startedAt,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      status: failure.status,
+      responseType: failure.responseType,
+      requestId: failure.requestId,
+      evidenceModelId,
+      failure,
+    };
+  }
+}
+
+function probeVerdictForFailure(failure: ConnectionTestFailure): ConnectionProbeVerdict {
+  return failure.category === 'notFound' ? 'unsupported' : 'indeterminate';
+}
+
+function skippedProbe(
+  probe: ConnectionProbeId,
+  endpointPath: '/chat/completions' | '/messages',
+  skippedReason: 'noOpenAIModel' | 'noClaudeModel',
+): ConnectionProbeResult {
+  return { probe, verdict: 'skipped', endpointPath, startedAt: Date.now(), elapsedMs: 0, skippedReason };
+}
+
+function profileNameFromSecretKey(key: string): string | undefined {
+  const prefix = `${RELAY_API_KEY_SECRET}.profile.`;
+  if (!key.startsWith(prefix)) return undefined;
+  try { return decodeURIComponent(key.slice(prefix.length)); }
+  catch { return undefined; }
 }
 
 function isWeaveNetSecretKey(key: string): boolean {

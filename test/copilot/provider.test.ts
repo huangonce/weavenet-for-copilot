@@ -19,6 +19,7 @@ import { RELAY_API_KEY_SECRET } from '../../src/constants';
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
+import { InMemoryMemento } from '../support/memento';
 
 class InMemorySecrets {
   readonly values = new Map<string, string>();
@@ -60,7 +61,7 @@ function providerFixture(
         : undefined,
   } as never);
   const secrets = new InMemorySecrets();
-  const provider = new WeaveNetChatProvider({ secrets, subscriptions: [] } as never);
+  const provider = new WeaveNetChatProvider({ secrets, globalState: new InMemoryMemento(), subscriptions: [] } as never);
   return { provider, secrets, setActiveProfile: (value) => { currentActiveProfile = value; } };
 }
 
@@ -232,7 +233,7 @@ describe('model refresh invalidation', () => {
     await flushAsyncWork();
     const activeStatus = provider.getConnectionStatus();
 
-    await provider.testConnection('personal', 'https://personal.example.test/v1');
+    await provider.testConnection({ name: 'personal', baseUrl: 'https://personal.example.test/v1' });
 
     expect(provider.getConnectionStatus()).toEqual(activeStatus);
   });
@@ -246,26 +247,33 @@ describe('model refresh invalidation', () => {
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'denied' } }), {
         status: 401,
+        headers: { 'content-type': 'application/json', 'x-request-id': 'openai-request' },
+      }))
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: 'denied' } }), {
+        status: 401,
         headers: { 'content-type': 'application/json', 'x-request-id': 'claude-request' },
       }));
 
-    await expect(provider.testConnection('work', 'https://work.example.test/v1')).resolves.toMatchObject({
+    await expect(provider.testConnection({ name: 'work', baseUrl: 'https://work.example.test/v1' })).resolves.toMatchObject({
       connectionName: 'work',
       host: 'work.example.test',
       modelCount: 2,
-      models: { endpoint: '/models', status: 200, requestId: 'models-request' },
-      claudeMessagesError: { category: 'authentication', status: 401, requestId: 'claude-request' },
+      overall: 'degraded',
+      probes: expect.arrayContaining([
+        expect.objectContaining({ probe: 'models', verdict: 'supported', requestId: 'models-request' }),
+        expect.objectContaining({ probe: 'claude.nonStreaming', verdict: 'indeterminate' }),
+      ]),
     });
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', modelCount: 2 });
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 2 });
   });
 
   it('reports invalid URLs and missing keys with structured connection failures', async () => {
     const { provider } = providerFixture();
 
-    await expect(provider.testConnection('work', 'ftp://relay.example.test')).rejects.toMatchObject({
+    await expect(provider.testConnection({ name: 'work', baseUrl: 'ftp://relay.example.test' })).rejects.toMatchObject({
       failure: { category: 'url' },
     });
-    await expect(provider.testConnection('work', 'https://work.example.test/v1')).rejects.toMatchObject({
+    await expect(provider.testConnection({ name: 'work', baseUrl: 'https://work.example.test/v1' })).rejects.toMatchObject({
       failure: { category: 'authentication' },
     });
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', modelCount: 0 });

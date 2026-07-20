@@ -3,7 +3,7 @@ import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
 
 export interface ConnectionTestFailure {
-  readonly category: 'url' | 'network' | 'timeout' | 'authentication' | 'notFound' | 'rateLimited' | 'server' | 'http' | 'unknown';
+  readonly category: 'url' | 'network' | 'timeout' | 'authentication' | 'notFound' | 'rateLimited' | 'server' | 'http' | 'invalidResponse' | 'protocol' | 'cancelled' | 'unknown';
   readonly message: string;
   readonly status?: number;
   readonly responseType?: RelayRequestError['responseKind'];
@@ -55,6 +55,17 @@ export function describeConnectionTestError(error: unknown): ConnectionTestFailu
     return { ...common, category: 'http', message: `The Relay returned HTTP ${error.status}.` };
   }
   if (error instanceof RelayTimeoutError) return { category: 'timeout', message: 'The Relay timed out before completing the request.' };
+  if (error instanceof RelayStreamError) return {
+    category: 'protocol',
+    message: 'The Relay response did not complete the expected protocol.',
+    requestId: error.requestId,
+  };
+  if (error instanceof SyntaxError || (error instanceof Error && /invalid|malformed|empty response body|exceeds \d+ bytes/iu.test(error.message))) {
+    return { category: 'invalidResponse', message: 'The Relay returned an invalid or excessive response.' };
+  }
+  if (error instanceof vscode.CancellationError || (error instanceof Error && (error.name === 'CancellationError' || error.name === 'AbortError'))) {
+    return { category: 'cancelled', message: 'The connection test was cancelled; the Relay may already have processed the request.' };
+  }
   if (error instanceof TypeError) return { category: 'network', message: 'Could not reach the Relay. Check the URL, DNS, TLS certificate, proxy, and network connection.' };
   return { category: 'unknown', message: 'The Relay connection could not be completed.' };
 }

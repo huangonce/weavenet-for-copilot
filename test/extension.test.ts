@@ -29,9 +29,12 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     hasRelayKey: vi.fn().mockResolvedValue(false),
     moveRelayKey: vi.fn().mockResolvedValue(true),
     testConnection: vi.fn().mockResolvedValue({
-      host: 'relay.example.test', modelCount: 2, elapsedMs: 10, endpoint: 'https://relay.example.test/v1/models',
-      models: { status: 200, responseType: 'json' },
+      host: 'relay.example.test', modelCount: 2, elapsedMs: 10, overall: 'success',
+      probes: [{ probe: 'models', verdict: 'supported', endpointPath: '/models', startedAt: 1, elapsedMs: 2, status: 200, responseType: 'application/json' }],
     }),
+    clearConnectionDiagnostics: vi.fn().mockResolvedValue(undefined),
+    clearAllConnectionDiagnostics: vi.fn().mockResolvedValue(undefined),
+    logMetadata: vi.fn(),
     refreshModels: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as never;
@@ -153,6 +156,23 @@ describe('connection mutation queue', () => {
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
+  it('does not roll back deletion when diagnostic cache cleanup fails', async () => {
+    const config = configurationFixture([
+      { name: 'Work', baseUrl: 'https://work.example.test/v1' },
+      { name: 'Personal', baseUrl: 'https://personal.example.test/v1' },
+    ]);
+    const provider = providerFixture({ clearConnectionDiagnostics: vi.fn().mockRejectedValue(new Error('memento failure')) });
+    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection and API Key' as never);
+
+    await deleteConnection(provider);
+
+    expect(config.profiles.map((profile) => profile.name)).toEqual(['Personal']);
+    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith('Work');
+    expect(provider.logMetadata).toHaveBeenCalledWith(expect.stringContaining('memento failure'));
+    expect(provider.refreshModels).toHaveBeenCalledOnce();
+  });
+
   it('clears keys for the current profiles after confirmation', async () => {
     const config = configurationFixture([
       { name: 'Work', baseUrl: 'https://work.example.test/v1' },
@@ -188,11 +208,23 @@ describe('connection mutation queue', () => {
     const config = configurationFixture();
     const provider = providerFixture();
     vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
-    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('{"name":"Company","baseUrl":"https://company.example.test/v1"}');
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Company')
+      .mockResolvedValueOnce('https://company.example.test/v1')
+      .mockResolvedValueOnce('{"X-Tenant":"team-a"}')
+      .mockResolvedValueOnce('{"includeModels":["gpt"],"excludeModels":["legacy"]}')
+      .mockResolvedValueOnce('[{"id":"gpt-test","route":"openai"}]');
 
     await editConnection(provider);
 
-    expect(config.profiles).toEqual([{ name: 'Company', baseUrl: 'https://company.example.test/v1' }]);
+    expect(config.profiles).toEqual([{
+      name: 'Company',
+      baseUrl: 'https://company.example.test/v1',
+      requestHeaders: { 'X-Tenant': 'team-a' },
+      includeModels: ['gpt'],
+      excludeModels: ['legacy'],
+      models: [{ id: 'gpt-test', route: 'openai' }],
+    }]);
     expect(config.activeProfile).toBe('Company');
     expect(provider.moveRelayKey).toHaveBeenCalledWith('Work', 'Company');
     expect(provider.refreshModels).toHaveBeenCalledOnce();
@@ -235,8 +267,8 @@ describe('connection mutation queue', () => {
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
     await testConnection(provider);
     expect(pick).toHaveBeenCalledOnce();
-    expect(provider.testConnection).toHaveBeenCalledWith('Work', 'https://work.example.test/v1', undefined);
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('connection succeeded'), expect.objectContaining({ detail: expect.stringContaining('Models: HTTP 200') }));
+    expect(provider.testConnection).toHaveBeenCalledWith(expect.objectContaining({ name: 'Work', baseUrl: 'https://work.example.test/v1' }));
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('connection test success'), expect.objectContaining({ detail: expect.stringContaining('models: supported') }));
 
     provider.testConnection.mockRejectedValueOnce(new Error('offline'));
     const error = vi.spyOn(vscode.window, 'showErrorMessage');
@@ -255,6 +287,34 @@ describe('connection mutation queue', () => {
 
     expect(config.activeProfile).toBe('Personal');
     expect(provider.storeRelayKey).toHaveBeenCalledWith('Personal', 'new-key');
+  });
+
+  it('reuses an orphaned API key without exposing or replacing it', async () => {
+    const config = configurationFixture([]);
+    const provider = providerFixture({ hasRelayKey: vi.fn().mockResolvedValue(true) });
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Personal')
+      .mockResolvedValueOnce('https://personal.example.test/v1');
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Use Saved API Key' as never);
+
+    await addConnection(provider);
+
+    expect(config.activeProfile).toBe('Personal');
+    expect(provider.promptForRelayKeyValue).not.toHaveBeenCalled();
+    expect(provider.storeRelayKey).not.toHaveBeenCalled();
+  });
+
+  it('can delete a connection while retaining its API key', async () => {
+    const config = configurationFixture();
+    const provider = providerFixture();
+    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection, Keep API Key' as never);
+
+    await deleteConnection(provider);
+
+    expect(config.profiles).toEqual([]);
+    expect(provider.clearRelayKeyForProfile).not.toHaveBeenCalled();
+    expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(expect.objectContaining({ name: 'Work' }));
   });
 
   it('saves and clears an active connection key with an invalidating refresh', async () => {

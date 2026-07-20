@@ -7,8 +7,10 @@ import type {
 } from './types';
 import { streamClaudeMessages } from './claude';
 import { isReservedRelayHeader } from '../config/config';
-import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, throwIfNotOk } from './http';
+import { fetchJsonWithRetry, fetchJsonWithRetryMetadata } from './http';
 import { streamOpenAIChatCompletion } from './openai';
+import { probeClaudeMessages, probeOpenAIChatCompletion } from './probes';
+import type { RelayProtocolProbeResult } from './probes';
 import { relayEndpointUrl } from './url';
 
 export interface RelayClientOptions {
@@ -22,10 +24,12 @@ export interface RelayClientOptions {
 }
 
 export interface RelayEndpointTestResult {
-  readonly endpoint: '/models' | '/messages';
+  readonly endpoint: '/models' | '/chat/completions' | '/messages';
   readonly status: number;
   readonly responseType: string;
   readonly requestId?: string;
+  readonly stream?: boolean;
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop';
 }
 
 export class RelayClient {
@@ -50,28 +54,23 @@ export class RelayClient {
     };
   }
 
-  async testClaudeMessages(model: string, token?: CancellationToken): Promise<RelayEndpointTestResult> {
-    const response = await fetchWithResponseTimeout(this.endpoint('messages'), {
-      method: 'POST',
-      headers: {
-        ...this.headersFor('x-api-key'),
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'anthropic-version': this.options.anthropicVersion ?? '2023-06-01',
-      },
-      // This intentional minimal, non-streaming request verifies the endpoint.
-      // It may consume a minimal amount of provider quota.
-      body: JSON.stringify({ model, max_tokens: 1, stream: false, messages: [{ role: 'user', content: 'Reply OK.' }] }),
-    }, this.options.requestTimeoutMs, token);
-    const diagnostic = {
-      endpoint: '/messages' as const,
-      status: response.status,
-      responseType: response.headers.get('content-type') ?? 'unknown',
-      requestId: response.headers.get('x-request-id') ?? undefined,
-    };
-    await throwIfNotOk(response, this.options.streamIdleTimeoutMs, token);
-    await readResponseText(response, this.options.streamIdleTimeoutMs, token);
-    return diagnostic;
+  async testOpenAIChatCompletion(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
+    return probeOpenAIChatCompletion({
+      baseUrl: this.options.baseUrl,
+      headers: this.headersFor('bearer'),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+    }, model, stream, token);
+  }
+
+  async testClaudeMessages(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
+    return probeClaudeMessages({
+      baseUrl: this.options.baseUrl,
+      headers: this.headersFor('x-api-key'),
+      anthropicVersion: this.options.anthropicVersion,
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+    }, model, stream, token);
   }
 
   async streamChatCompletion(

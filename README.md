@@ -38,9 +38,10 @@ src/
 - `WeaveNet: Manage Relay Connections`：打开连接管理菜单。
 - `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、额外请求头、模型过滤规则和固定模型。改名时会迁移该连接的 API Key。
 - `WeaveNet: Copy Relay Connection`：复制不含 API Key 的连接配置。
+- `WeaveNet: Test Relay Connection`：由用户显式触发 `/models` 与最小 OpenAI/Claude 流式及非流式请求，并显示结构化结果。最小模型请求可能产生极少量服务费用；扩展不会在后台自动执行这些付费探测。
 - `WeaveNet: Test Relay Connection`：通过 `/models` 测试地址、认证和模型发现；发现 `claude-*` 模型时也会以最小请求验证 Claude `/messages`。结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。
 - `WeaveNet: Set Default Relay Connection`：选择 Copilot 使用的连接。
-- `WeaveNet: Delete Relay Connection`：永久删除连接配置及其 API Key。
+- `WeaveNet: Delete Relay Connection`：删除连接时可选择同时删除 API Key，或保留 SecretStorage 中的 API Key供以后复用。
 - `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
 - `WeaveNet: Set Relay API Key`：设置当前连接的唯一 API Key。
 - `WeaveNet: Clear Relay API Key`：删除当前连接的 API Key。
@@ -97,7 +98,9 @@ src/
 
 API Key 会存储在 VS Code SecretStorage 中。
 
-请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；这两个命令会同时清除对应 API Key。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
+请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接。单个删除命令会询问是否保留 API Key；清空全部连接会同时清除对应 API Key。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
+
+连接测试结果会按连接配置的 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时对应诊断会失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。
 
 从旧版单一 Relay 配置首次升级到连接配置档版本时，扩展会执行一次性清理：删除旧版顶层 Base URL 与旧版 API Key，并要求重新创建 Relay 连接。完成标记保存在 VS Code 全局状态中，后续升级不会重复执行，也不会删除新版连接配置或连接专属 API Key。
 

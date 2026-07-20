@@ -48,12 +48,15 @@ describe('RelayClient', () => {
   });
 
   it('tests Claude messages with x-api-key authentication and a bounded probe payload', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ id: 'msg_test' }), {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg_test', content: [{ type: 'text', text: 'OK' }],
+    }), {
       headers: { 'content-type': 'application/json', 'x-request-id': 'req_claude' },
     }));
 
     await expect(client({ Authorization: 'Bearer attacker' }).testClaudeMessages('claude-test')).resolves.toEqual({
-      endpoint: '/messages', status: 200, responseType: 'application/json', requestId: 'req_claude',
+      endpoint: '/messages', status: 200, responseType: 'application/json', requestId: 'req_claude', stream: false,
+      termination: 'message_stop',
     });
 
     const [url, init] = fetchMock.mock.calls[0];
@@ -73,6 +76,51 @@ describe('RelayClient', () => {
     }));
 
     await expect(client().testClaudeMessages('claude-test')).rejects.toThrow('401');
+  });
+
+  it('strictly probes OpenAI streaming once without non-stream fallback', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_openai' } },
+    ));
+    await expect(client().testOpenAIChatCompletion('gpt-test', true)).resolves.toMatchObject({
+      endpoint: '/chat/completions', stream: true, termination: '[DONE]', requestId: 'req_openai',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-test', max_tokens: 1, stream: true });
+  });
+
+  it('strictly probes Claude streaming through message_stop', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response([
+      'data: {"type":"message_start","message":{"id":"msg_1"}}',
+      '',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }));
+    await expect(client().testClaudeMessages('claude-test', true)).resolves.toMatchObject({
+      endpoint: '/messages', stream: true, termination: 'message_stop',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects successful HTML and non-terminal streams as invalid protocol responses', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('<html>ok</html>', { headers: { 'content-type': 'text/html' } }))
+      .mockResolvedValueOnce(new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      }));
+    await expect(client().testClaudeMessages('claude-test')).rejects.toThrow();
+    await expect(client().testOpenAIChatCompletion('gpt-test', true)).rejects.toThrow('terminal event');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('sanitizes and bounds successful response metadata', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
+      headers: { 'content-type': `application/json${'x'.repeat(300)}`, 'x-request-id': `req${'y'.repeat(200)}` },
+    }));
+    const result = await client().testModels();
+    expect(result.diagnostic.responseType.length).toBeLessThanOrEqual(200);
+    expect(result.diagnostic.requestId?.length).toBeLessThanOrEqual(100);
   });
 
   it('rejects invalid model response catalogs before they reach the provider', async () => {
