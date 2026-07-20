@@ -1,6 +1,9 @@
 import type { CancellationToken } from 'vscode';
 import { createRelayRequestError, RelayRequestError } from './errors';
 
+export const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
+export const MAX_COMPLETE_RESPONSE_BYTES = 10 * 1024 * 1024;
+
 export class RelayTimeoutError extends Error {
   constructor(readonly phase: 'response' | 'stream', readonly timeoutMs: number) {
     super(`Relay ${phase} timed out after ${timeoutMs}ms.`);
@@ -20,19 +23,84 @@ export interface JsonResponse<T> {
   readonly requestId?: string;
 }
 
-export async function throwIfNotOk(response: Response): Promise<void> {
-  if (response.ok) {
-    return;
-  }
+export interface RelayErrorResponse {
+  readonly body: string;
+  readonly error: RelayRequestError;
+}
 
-  const text = await response.text().catch(() => '');
-  throw createRelayRequestError(
-    response.status,
-    response.statusText,
-    response.headers.get('content-type') ?? '',
-    text,
-    response.headers.get('x-request-id') ?? undefined,
-  );
+export interface SseChunkResult {
+  readonly buffer: string;
+  readonly stopped: boolean;
+}
+
+const SSE_DECODE_SLICE_BYTES = 64 * 1024;
+
+export function consumeSseChunk(
+  value: Uint8Array | undefined,
+  decoder: TextDecoder,
+  initialBuffer: string,
+  maxEventBytes: number,
+  onLine: (line: string) => boolean,
+  oversizedError: () => Error,
+): SseChunkResult {
+  let buffer = initialBuffer;
+  const consumeDecoded = (decoded: string): boolean => {
+    buffer += decoded;
+    let newline = buffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, '');
+      buffer = buffer.slice(newline + 1);
+      if (Buffer.byteLength(line) > maxEventBytes) throw oversizedError();
+      if (onLine(line)) return true;
+      newline = buffer.indexOf('\n');
+    }
+    if (Buffer.byteLength(buffer) > maxEventBytes) throw oversizedError();
+    return false;
+  };
+
+  if (!value) {
+    return { buffer, stopped: consumeDecoded(decoder.decode()) };
+  }
+  for (let offset = 0; offset < value.byteLength; offset += SSE_DECODE_SLICE_BYTES) {
+    const slice = value.subarray(offset, Math.min(offset + SSE_DECODE_SLICE_BYTES, value.byteLength));
+    if (consumeDecoded(decoder.decode(slice, { stream: true }))) return { buffer, stopped: true };
+  }
+  return { buffer, stopped: false };
+}
+
+export async function throwIfNotOk(
+  response: Response,
+  idleTimeoutMs = 60_000,
+  token?: CancellationToken,
+  maxBodyBytes = MAX_ERROR_RESPONSE_BYTES,
+): Promise<void> {
+  if (response.ok) return;
+
+  throw (await readRelayErrorResponse(response, idleTimeoutMs, token, maxBodyBytes)).error;
+}
+
+export async function readRelayErrorResponse(
+  response: Response,
+  idleTimeoutMs = 60_000,
+  token?: CancellationToken,
+  maxBodyBytes = MAX_ERROR_RESPONSE_BYTES,
+): Promise<RelayErrorResponse> {
+  let body = '';
+  try {
+    body = await readResponseTextUpTo(response, idleTimeoutMs, token, maxBodyBytes);
+  } catch (error) {
+    if (isCancellationOrTimeout(error)) throw error;
+  }
+  return {
+    body,
+    error: createRelayRequestError(
+      response.status,
+      response.statusText,
+      response.headers.get('content-type') ?? '',
+      body,
+      response.headers.get('x-request-id') ?? undefined,
+    ),
+  };
 }
 
 export function createAbortContext(token?: CancellationToken, timeoutMs?: number): AbortContext {
@@ -231,21 +299,58 @@ export async function readResponseText(
   response: Response,
   idleTimeoutMs: number,
   token?: CancellationToken,
+  maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
 ): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let result = '';
+  let bytes = 0;
   try {
     while (true) {
       const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
       if (done) break;
+      bytes += byteLength(value);
+      if (bytes > maxBodyBytes) throw new Error(`Relay response body exceeds ${maxBodyBytes} bytes.`);
       result += decoder.decode(value, { stream: true });
     }
     return result + decoder.decode();
   } finally {
     await reader.cancel().catch(() => undefined);
   }
+}
+
+async function readResponseTextUpTo(
+  response: Response,
+  idleTimeoutMs: number,
+  token: CancellationToken | undefined,
+  maxBodyBytes: number,
+): Promise<string> {
+  if (!response.body || maxBodyBytes <= 0) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let result = '';
+  let bytes = 0;
+  try {
+    while (bytes < maxBodyBytes) {
+      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
+      if (done) return result + decoder.decode();
+      const remaining = maxBodyBytes - bytes;
+      const chunk = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value));
+      const accepted = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+      bytes += accepted.byteLength;
+      result += decoder.decode(accepted, { stream: chunk.byteLength <= remaining });
+      if (chunk.byteLength > remaining) return result + decoder.decode();
+    }
+    return result + decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
+function isCancellationOrTimeout(error: unknown): boolean {
+  return error instanceof RelayTimeoutError ||
+    (error instanceof Error && (error.name === 'CancellationError' || error.name === 'AbortError'));
 }
 
 function isRetryableGetError(error: unknown): boolean {

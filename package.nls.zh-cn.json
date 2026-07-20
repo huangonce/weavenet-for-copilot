@@ -19,7 +19,7 @@
   "command.showDebugLog": "WeaveNet: 显示调试日志",
   "configuration.title": "WeaveNet for Copilot",
   "configuration.activeProfile.description": "当前使用的 WeaveNet Relay 连接，仅全局保存。仅在尚未配置任何连接时允许留空。",
-  "configuration.profiles.description": "全局保存的具名连接配置档。配置档可覆盖中转地址、附加请求头、模型过滤规则和固定模型。每个配置档只使用一把 API 密钥，并仅保存在 VS Code SecretStorage 中。删除命令会永久删除对应 API 密钥。",
+  "configuration.profiles.description": "全局保存的具名连接配置档。配置档可覆盖中转地址、附加请求头、模型过滤规则和固定模型。每个配置档只使用一把 API 密钥，并仅保存在 VS Code SecretStorage 中。附加请求头值属于普通 VS Code 设置，不得包含敏感信息。删除命令会永久删除对应 API 密钥。",
   "configuration.anthropicVersion.description": "调用 Claude 模型的 /messages 时发送的 Anthropic 协议版本请求头。",
   "configuration.openaiPromptCaching.description": "为 GPT 模型发送稳定的 prompt_cache_key，改善 OpenAI 兼容提示词缓存的路由命中率。",
   "configuration.openaiPromptCacheKey.description": "可选的 GPT prompt_cache_key 覆盖值。留空时插件会根据当前工作区生成稳定值。",
@@ -31,11 +31,11 @@
   "configuration.topP.description": "可选核采样 top_p，同时发送到 OpenAI 兼容请求和 Claude 请求。留空使用模型默认值。",
   "configuration.requestTimeoutSeconds.description": "等待中继响应头的最长秒数。GET 模型发现最多重试一次；聊天 POST 请求绝不盲目重试。",
   "configuration.streamIdleTimeoutSeconds.description": "流式响应相邻数据块允许的最长空闲秒数，超时后视为响应不完整。",
-  "configuration.models.description": "与自动发现结果合并的可选固定模型定义，用于私有或未列出的中继路由。",
+  "configuration.models.description": "旧版兼容的固定模型定义，仅在当前配置档未设置 models 时作为回退。建议改在配置档中设置。",
   "configuration.debug.description": "将脱敏后的请求摘要和 Claude 缓存用量写入 WeaveNet 输出通道，不记录 API 密钥或提示词正文。",
   "configuration.modelNamePrefix.description": "Copilot Chat 模型选择器中显示的模型名称前缀。",
-  "configuration.includeModels.description": "可选正则表达式。设置后只显示匹配的模型 ID。",
-  "configuration.excludeModels.description": "可选正则表达式。匹配的模型 ID 会被隐藏。",
+  "configuration.includeModels.description": "旧版兼容的正则白名单，仅在当前配置档未设置 includeModels 时作为回退。建议改在配置档中设置。",
+  "configuration.excludeModels.description": "旧版兼容的正则黑名单，仅在当前配置档未设置 excludeModels 时作为回退。建议改在配置档中设置。",
   "configuration.maxInputTokens.description": "向 Copilot 声明的输入 token 硬上限。当 OAuth 上游的实际上下文小于模型元数据时，请降低此值。",
   "configuration.maxOutputTokens.description": "向 Copilot 声明的最大输出 token 数；也可选择作为 max_tokens 发送。",
   "configuration.sendMaxTokens.description": "向 Chat Completions 请求发送 max_tokens。",
@@ -44,5 +44,5 @@
   "configuration.imageInputModels.description": "为匹配模型强制启用图片输入的可选正则表达式。模型能力会优先从 sub2api 与 OpenRouter 自动识别。",
   "configuration.disabledImageInputModels.description": "即使公开元数据声称模型支持图片，也强制禁用图片输入的模型 ID 正则表达式。默认为空。",
   "configuration.metadataRefreshHours.description": "OpenRouter 模型元数据缓存的刷新间隔，单位为小时。",
-  "configuration.requestHeaders.description": "发送到中转站的额外请求头。请不要在这里填写 API 密钥，应使用 WeaveNet 的密钥命令。"
+  "configuration.requestHeaders.description": "旧版兼容的附加请求头，仅在当前配置档未设置 requestHeaders 时作为回退。值保存在普通 VS Code 设置而非 SecretStorage 中，请勿填写 API 密钥或其他敏感信息。"
 }

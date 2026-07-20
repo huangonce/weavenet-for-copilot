@@ -1,7 +1,7 @@
 import type { CancellationToken } from 'vscode';
 import * as vscode from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
-import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
+import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
 import { sanitizeJsonSchema } from './schema';
 import { relayEndpointUrl } from './url';
 import type {
@@ -11,6 +11,7 @@ import type {
 
 const SYSTEM_ROLE = 3;
 const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 
 export interface ClaudeConversionOptions {
   readonly supportsImageInput: boolean;
@@ -126,7 +127,7 @@ export async function streamClaudeMessages(
   while (true) {
     const response = await fetchClaude(options, currentRequest, token);
     callbacks.onResponse?.('Claude', response.status, response.headers.get('content-type') ?? 'unknown');
-    await throwIfNotOk(response);
+    await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
     const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
     if (!currentRequest.stream || !contentType.includes('text/event-stream')) {
       await processClaudeFullResponse(response, callbacks, options.streamIdleTimeoutMs, token);
@@ -172,6 +173,7 @@ export async function processClaudeStream(
   callbacks: StreamCallbacks,
   idleTimeoutMs: number,
   token?: CancellationToken,
+  maxEventBytes = MAX_SSE_EVENT_BYTES,
 ): Promise<{ parts: number; started: boolean; terminal: boolean }> {
   if (!response.body) throw new Error('Relay returned an empty response body.');
   const reader = response.body.getReader();
@@ -184,15 +186,29 @@ export async function processClaudeStream(
     while (!terminal) {
       const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        terminal = processClaudeSseLine(line, tools, callbacks, state);
-        if (terminal) break;
-      }
+      const consumed = consumeSseChunk(
+        value,
+        decoder,
+        buffer,
+        maxEventBytes,
+        (line) => processClaudeSseLine(line, tools, callbacks, state),
+        () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
+      );
+      buffer = consumed.buffer;
+      terminal = consumed.stopped;
     }
-    buffer += decoder.decode();
+    if (!terminal) {
+      const consumed = consumeSseChunk(
+        undefined,
+        decoder,
+        buffer,
+        maxEventBytes,
+        (line) => processClaudeSseLine(line, tools, callbacks, state),
+        () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
+      );
+      buffer = consumed.buffer;
+      terminal = consumed.stopped;
+    }
     if (!terminal && buffer.trim()) terminal = processClaudeSseLine(buffer, tools, callbacks, state);
     state.parts += flushToolCalls(tools, callbacks);
     return { ...state, terminal };
@@ -267,8 +283,14 @@ export function processClaudeSseLine(
   return false;
 }
 
-export async function processClaudeFullResponse(response: Response, callbacks: StreamCallbacks, idleTimeoutMs = 60_000, token?: CancellationToken): Promise<void> {
-  const body = await readResponseText(response, idleTimeoutMs, token);
+export async function processClaudeFullResponse(
+  response: Response,
+  callbacks: StreamCallbacks,
+  idleTimeoutMs = 60_000,
+  token?: CancellationToken,
+  maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
+): Promise<void> {
+  const body = await readResponseText(response, idleTimeoutMs, token, maxBodyBytes);
   const payload = parseClaudeJson(body);
   if (payload.error) throw createRelayStreamError('Claude', payload.error);
   if (payload.usage) callbacks.onClaudeUsage?.(payload.usage, payload.message?.id);
@@ -391,3 +413,4 @@ function mapClaudeRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'u
   if (role === vscode.LanguageModelChatMessageRole.Assistant) return 'assistant';
   return (role as number) === SYSTEM_ROLE ? 'system' : 'user';
 }
+

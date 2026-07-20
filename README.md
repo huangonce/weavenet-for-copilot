@@ -30,7 +30,7 @@ src/
 1. 在命令面板运行 `WeaveNet: Add Relay Connection`，依次填写名称、Relay API 地址和 API Key。
 2. 使用 `WeaveNet: Manage Relay Connections` 新增、编辑、复制、测试、删除连接或设置默认连接。状态栏会显示当前连接和模型刷新状态。
 
-每个连接可选地覆盖 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接只有一把 Relay API Key，密钥不会写入 `settings.json`，而是按连接隔离存储在 VS Code SecretStorage。复制连接不会复制其 API Key。
+每个连接可选地设置 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接只有一把 Relay API Key，密钥不会写入 `settings.json`，而是按连接隔离存储在 VS Code SecretStorage。复制连接不会复制其 API Key。`requestHeaders` 的值仍属于普通 VS Code 设置，不受 SecretStorage 保护，不得用于保存 API Key、令牌或其他敏感信息。
 
 ## 命令
 
@@ -69,15 +69,14 @@ src/
 ## 常用设置
 
 - `weavenet-copilot.activeProfile`：当前使用的 Relay 连接名称；仅全局保存，且仅在没有任何连接时为空。
-- `weavenet-copilot.profiles`：全局保存的 Relay 连接列表。每项至少包含 `name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。
+- `weavenet-copilot.profiles`：全局保存的 Relay 连接列表。每项至少包含 `name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
 - `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会为 system、最后一个工具定义和最近两条用户消息设置显式缓存断点，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
 - `weavenet-copilot.debug`：开启后将请求摘要和 Claude 缓存用量写入 VS Code 的 `WeaveNet` 输出通道，不记录 API Key 或 prompt 正文。通过 `WeaveNet: Show Debug Log` 打开。
   - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
-- `weavenet-copilot.includeModels`：模型 ID 正则白名单。
-- `weavenet-copilot.excludeModels`：模型 ID 正则黑名单。
+- `weavenet-copilot.includeModels` / `excludeModels`：旧版顶层兼容设置。仅当当前配置档省略同名字段时作为模型 ID 正则白名单/黑名单回退；新配置应写入 `profiles` 中。
 - `weavenet-copilot.maxInputTokens`：向 Copilot 声明的输入 token 硬上限，默认 `128000`。即使模型元数据声明了更大的上下文，也不会超过这个值；OAuth 上游的实际窗口较小时应相应调低。
 - `weavenet-copilot.supportsToolCalling`：是否向 Copilot 声明工具调用能力。
 - `weavenet-copilot.supportsImageInput`：是否为所有模型向 Copilot 声明图片输入能力，默认关闭。
@@ -85,8 +84,8 @@ src/
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
-- `weavenet-copilot.models`：可选固定模型列表；可指定真实上游 ID、显示名、`openai` / `chatgpt` / `claude` 路由及能力，适用于无法通过 `/models` 发现的私有模型。
-- 模型刷新按路由独立容错；某个协议暂时不可用时，会保留该路由上一次成功的模型快照，并继续更新其他路由。
+- `weavenet-copilot.models`：旧版顶层兼容的固定模型列表；仅当当前配置档省略 `models` 时作为回退。新配置应写入 `profiles` 中。
+- 自动发现通过当前连接的 `/models` 目录一次性刷新；返回的 `claude-*` 模型使用 Claude 原生路由，其余模型使用 OpenAI 路由。固定模型会与发现结果合并。发现失败时会保留上一次成功的发现快照；如果没有快照但配置了固定模型，则以降级状态仅展示固定模型。
 - `weavenet-copilot.requestTimeoutSeconds`：等待响应头的秒数。模型发现 GET 最多安全重试一次，聊天 POST 不做网络盲重试。
 - `weavenet-copilot.streamIdleTimeoutSeconds`：流式响应数据块之间允许的空闲秒数。
 - `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数，同时转发到 OpenAI 兼容和 Claude 请求。
@@ -105,6 +104,7 @@ API Key 会存储在 VS Code SecretStorage 中。
 ## 隐私与安全
 
 - API Key 只保存在 VS Code SecretStorage 中，不会写入工作区文件或调试日志。
+- 自定义 `requestHeaders` 值由 VS Code 配置系统保存，不受 SecretStorage 保护；不得在其中放置 API Key、令牌或其他敏感信息。
 - 对话、代码、图片和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务。
 - 插件不会收集遥测数据。开启调试日志时只记录脱敏请求摘要，不记录 API Key 或提示词正文。
 - 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。

@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { processOpenAIFullResponse, processOpenAISseLine, processOpenAIStream, streamOpenAIChatCompletion } from '../../src/relay/openai';
 import type { StreamCallbacks } from '../../src/relay/client';
 import type { ToolCall } from '../../src/relay/types';
+
+afterEach(() => vi.restoreAllMocks());
 
 function callbacks() {
   return {
@@ -131,6 +133,20 @@ describe('OpenAI response parsing', () => {
     await expect(processOpenAIFullResponse(new Response('{'), callbacks())).rejects.toThrow('malformed JSON');
   });
 
+  it('rejects oversized complete JSON and unbounded SSE events', async () => {
+    await expect(processOpenAIFullResponse(new Response('{"choices":[]}'), callbacks(), 1_000, undefined, 4))
+      .rejects.toThrow('exceeds 4 bytes');
+
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn().mockResolvedValueOnce({ value: new TextEncoder().encode('data: 123456'), done: false }),
+      cancel,
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    const response = { body: { getReader: () => reader } } as unknown as Response;
+    await expect(processOpenAIStream(response, callbacks(), 1_000, undefined, 8)).rejects.toThrow('exceeds 8 bytes');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('falls back once to a non-streaming request when the relay rejects streaming', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response('streaming is not supported', { status: 422 }))
@@ -145,6 +161,22 @@ describe('OpenAI response parsing', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ stream: false });
+    expect(cb.onContent).toHaveBeenCalledWith('fallback');
+  });
+
+  it('does not hang when an oversized error body reports unsupported streaming', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(`streaming is not supported ${'x'.repeat(70 * 1024)}`, { status: 422 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: 'fallback' } }] }), {
+        headers: { 'content-type': 'application/json' },
+      }));
+    const cb = callbacks();
+
+    await streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(cb.onContent).toHaveBeenCalledWith('fallback');
   });
 

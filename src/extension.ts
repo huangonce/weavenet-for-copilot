@@ -50,7 +50,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('weavenet-copilot.testConnection', () => testConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.setDefaultConnection', () => setDefaultConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.manageConnections', () => manageConnections(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate')),
+    vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate', true)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', async () => {
       const refreshHours = getConfig().metadataRefreshHours;
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'WeaveNet: Refreshing model metadata', cancellable: false }, async () => {

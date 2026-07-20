@@ -45,7 +45,8 @@ class InMemorySecrets {
 function providerFixture(
   activeProfile = 'work',
   configValues: Record<string, unknown> = {},
-): { provider: WeaveNetChatProvider; secrets: InMemorySecrets } {
+): { provider: WeaveNetChatProvider; secrets: InMemorySecrets; setActiveProfile(value: string): void } {
+  let currentActiveProfile = activeProfile;
   const profiles = [
     { name: 'work', baseUrl: 'https://work.example.test/v1' },
     { name: 'personal', baseUrl: 'https://personal.example.test/v1' },
@@ -55,12 +56,12 @@ function providerFixture(
     inspect: <T>(key: string) => key === 'profiles'
       ? { globalValue: profiles as T }
       : key === 'activeProfile'
-        ? { globalValue: activeProfile as T }
+        ? { globalValue: currentActiveProfile as T }
         : undefined,
   } as never);
   const secrets = new InMemorySecrets();
   const provider = new WeaveNetChatProvider({ secrets, subscriptions: [] } as never);
-  return { provider, secrets };
+  return { provider, secrets, setActiveProfile: (value) => { currentActiveProfile = value; } };
 }
 
 async function flushAsyncWork(): Promise<void> {
@@ -116,6 +117,56 @@ describe('model refresh invalidation', () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', modelCount: 0 });
+  });
+
+  it('keeps silent model discovery quiet and notifies after an explicit refresh', async () => {
+    const { provider, secrets } = providerFixture();
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-test' }] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const information = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+    expect(information).not.toHaveBeenCalled();
+
+    await provider.refreshModels('invalidate', true);
+    expect(information).toHaveBeenCalledOnce();
+    expect(information).toHaveBeenCalledWith('WeaveNet loaded 1 model(s).');
+  });
+
+  it('does not transfer an explicit refresh notification to another connection', async () => {
+    const { provider, secrets, setActiveProfile } = providerFixture();
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.personal`, 'personal-key');
+    let resolveWork: ((response: Response) => void) | undefined;
+    let signalWorkStarted: (() => void) | undefined;
+    const workStarted = new Promise<void>((resolve) => { signalWorkStarted = resolve; });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('work.example.test')) {
+        return new Promise<Response>((resolve) => {
+          resolveWork = resolve;
+          signalWorkStarted?.();
+        });
+      }
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-personal' }] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const information = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    const workRefresh = provider.refreshModels('invalidate', true);
+    await workStarted;
+    setActiveProfile('personal');
+    const personalRefresh = provider.refreshModels('invalidate');
+    resolveWork?.(new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    await Promise.all([workRefresh, personalRefresh]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(provider.getConnectionStatus()).toMatchObject({ connectionName: 'personal', modelCount: 1 });
+    expect(information).not.toHaveBeenCalled();
   });
 
   it('does not reload after a model change event causes VS Code to query the picker', async () => {

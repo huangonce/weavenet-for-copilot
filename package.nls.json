@@ -19,7 +19,7 @@
   "command.showDebugLog": "WeaveNet: Show Debug Log",
   "configuration.title": "WeaveNet for Copilot",
   "configuration.activeProfile.description": "Active WeaveNet Relay connection. Stored globally; leave empty only when no connection has been configured.",
-  "configuration.profiles.description": "Named global connection profiles. A profile overrides the relay URL, extra headers, model filters, and fixed models. Each profile has one API key stored only in VS Code SecretStorage. Delete commands permanently remove the corresponding API key.",
+  "configuration.profiles.description": "Named global connection profiles. A profile overrides the relay URL, extra headers, model filters, and fixed models. Each profile has one API key stored only in VS Code SecretStorage. Extra header values are regular VS Code settings and must not contain secrets. Delete commands permanently remove the corresponding API key.",
   "configuration.anthropicVersion.description": "Anthropic protocol version header sent when calling /messages for Claude models.",
   "configuration.openaiPromptCaching.description": "Send a stable prompt_cache_key for GPT models to improve OpenAI-compatible prompt cache routing.",
   "configuration.openaiPromptCacheKey.description": "Optional override for the GPT prompt_cache_key. Leave empty to use a stable key derived from the current workspace.",
@@ -31,11 +31,11 @@
   "configuration.topP.description": "Optional nucleus-sampling top_p sent to both OpenAI-compatible and Claude requests. Omit to use the model default.",
   "configuration.requestTimeoutSeconds.description": "Maximum seconds to wait for relay response headers. GET model discovery is retried once; chat POST requests are never blindly retried.",
   "configuration.streamIdleTimeoutSeconds.description": "Maximum seconds to wait between streamed response chunks before treating the stream as incomplete.",
-  "configuration.models.description": "Optional fixed model definitions merged with discovered models. Use these for private or unlisted relay routes.",
+  "configuration.models.description": "Legacy fallback fixed model definitions used when the active profile omits models. Prefer configuring models in the profile.",
   "configuration.debug.description": "Write redacted request summaries and Claude cache usage to the WeaveNet output channel. API keys and prompt text are never logged.",
   "configuration.modelNamePrefix.description": "Display prefix for models shown in Copilot Chat.",
-  "configuration.includeModels.description": "Optional regular expressions. When set, only matching model IDs are shown.",
-  "configuration.excludeModels.description": "Optional regular expressions. Matching model IDs are hidden.",
+  "configuration.includeModels.description": "Legacy fallback regular expressions used when the active profile omits includeModels. Prefer configuring filters in the profile.",
+  "configuration.excludeModels.description": "Legacy fallback regular expressions used when the active profile omits excludeModels. Prefer configuring filters in the profile.",
   "configuration.maxInputTokens.description": "Hard upper limit for input tokens advertised to Copilot. Lower this when an upstream OAuth model accepts less context than its model metadata reports.",
   "configuration.maxOutputTokens.description": "Max output token count advertised to Copilot and optionally sent as max_tokens.",
   "configuration.sendMaxTokens.description": "Send max_tokens with chat completion requests.",
@@ -44,5 +44,5 @@
   "configuration.imageInputModels.description": "Optional regular expressions that force image input on matching models. Model metadata is detected automatically from sub2api and OpenRouter.",
   "configuration.disabledImageInputModels.description": "Regular expressions that disable image input even when public metadata says a model supports it. Empty by default.",
   "configuration.metadataRefreshHours.description": "How often to refresh cached OpenRouter model metadata, in hours.",
-  "configuration.requestHeaders.description": "Extra headers sent to the relay. Do not put API keys here; use WeaveNet key commands."
+  "configuration.requestHeaders.description": "Legacy fallback headers used when the active profile omits requestHeaders. Values are stored as regular VS Code settings, not SecretStorage. Do not put API keys or other secrets here."
 }

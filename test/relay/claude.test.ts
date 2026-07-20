@@ -97,6 +97,20 @@ describe('Claude response parsing', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it('rejects oversized complete JSON and unbounded SSE events', async () => {
+    await expect(processClaudeFullResponse(new Response('{"content":[]}'), callbacks(), 1_000, undefined, 4))
+      .rejects.toThrow('exceeds 4 bytes');
+
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn().mockResolvedValueOnce({ value: new TextEncoder().encode('data: 123456'), done: false }),
+      cancel,
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    const response = { body: { getReader: () => reader } } as unknown as Response;
+    await expect(processClaudeStream(response, callbacks(), 1_000, undefined, 8)).rejects.toThrow('exceeds 8 bytes');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('prefers streamed tool arguments over a non-empty initial input', () => {
     const cb = callbacks();
     const state = { parts: 0, started: false };

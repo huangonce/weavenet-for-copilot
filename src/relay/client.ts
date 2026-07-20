@@ -69,7 +69,7 @@ export class RelayClient {
       responseType: response.headers.get('content-type') ?? 'unknown',
       requestId: response.headers.get('x-request-id') ?? undefined,
     };
-    await throwIfNotOk(response);
+    await throwIfNotOk(response, this.options.streamIdleTimeoutMs, token);
     await readResponseText(response, this.options.streamIdleTimeoutMs, token);
     return diagnostic;
   }

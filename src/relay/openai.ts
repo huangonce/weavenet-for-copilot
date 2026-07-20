@@ -1,6 +1,6 @@
 import type { CancellationToken } from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
-import { fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
+import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readRelayErrorResponse, readResponseText, readWithIdleTimeout } from './http';
 import type { ChatRequest, OpenAIFullResponse, StreamCallbacks, StreamChunk, ToolCall } from './types';
 import { relayEndpointUrl } from './url';
 
@@ -17,6 +17,8 @@ interface OpenAIStreamState {
   sawFinishReason: boolean;
 }
 
+const MAX_SSE_EVENT_BYTES = 1024 * 1024;
+
 export async function streamOpenAIChatCompletion(
   options: OpenAIRequestOptions,
   request: ChatRequest,
@@ -29,12 +31,13 @@ export async function streamOpenAIChatCompletion(
     const response = await fetchOpenAI(options, currentRequest, token);
     callbacks.onResponse?.('OpenAI', response.status, response.headers.get('content-type') ?? 'unknown');
     if (!response.ok) {
-      if (!fallbackUsed && currentRequest.stream && await isStreamingUnsupported(response)) {
+      const failure = await readRelayErrorResponse(response, options.streamIdleTimeoutMs, token);
+      if (!fallbackUsed && currentRequest.stream && isStreamingUnsupported(response.status, response.statusText, failure.body)) {
         fallbackUsed = true;
         currentRequest = { ...request, stream: false, stream_options: undefined };
         continue;
       }
-      await throwIfNotOk(response);
+      throw failure.error;
     }
 
     const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
@@ -80,6 +83,7 @@ export async function processOpenAIStream(
   callbacks: StreamCallbacks,
   idleTimeoutMs: number,
   token?: CancellationToken,
+  maxEventBytes = MAX_SSE_EVENT_BYTES,
 ): Promise<{ responseParts: number; started: boolean; sawFinishReason: boolean; terminal: boolean }> {
   if (!response.body) throw new Error('Relay returned an empty response body.');
   const reader = response.body.getReader();
@@ -93,15 +97,29 @@ export async function processOpenAIStream(
     while (!terminal) {
       const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        terminal = processOpenAISseLine(line, pendingToolCalls, callbacks, state);
-        if (terminal) break;
-      }
+      const consumed = consumeSseChunk(
+        value,
+        decoder,
+        buffer,
+        maxEventBytes,
+        (line) => processOpenAISseLine(line, pendingToolCalls, callbacks, state),
+        () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
+      );
+      buffer = consumed.buffer;
+      terminal = consumed.stopped;
     }
-    buffer += decoder.decode();
+    if (!terminal) {
+      const consumed = consumeSseChunk(
+        undefined,
+        decoder,
+        buffer,
+        maxEventBytes,
+        (line) => processOpenAISseLine(line, pendingToolCalls, callbacks, state),
+        () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
+      );
+      buffer = consumed.buffer;
+      terminal = consumed.stopped;
+    }
     if (!terminal && buffer.trim()) {
       terminal = processOpenAISseLine(buffer, pendingToolCalls, callbacks, state);
     }
@@ -157,8 +175,14 @@ export function processOpenAISseLine(
   return false;
 }
 
-export async function processOpenAIFullResponse(response: Response, callbacks: StreamCallbacks, idleTimeoutMs = 60_000, token?: CancellationToken): Promise<void> {
-  const body = await readResponseText(response, idleTimeoutMs, token);
+export async function processOpenAIFullResponse(
+  response: Response,
+  callbacks: StreamCallbacks,
+  idleTimeoutMs = 60_000,
+  token?: CancellationToken,
+  maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
+): Promise<void> {
+  const body = await readResponseText(response, idleTimeoutMs, token, maxBodyBytes);
   let payload: OpenAIFullResponse;
   try {
     payload = JSON.parse(body) as OpenAIFullResponse;
@@ -232,9 +256,10 @@ function extractText(value: string | Array<{ text?: string }> | null | undefined
   return text || undefined;
 }
 
-async function isStreamingUnsupported(response: Response): Promise<boolean> {
-  if (![400, 404, 415, 422, 501].includes(response.status)) return false;
-  const detail = `${response.statusText} ${await response.clone().text().catch(() => '')}`.toLowerCase();
+function isStreamingUnsupported(status: number, statusText: string, body: string): boolean {
+  if (![400, 404, 415, 422, 501].includes(status)) return false;
+  const detail = `${statusText} ${body}`.toLowerCase();
   return /\b(stream|streaming|sse|event-stream)\b/.test(detail) &&
     /\b(unsupported|not supported|invalid|disabled|not allowed|unrecognized|unknown)\b/.test(detail);
 }
+

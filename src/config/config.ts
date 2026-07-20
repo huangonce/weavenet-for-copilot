@@ -79,6 +79,10 @@ export function getConfig(): ExtensionConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
   const { activeProfile, profiles } = getProfileConfiguration();
   const connection = selectActiveProfile(profiles, activeProfile);
+  const legacyIncludeModels = stringArray(config.get<unknown>('includeModels')) ?? [];
+  const legacyExcludeModels = stringArray(config.get<unknown>('excludeModels')) ?? [];
+  const legacyRequestHeaders = objectHeaders(config.get<unknown>('requestHeaders')) ?? {};
+  const legacyModels = normalizeModels(arrayValue(config.get<unknown>('models')));
 
   return {
     profileName: connection?.name,
@@ -94,8 +98,8 @@ export function getConfig(): ExtensionConfig {
     streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
     debug: config.get<boolean>('debug') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
-    includeModels: compileRegexList(connection?.includeModels ?? []),
-    excludeModels: compileRegexList(connection?.excludeModels ?? []),
+    includeModels: compileRegexList(connection?.includeModels ?? legacyIncludeModels),
+    excludeModels: compileRegexList(connection?.excludeModels ?? legacyExcludeModels),
     maxInputTokens: Math.max(1, config.get<number>('maxInputTokens') ?? 128000),
     maxOutputTokens: Math.max(1, config.get<number>('maxOutputTokens') ?? 16384),
     sendMaxTokens: config.get<boolean>('sendMaxTokens') ?? false,
@@ -104,8 +108,8 @@ export function getConfig(): ExtensionConfig {
     imageInputModels: compileRegexList(config.get<string[]>('imageInputModels') ?? []),
     disabledImageInputModels: compileRegexList(config.get<string[]>('disabledImageInputModels') ?? []),
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
-    requestHeaders: connection?.requestHeaders ?? {},
-    models: connection?.models ?? [],
+    requestHeaders: connection?.requestHeaders ?? legacyRequestHeaders,
+    models: connection?.models ?? legacyModels,
   };
 }
 
@@ -228,6 +232,10 @@ function objectHeaders(value: unknown): Record<string, string> | undefined {
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function positiveNumber(value: unknown): number | undefined {

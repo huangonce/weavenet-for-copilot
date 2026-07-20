@@ -88,6 +88,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private refreshTaskConnectionKey: string | undefined;
   private cacheConnectionKey: string | undefined;
   private resolvedCatalogConnectionKey: string | undefined;
+  private refreshNotification: { connectionKey: string; generation: number } | undefined;
   private connectionStatus: ConnectionStatus = { phase: 'unconfigured', modelCount: 0 };
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
@@ -193,7 +194,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
-  async refreshModels(intent: ModelRefreshIntent = 'passive'): Promise<void> {
+  async refreshModels(intent: ModelRefreshIntent = 'passive', notifySuccess = false): Promise<void> {
     const config = getConfig();
     const connectionKey = modelConnectionKey(config);
     const connectionChanged = connectionKey !== this.cacheConnectionKey;
@@ -207,6 +208,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
     if (intent === 'passive' && this.resolvedCatalogConnectionKey === connectionKey) return;
     if (!config.profileName || !config.baseUrl) {
+      if (this.refreshNotification?.connectionKey === connectionKey) this.refreshNotification = undefined;
       this.resolvedCatalogConnectionKey = connectionKey;
       if (intent === 'invalidate' || !this.refreshModelsTask) this.requestModelRefresh(connectionKey);
       this.setConnectionStatus({ phase: 'unconfigured', modelCount: 0 });
@@ -217,10 +219,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       if (shouldInvalidateModelRefresh(intent, this.refreshTaskConnectionKey, connectionKey)) {
         this.requestModelRefresh(connectionKey);
       }
+      this.updateRefreshNotification(connectionKey, notifySuccess);
       return this.refreshModelsTask;
     }
 
     this.requestModelRefresh(connectionKey);
+    this.updateRefreshNotification(connectionKey, notifySuccess);
     this.refreshModelsTask = this.refreshModelsUntilCurrent()
       .finally(() => {
         this.refreshModelsTask = undefined;
@@ -234,6 +238,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.refreshTaskConnectionKey = connectionKey;
   }
 
+  private updateRefreshNotification(connectionKey: string, notifySuccess: boolean): void {
+    if (notifySuccess) {
+      this.refreshNotification = { connectionKey, generation: this.modelRefreshGeneration };
+    } else if (this.refreshNotification?.generation !== this.modelRefreshGeneration) {
+      this.refreshNotification = undefined;
+    }
+  }
+
   private async refreshModelsUntilCurrent(): Promise<void> {
     let generation: number;
     do {
@@ -243,6 +255,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       } catch (error) {
         if (generation === this.modelRefreshGeneration) {
           const config = getConfig();
+          const connectionKey = modelConnectionKey(config);
+          if (this.matchesRefreshNotification(connectionKey, generation)) this.refreshNotification = undefined;
           this.setConnectionStatus({
             ...connectionStatusFor(config),
             phase: 'error',
@@ -268,6 +282,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
 
     if (!await this.auth.hasApiKey(config.profileName)) {
       if (this.isCurrentRefresh(generation, connectionKey)) {
+        if (this.matchesRefreshNotification(connectionKey, generation)) this.refreshNotification = undefined;
         this.resolvedCatalogConnectionKey = connectionKey;
         this.setConnectionStatus({ ...connectionStatusFor(config), phase: 'keyMissing', modelCount: 0 });
       }
@@ -303,16 +318,24 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       message: result.partial ? 'Some Relay model routes could not be refreshed.' : undefined,
     });
     this.changeEmitter.fire();
-    vscode.window.showInformationMessage(`WeaveNet loaded ${this.cachedModels.length} model(s).`);
+    if (this.matchesRefreshNotification(connectionKey, generation)) {
+      this.refreshNotification = undefined;
+      void vscode.window.showInformationMessage(`WeaveNet loaded ${this.cachedModels.length} model(s).`);
+    }
+  }
+
+  private matchesRefreshNotification(connectionKey: string, generation: number): boolean {
+    return this.refreshNotification?.connectionKey === connectionKey &&
+      this.refreshNotification.generation === generation;
   }
 
   async provideLanguageModelChatInformation(
-    _options: vscode.PrepareLanguageModelChatModelOptions,
+    options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
     void token;
     try {
-      await this.refreshModels();
+      await this.refreshModels('passive', options.silent === false);
     } catch (error) {
       this.debug(getConfig(), `Model picker refresh failed: ${formatLogError(error)}`);
     }

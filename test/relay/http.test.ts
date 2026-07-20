@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readWithIdleTimeout } from '../../src/relay/http';
+import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from '../../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -125,6 +125,48 @@ describe('relay HTTP safety', () => {
     const response = { body: { getReader: () => reader } } as unknown as Response;
 
     await expect(readResponseText(response, 100)).rejects.toThrow('read failed');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('bounds error response bodies before creating a request error', async () => {
+    await expect(throwIfNotOk(new Response('x'.repeat(32), { status: 500 }), 100, undefined, 8))
+      .rejects.toMatchObject({ status: 500 });
+  });
+
+  it('preserves cancellation while reading an error response body', async () => {
+    let cancelListener: (() => void) | undefined;
+    const token = {
+      isCancellationRequested: false,
+      onCancellationRequested: (listener: () => void) => {
+        cancelListener = listener;
+        return { dispose() {} };
+      },
+    };
+    const pending = throwIfNotOk(new Response(
+      new ReadableStream<Uint8Array>({ start() {} }),
+      { status: 500 },
+    ), 1_000, token);
+
+    cancelListener?.();
+    await expect(pending).rejects.toMatchObject({ name: 'CancellationError' });
+  });
+
+  it('preserves idle timeouts while reading an error response body', async () => {
+    await expect(throwIfNotOk(new Response(
+      new ReadableStream<Uint8Array>({ start() {} }),
+      { status: 500 },
+    ), 5)).rejects.toMatchObject({ name: 'RelayTimeoutError', phase: 'stream' });
+  });
+
+  it('rejects and cancels a complete response body above its limit', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn().mockResolvedValueOnce({ value: new TextEncoder().encode('too large'), done: false }),
+      cancel,
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    const response = { body: { getReader: () => reader } } as unknown as Response;
+
+    await expect(readResponseText(response, 100, undefined, 4)).rejects.toThrow('exceeds 4 bytes');
     expect(cancel).toHaveBeenCalledOnce();
   });
 });
