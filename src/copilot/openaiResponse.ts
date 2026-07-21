@@ -92,6 +92,8 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
         diagnostics.onReasoning();
         reportThinking(progress, text);
       },
+      onRequest: diagnostics.onRequest,
+      onRequestSettled: diagnostics.onRequestSettled,
       onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage),
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,

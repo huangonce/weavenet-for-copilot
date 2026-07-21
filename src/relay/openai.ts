@@ -31,8 +31,10 @@ export async function streamOpenAIChatCompletion(
   let currentRequest = request;
   let fallbackUsed = false;
   const clientRequestId = randomUUID();
+  let attempt = 0;
   while (true) {
-    const response = await fetchOpenAI(options, currentRequest, clientRequestId, token);
+    attempt++;
+    const response = await fetchOpenAI(options, currentRequest, clientRequestId, attempt, callbacks, token);
     callbacks.onResponse?.(
       'OpenAI',
       response.status,
@@ -77,8 +79,18 @@ async function fetchOpenAI(
   options: OpenAIRequestOptions,
   request: ChatRequest,
   clientRequestId: string,
+  attempt: number,
+  callbacks: StreamCallbacks,
   token?: CancellationToken,
 ): Promise<Response> {
+  const body = JSON.stringify(request);
+  callbacks.onRequest?.('OpenAI', {
+    clientRequestId,
+    bodyBytes: Buffer.byteLength(body),
+    clientRequestIdSent: options.sendClientRequestId === true,
+    attempt,
+    stream: request.stream,
+  });
   // Never retry network-level POST failures. The upstream may already have
   // accepted the request, which could duplicate billing or tool execution.
   return fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'chat/completions'), {
@@ -89,8 +101,11 @@ async function fetchOpenAI(
       Accept: request.stream ? 'text/event-stream' : 'application/json',
       ...(options.sendClientRequestId ? { 'X-Client-Request-Id': clientRequestId } : {}),
     },
-    body: JSON.stringify(request),
-  }, options.requestTimeoutMs, token);
+    body,
+  }, options.requestTimeoutMs, token, (diagnostics) => callbacks.onRequestSettled?.('OpenAI', {
+    clientRequestId,
+    ...diagnostics,
+  }));
 }
 
 export async function processOpenAIStream(

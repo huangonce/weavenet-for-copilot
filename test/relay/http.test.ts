@@ -14,6 +14,62 @@ describe('relay HTTP safety', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://example.test/models', expect.objectContaining({ redirect: 'error' }));
   });
 
+  it('reports successful fetch transport state without exposing request details', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    const onSettled = vi.fn();
+
+    await fetchWithResponseTimeout('https://example.test/models', {}, 100, undefined, onSettled);
+
+    expect(onSettled).toHaveBeenCalledWith({
+      responseReceived: true,
+      signalAborted: false,
+      abortSource: 'none',
+      tokenCancellationRequested: false,
+    });
+  });
+
+  it('reports VS Code cancellation as the fetch abort source', async () => {
+    let cancelListener: (() => void) | undefined;
+    const token = {
+      isCancellationRequested: false,
+      onCancellationRequested: (listener: () => void) => {
+        cancelListener = listener;
+        return { dispose() {} };
+      },
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => new Promise((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const onSettled = vi.fn();
+    const pending = fetchWithResponseTimeout('https://example.test', {}, 1_000, token, onSettled);
+
+    token.isCancellationRequested = true;
+    cancelListener?.();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(onSettled).toHaveBeenCalledWith({
+      responseReceived: false,
+      signalAborted: true,
+      abortSource: 'vscode',
+      tokenCancellationRequested: true,
+    });
+  });
+
+  it('reports timeout as the fetch abort source', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => new Promise((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const onSettled = vi.fn();
+
+    await expect(fetchWithResponseTimeout('https://example.test', {}, 5, undefined, onSettled))
+      .rejects.toMatchObject({ name: 'RelayTimeoutError' });
+    expect(onSettled).toHaveBeenCalledWith({
+      responseReceived: false,
+      signalAborted: true,
+      abortSource: 'timeout',
+      tokenCancellationRequested: false,
+    });
+  });
+
   it('rejects non-GET retry requests before sending them', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     await expect(fetchJsonWithRetry('https://example.test', { method: 'POST' }, 100)).rejects.toThrow('only supports GET');

@@ -307,6 +307,10 @@ export interface StreamCallbacks {
   onContent(text: string): void;
   onReasoning(text: string): void;
   onToolCall(toolCall: ToolCall): void;
+  /** Request metadata only; request bodies, URLs, and headers are never exposed. */
+  onRequest?(protocol: 'OpenAI' | 'Claude', metadata: RequestDiagnosticsMetadata): void;
+  /** Transport state captured when fetch returns or rejects. */
+  onRequestSettled?(protocol: 'OpenAI' | 'Claude', metadata: RequestTransportDiagnosticsMetadata): void;
   onRefusal?(text: string): void;
   onOpenAIFinishReason?(reason: string): void;
   onOpenAIUsage?(usage: OpenAIUsage): void;
@@ -316,6 +320,22 @@ export interface StreamCallbacks {
   onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
   /** Called only when the protocol's normal terminal event is received. */
   onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+}
+
+export interface RequestDiagnosticsMetadata {
+  readonly clientRequestId: string;
+  readonly bodyBytes: number;
+  readonly clientRequestIdSent: boolean;
+  readonly attempt: number;
+  readonly stream: boolean;
+}
+
+export interface RequestTransportDiagnosticsMetadata {
+  readonly clientRequestId: string;
+  readonly responseReceived: boolean;
+  readonly signalAborted: boolean;
+  readonly abortSource: 'none' | 'vscode' | 'timeout';
+  readonly tokenCancellationRequested: boolean;
 }
 
 export interface ResponseDiagnosticsMetadata {

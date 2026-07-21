@@ -437,6 +437,17 @@ describe('Provider request helpers', () => {
     expect(estimateTextTokens('你好abcd')).toBe(3);
     expect(estimateTextTokens('')).toBe(1);
   });
+
+  it('formats network diagnostics with safe error codes but not messages or URLs', () => {
+    const error = new TypeError('fetch failed for https://relay.example.test/private', {
+      cause: Object.assign(new Error('socket closed with secret body'), { code: 'UND_ERR_SOCKET' }),
+    });
+
+    const formatted = formatLogError(error);
+    expect(formatted).toBe('NetworkError(name=TypeError, causeName=Error, causeCode=UND_ERR_SOCKET)');
+    expect(formatted).not.toContain('https://');
+    expect(formatted).not.toContain('secret');
+  });
 });
 
 describe('Provider chat responses', () => {

@@ -14,7 +14,15 @@ export class RelayTimeoutError extends Error {
 
 export interface AbortContext {
   readonly signal: AbortSignal;
+  readonly abortSource: 'none' | 'vscode' | 'timeout';
   dispose(): void;
+}
+
+export interface FetchTransportDiagnostics {
+  readonly responseReceived: boolean;
+  readonly signalAborted: boolean;
+  readonly abortSource: AbortContext['abortSource'];
+  readonly tokenCancellationRequested: boolean;
 }
 
 export interface JsonResponse<T> {
@@ -147,23 +155,26 @@ export async function readRelayErrorResponse(
 
 export function createAbortContext(token?: CancellationToken, timeoutMs?: number): AbortContext {
   const controller = new AbortController();
+  let abortSource: AbortContext['abortSource'] = 'none';
   if (token?.isCancellationRequested) {
+    abortSource = 'vscode';
     controller.abort();
   }
-  const cancellation = token?.onCancellationRequested(() => controller.abort());
-  let timedOut = false;
+  const cancellation = token?.onCancellationRequested(() => {
+    if (!controller.signal.aborted) abortSource = 'vscode';
+    controller.abort();
+  });
   const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
-    timedOut = true;
+    if (controller.signal.aborted) return;
+    abortSource = 'timeout';
     controller.abort(new RelayTimeoutError('response', timeoutMs));
   }, timeoutMs);
   return {
     signal: controller.signal,
+    get abortSource() { return abortSource; },
     dispose: () => {
       cancellation?.dispose();
       if (timeout) clearTimeout(timeout);
-      if (timedOut && !controller.signal.reason) {
-        controller.abort(new RelayTimeoutError('response', timeoutMs!));
-      }
     },
   };
 }
@@ -173,16 +184,26 @@ export async function fetchWithResponseTimeout(
   init: RequestInit,
   timeoutMs: number,
   token?: CancellationToken,
+  onSettled?: (diagnostics: FetchTransportDiagnostics) => void,
 ): Promise<Response> {
   const context = createAbortContext(token, timeoutMs);
+  let responseReceived = false;
   try {
     // Relay requests may contain API keys and connection-scoped headers.
     // Refuse redirects instead of risking forwarding them to another origin.
-    return await fetch(url, { ...init, redirect: 'error', signal: context.signal });
+    const response = await fetch(url, { ...init, redirect: 'error', signal: context.signal });
+    responseReceived = true;
+    return response;
   } catch (error) {
     if (context.signal.reason instanceof RelayTimeoutError) throw context.signal.reason;
     throw error;
   } finally {
+    onSettled?.({
+      responseReceived,
+      signalAborted: context.signal.aborted,
+      abortSource: context.abortSource,
+      tokenCancellationRequested: token?.isCancellationRequested ?? false,
+    });
     context.dispose();
   }
 }

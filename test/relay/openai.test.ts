@@ -278,6 +278,66 @@ describe('OpenAI response parsing', () => {
     expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('x-client-request-id')).toMatch(/^[0-9a-f-]{36}$/u);
   });
 
+  it('reports safe request metadata before fetch rejects during upload', async () => {
+    const networkError = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('socket closed at https://secret.example.test'), { code: 'ECONNRESET' }),
+    });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(networkError);
+    const cb = { ...callbacks(), onRequest: vi.fn(), onRequestSettled: vi.fn() };
+    const request = { model: 'gpt-test', messages: [], stream: true } as const;
+
+    await expect(streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+      sendClientRequestId: true,
+    }, request, cb)).rejects.toBe(networkError);
+
+    const requestMetadata = cb.onRequest.mock.calls[0]?.[1];
+    expect(requestMetadata).toEqual({
+      clientRequestId: expect.any(String),
+      bodyBytes: Buffer.byteLength(JSON.stringify(request)),
+      clientRequestIdSent: true,
+      attempt: 1,
+      stream: true,
+    });
+    expect(cb.onRequestSettled).toHaveBeenCalledWith('OpenAI', {
+      clientRequestId: requestMetadata?.clientRequestId,
+      responseReceived: false,
+      signalAborted: false,
+      abortSource: 'none',
+      tokenCancellationRequested: false,
+    });
+  });
+
+  it('uses the same local request ID in diagnostics and the optional header', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    const cb = { ...callbacks(), onRequest: vi.fn() };
+
+    await streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+      sendClientRequestId: true,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb);
+
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('x-client-request-id'))
+      .toBe(cb.onRequest.mock.calls[0]?.[1].clientRequestId);
+  });
+
+  it('retains a local request ID when the optional header is disabled', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    const cb = { ...callbacks(), onRequest: vi.fn() };
+
+    await streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb);
+
+    expect(cb.onRequest).toHaveBeenCalledWith('OpenAI', expect.objectContaining({
+      clientRequestId: expect.any(String), clientRequestIdSent: false,
+    }));
+  });
+
   it('does not hang when an oversized error body reports unsupported streaming', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(`streaming is not supported ${'x'.repeat(70 * 1024)}`, { status: 422 }))
