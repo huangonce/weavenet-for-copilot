@@ -2,67 +2,67 @@
 
 ## 0.4.1 - 2026-07-21
 
-- Added opt-in OpenAI request capabilities for modern token limits, Relay-specific context windows, prompt caching, store controls, strict and parallel tools, developer messages, client request IDs, and model-specific reasoning efforts.
-- Preserved legacy OpenAI-compatible Relay payloads by default while avoiding simultaneous `temperature` and `top_p` sampling controls.
-- Added refusal, finish-reason, detailed usage, request ID, rate-limit, and processing-time diagnostics without logging prompt or tool-argument content.
-- Hardened strict function schemas with safe fallback and documented a non-disruptive future migration path for the Responses API.
+- 新增可显式启用的 OpenAI 请求能力，包括现代令牌上限、Relay 专用上下文窗口、提示缓存、存储控制、严格及并行工具、developer 消息、客户端请求 ID，以及模型专属的推理强度。
+- 默认保留旧版 OpenAI-compatible Relay 请求负载，同时避免一并发送 `temperature` 和 `top_p` 采样参数。
+- 新增拒绝信息、结束原因、详细用量、请求 ID、限流和处理耗时诊断，且不记录 Prompt 或工具参数正文。
+- 强化严格函数 schema 的安全回退，并记录未来无破坏性迁移到 Responses API 的方案。
 
 ## 0.4.0 - 2026-07-20
 
-- Enabled all Relay connections simultaneously and aggregated their independently refreshed model catalogs with a concurrency limit of three connections.
-- Bound every picker model to its source connection, immutable effective configuration, and stable UUID so requests cannot be rerouted by later connection selection or rename operations.
-- Migrated profile identities and SecretStorage keys from names to UUIDs with verified, retry-safe upgrade behavior and connection-local diagnostic invalidation.
-- Replaced default-connection UX with aggregate status and refresh summaries; deleting a connection now always deletes its API key.
+- 同时启用所有 Relay 连接，并以最多三个连接的并发限制独立刷新和聚合其模型目录。
+- 将模型选择器中的每个模型绑定到来源连接、不可变的生效配置和稳定 UUID，避免后续连接选择或改名操作改变请求路由。
+- 将配置档身份和 SecretStorage 密钥由名称迁移为 UUID，并提供经过验证、可安全重试的升级流程和连接级诊断失效机制。
+- 使用聚合状态和刷新摘要取代默认连接交互；删除连接时始终同时删除其 API Key。
 
 ## 0.3.4 - 2026-07-20
 
-- Added explicit structured Relay diagnostics for model discovery and OpenAI/Anthropic streaming and non-streaming protocol support.
-- Persisted safe diagnostic summaries by connection fingerprint while invalidating them when credentials change.
-- Improved status presentation and connection management with staged editing, optional API-key retention, and orphaned-key reuse.
-- Hardened bounded Relay response processing, cancellation handling, response metadata, and diagnostic cache cleanup.
+- 新增结构化 Relay 诊断，明确检测模型发现以及 OpenAI/Anthropic 流式和非流式协议支持情况。
+- 按连接指纹持久化安全的诊断摘要，并在凭据变更时使其失效。
+- 改进状态展示与连接管理，支持分阶段编辑、选择性保留 API Key，以及复用孤立密钥。
+- 强化有界 Relay 响应处理、取消处理、响应元数据和诊断缓存清理。
 
 ## 0.3.3 - 2026-07-16
 
-- Fixed repeated model catalog reloads by reusing resolved catalogs until connection, credential, or metadata changes explicitly invalidate them.
-- Refactored the Copilot provider into focused model discovery, OpenAI, Claude, connection, helper, and request diagnostics modules.
-- Strengthened Relay response and streaming reliability while preserving safe cancellation, error mapping, and request diagnostics.
-- Added ESLint checks, coverage-enabled CI, package inspection, tag/version validation, and a VS Code Extension Host smoke test.
+- 复用已解析的模型目录，直到连接、凭据或元数据变更明确使其失效，从而修复模型目录重复加载问题。
+- 将 Copilot provider 重构为职责清晰的模型发现、OpenAI、Claude、连接、辅助工具和请求诊断模块。
+- 提升 Relay 响应和流式传输的可靠性，同时保留安全取消、错误映射和请求诊断能力。
+- 新增 ESLint 检查、包含覆盖率的 CI、扩展包内容检查、标签与版本校验，以及 VS Code Extension Host 冒烟测试。
 
 ## 0.3.2 - 2026-07-16
 
-- Refused Relay redirects for authenticated requests and reliably released JSON, OpenAI SSE, and Claude SSE stream readers across completion and failure paths.
-- Rejected malformed model catalogs, unsafe connection names, and orphaned destination API keys during connection copy or rename operations.
-- Expanded regression coverage for UTF-8 stream boundaries, model catalog validation, SecretStorage lifecycle safety, and connection workflows.
+- 拒绝已认证 Relay 请求的重定向，并在完成或失败路径中可靠释放 JSON、OpenAI SSE 和 Claude SSE 流读取器。
+- 拒绝格式错误的模型目录、不安全的连接名称，以及复制或重命名连接时目标位置的孤立 API Key。
+- 扩展 UTF-8 流边界、模型目录校验、SecretStorage 生命周期安全和连接工作流的回归测试覆盖。
 
 ## 0.3.1 - 2026-07-16
 
-- Made connection creation and renaming recover safely across configuration and SecretStorage failures, while serializing connection mutations.
-- Fixed secret-deletion rollback races and expanded the one-time legacy reset to clean global, workspace, and workspace-folder legacy Base URL values.
-- Isolated model-refresh snapshots by active connection to prevent stale models from another Relay appearing after a connection switch.
-- Validated Relay base URLs and constructed endpoints canonically; protected Relay authentication and protocol headers from profile overrides.
-- Restricted model-refresh diagnostics to debug-gated, structured error summaries without raw upstream messages.
+- 串行化连接变更，并确保创建和重命名连接时能够从配置或 SecretStorage 故障中安全恢复。
+- 修复密钥删除回滚竞态，并扩展一次性旧配置重置，以清理全局、工作区和工作区文件夹中的旧版 Base URL。
+- 按活动连接隔离模型刷新快照，防止切换连接后显示其他 Relay 的过期模型。
+- 校验 Relay Base URL 并规范构造端点，防止配置档覆盖 Relay 认证头和协议头。
+- 将模型刷新诊断限制为仅在调试模式下输出的结构化错误摘要，不包含原始上游消息。
 
 ## 0.3.0 - 2026-07-15
 
-- Replaced the built-in Default Relay with named Relay connections, including add, edit, copy, test, delete, clear-all, and set-default workflows with isolated SecretStorage API keys.
-- Added visible connection status and structured connection diagnostics for safe endpoints, HTTP status, response type, request IDs, and Claude `/messages` compatibility.
-- Replaced ambiguous legacy Relay migration with a one-time reset of the pre-profile Base URL and legacy API keys. Existing profile connections and profile-scoped keys are never removed by this upgrade step.
-- Moved the extension icon to `resources`, tightened the VSIX contents, and added package-content inspection to Marketplace publishing.
+- 使用具名 Relay 连接取代内置的 Default Relay，支持新增、编辑、复制、测试、删除、全部清除和设置默认连接，并通过 SecretStorage 隔离存储 API Key。
+- 新增可见的连接状态和结构化连接诊断，安全展示端点、HTTP 状态、响应类型、请求 ID，以及 Claude `/messages` 兼容性。
+- 使用一次性重置配置档机制之前的 Base URL 和旧版 API Key，取代含义不明确的旧 Relay 迁移；升级过程不会删除已有配置档连接及其专属密钥。
+- 将扩展图标移至 `resources`，收紧 VSIX 内容，并在 Marketplace 发布流程中加入扩展包内容检查。
 
 ## 0.2.1 - 2026-07-15
 
-- Increased the default relay response-header timeout from 60 to 120 seconds for slower reasoning and long-context requests.
-- Hardened Claude tool-result chains, streaming tool arguments, extended-thinking sampling constraints, and OpenAI incremental tool calls.
-- Extended model-discovery timeout and cancellation through body reads, added response/catalog limits, and strengthened metadata cache validation.
-- Added structured relay error mapping, isolated Copilot Chat activation failures, and required compilation and tests before Marketplace publishing.
+- 将 Relay 响应头默认超时时间从 60 秒提高到 120 秒，以适应较慢的推理和长上下文请求。
+- 强化 Claude 工具结果链、流式工具参数、扩展思考采样约束，以及 OpenAI 增量工具调用。
+- 将模型发现的超时和取消控制覆盖到响应正文读取，增加响应与模型目录大小限制，并强化元数据缓存校验。
+- 新增结构化 Relay 错误映射，隔离 Copilot Chat 激活故障，并要求在 Marketplace 发布前完成编译和测试。
 
 ## 0.2.0 - 2026-07-15
 
-- Added independent route refresh, fixed/private model definitions, unique picker IDs, and explicit upstream routing.
-- Added response/stream timeouts, one safe retry for model discovery GETs, and processing-aware stream fallback without blind chat retries.
-- Improved OpenAI and Claude SSE/JSON compatibility, reasoning, usage, incremental tools, MIME validation, and strict tool argument parsing.
-- Added Anthropic cache breakpoints with configurable `5m`/`1h` TTL, sampling controls, sanitized tool schemas, safer relay error mapping, and broader token estimation.
-- Added Vitest coverage for protocol parsing, cache controls, schema sanitization, and model routing.
+- 新增独立路由刷新、固定或私有模型定义、唯一模型选择器 ID，以及显式上游路由。
+- 新增响应和流式超时、模型发现 GET 的一次安全重试，以及可感知处理状态且不盲目重试聊天请求的流式降级。
+- 改进 OpenAI 和 Claude 的 SSE/JSON 兼容性、推理、用量、增量工具、MIME 校验和严格工具参数解析。
+- 新增支持配置 `5m`/`1h` TTL 的 Anthropic 缓存断点、采样控制、工具 schema 清理、更安全的 Relay 错误映射，以及更全面的 token 估算。
+- 新增 Vitest 测试，覆盖协议解析、缓存控制、schema 清理和模型路由。
 
 ## 0.1.4
 
