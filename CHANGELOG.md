@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.4.1 - 2026-07-21
+
+- Added opt-in OpenAI request capabilities for modern token limits, Relay-specific context windows, prompt caching, store controls, strict and parallel tools, developer messages, client request IDs, and model-specific reasoning efforts.
+- Preserved legacy OpenAI-compatible Relay payloads by default while avoiding simultaneous `temperature` and `top_p` sampling controls.
+- Added refusal, finish-reason, detailed usage, request ID, rate-limit, and processing-time diagnostics without logging prompt or tool-argument content.
+- Hardened strict function schemas with safe fallback and documented a non-disruptive future migration path for the Responses API.
+
 ## 0.4.0 - 2026-07-20
 
 - Enabled all Relay connections simultaneously and aggregated their independently refreshed model catalogs with a concurrency limit of three connections.

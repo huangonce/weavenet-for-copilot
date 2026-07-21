@@ -10,6 +10,8 @@ function callbacks() {
     onContent: vi.fn(),
     onReasoning: vi.fn(),
     onToolCall: vi.fn(),
+    onRefusal: vi.fn(),
+    onOpenAIFinishReason: vi.fn(),
     onProcessingStarted: vi.fn(),
     onOpenAIUsage: vi.fn(),
   } satisfies StreamCallbacks;
@@ -31,6 +33,7 @@ describe('OpenAI response parsing', () => {
     expect(cb.onContent).toHaveBeenCalledWith('answer');
     expect(cb.onOpenAIUsage).toHaveBeenCalledOnce();
     expect(cb.onProcessingStarted).toHaveBeenCalledWith('OpenAI');
+    expect(cb.onOpenAIFinishReason).toHaveBeenCalledWith('stop');
   });
 
   it('assembles incremental tool arguments', () => {
@@ -152,6 +155,23 @@ describe('OpenAI response parsing', () => {
     expect(cb.onReasoning).toHaveBeenCalledWith('reason');
   });
 
+  it('reports refusal and length finish reasons without treating them as empty responses', async () => {
+    const cb = callbacks();
+    await processOpenAIFullResponse(new Response(JSON.stringify({
+      choices: [{ message: { refusal: 'cannot comply' }, finish_reason: 'content_filter' }],
+    })), cb);
+    expect(cb.onRefusal).toHaveBeenCalledWith('cannot comply');
+    expect(cb.onOpenAIFinishReason).toHaveBeenCalledWith('content_filter');
+
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"refusal":"blocked"},"finish_reason":"length"}]}',
+      new Map(), cb, state,
+    );
+    expect(cb.onRefusal).toHaveBeenCalledWith('blocked');
+    expect(cb.onOpenAIFinishReason).toHaveBeenCalledWith('length');
+  });
+
   it('treats a terminal-only stream as completed upstream processing', async () => {
     const response = new Response('data:[DONE]\r\n\r\n', {
       headers: { 'content-type': 'text/event-stream' },
@@ -215,7 +235,47 @@ describe('OpenAI response parsing', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ stream: false });
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('accept')).toBe('text/event-stream');
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('accept')).toBe('application/json');
     expect(cb.onContent).toHaveBeenCalledWith('fallback');
+  });
+
+  it('reports safe successful-response diagnostics metadata', async () => {
+    const cb = { ...callbacks(), onResponse: vi.fn() };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
+      headers: {
+        'content-type': 'text/event-stream',
+        'x-request-id': 'req-safe',
+        'openai-processing-ms': '42',
+        'x-ratelimit-remaining-tokens': '900',
+      },
+    }));
+
+    await streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb);
+
+    expect(cb.onResponse).toHaveBeenCalledWith('OpenAI', 200, 'text/event-stream', expect.objectContaining({
+      requestId: 'req-safe', processingMs: 42, rateLimitRemainingTokens: '900',
+      clientRequestId: expect.any(String),
+    }));
+  });
+
+  it('sends a client request ID only when explicitly enabled', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }));
+    const options = {
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    };
+    await streamOpenAIChatCompletion(options, { model: 'gpt-test', messages: [], stream: true }, callbacks());
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('x-client-request-id')).toBe(false);
+
+    await streamOpenAIChatCompletion(
+      { ...options, sendClientRequestId: true },
+      { model: 'gpt-test', messages: [], stream: true },
+      callbacks(),
+    );
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('x-client-request-id')).toMatch(/^[0-9a-f-]{36}$/u);
   });
 
   it('does not hang when an oversized error body reports unsupported streaming', async () => {

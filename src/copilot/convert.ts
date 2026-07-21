@@ -5,18 +5,19 @@ import type {
   ToolDefinition,
   ToolCall,
 } from '../relay/types';
-import { sanitizeJsonSchema } from '../relay/schema';
+import { sanitizeJsonSchema, toStrictJsonSchema } from '../relay/schema';
 
 const SYSTEM_ROLE = 3;
 
 export function convertMessages(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
   supportsImageInput: boolean,
+  supportsDeveloperRole = false,
 ): ChatMessage[] {
   const result: ChatMessage[] = [];
 
   for (const message of messages) {
-    const role = mapRole(message.role);
+    const role = mapRole(message.role, supportsDeveloperRole);
     const contentParts: ChatContentPart[] = [];
     let textContent = '';
     const toolCalls: ToolCall[] = [];
@@ -82,19 +83,25 @@ export function convertMessages(
 
 export function convertTools(
   tools: readonly vscode.LanguageModelChatTool[] | undefined,
+  enableStrict = false,
 ): ToolDefinition[] | undefined {
   if (!tools?.length) {
     return undefined;
   }
 
-  return tools.map((tool) => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} },
-    },
-  }));
+  return tools.map((tool) => {
+    const parameters = sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} };
+    const strictParameters = enableStrict ? toStrictJsonSchema(parameters) : undefined;
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: strictParameters ?? parameters,
+        ...(strictParameters ? { strict: true as const } : {}),
+      },
+    };
+  });
 }
 
 function getImageDataPart(part: unknown): { mimeType: string; data: Uint8Array } | undefined {
@@ -147,12 +154,12 @@ function stringifyToolResult(content: readonly vscode.LanguageModelToolResultPar
   return result || JSON.stringify(content);
 }
 
-function mapRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'user' | 'assistant' {
+function mapRole(role: vscode.LanguageModelChatMessageRole, supportsDeveloperRole: boolean): 'system' | 'developer' | 'user' | 'assistant' {
   if (role === vscode.LanguageModelChatMessageRole.Assistant) {
     return 'assistant';
   }
   if ((role as number) === SYSTEM_ROLE) {
-    return 'system';
+    return supportsDeveloperRole ? 'developer' : 'system';
   }
   return 'user';
 }

@@ -414,6 +414,10 @@ describe('Provider request helpers', () => {
     expect(getConfiguredReasoningEffort(thinkingModel, { modelOptions: { reasoningEffort: 'max' } } as never)).toBe('max');
     expect(getConfiguredReasoningEffort(thinkingModel, { configuration: { reasoningEffort: 'invalid' } } as never)).toBe('high');
     expect(getConfiguredReasoningEffort({ ...thinkingModel, thinking: false }, {} as never)).toBeUndefined();
+    expect(getConfiguredReasoningEffort({
+      ...thinkingModel,
+      openai: { reasoningEfforts: ['minimal', 'low'], defaultReasoningEffort: 'minimal' },
+    }, { modelOptions: { reasoningEffort: 'high' } } as never)).toBe('minimal');
     expect(getConfiguredContextWindow(thinkingModel, { modelConfiguration: { contextWindow: '400000' } } as never)).toBe(400_000);
     expect(getConfiguredContextWindow(thinkingModel, { configuration: { contextWindow: '999999' } } as never)).toBeUndefined();
     expect(getConfiguredContextWindow(thinkingModel, { configuration: { contextWindow: 'default' } } as never)).toBeUndefined();
@@ -505,6 +509,80 @@ describe('Provider chat responses', () => {
       expect.objectContaining({ value: 'answer' }),
       expect.objectContaining({ callId: 'call-1', name: 'search', input: { q: 'docs' } }),
     ]);
+  });
+
+  it('uses explicitly supported modern OpenAI request fields without changing legacy defaults', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      models: [{
+        id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true,
+        contextWindows: [128_000],
+        openai: {
+          tokenLimitField: 'max_completion_tokens' as const,
+          contextWindow: true,
+          promptCacheKey: true,
+          store: true,
+          strictTools: true,
+          parallelToolCalls: true,
+          developerRole: true,
+          reasoningEfforts: ['minimal', 'high'] as const,
+          defaultReasoningEffort: 'minimal' as const,
+        },
+      }],
+    };
+    const { provider, model } = await readyProvider(openAIModel, { temperature: 0.4, topP: 0.7 }, profile);
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+      expect(request).toMatchObject({
+        max_completion_tokens: 32,
+        context_window: 128_000,
+        reasoning_effort: 'minimal',
+        store: false,
+        parallel_tool_calls: true,
+        temperature: 0.4,
+        top_p: undefined,
+      });
+      expect(request).not.toHaveProperty('max_tokens');
+      expect(request.tools?.[0].function).toMatchObject({ strict: true });
+      expect(request.messages[0].role).toBe('developer');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      { ...model, maxOutputTokens: 32 } as never,
+      [{ role: 3, content: [new vscode.LanguageModelTextPart('instructions')] }] as never,
+      {
+        tools: [{ name: 'ping', inputSchema: { type: 'object', properties: {}, required: [] } }],
+        modelOptions: { reasoningEffort: 'unsupported', contextWindow: '128000' },
+      } as never,
+      progress() as never,
+      token,
+    );
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it('does not enable strict tools for schemas with optional properties', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      models: [{
+        id: 'gpt-test', route: 'openai' as const, toolCalling: true,
+        openai: { strictTools: true },
+      }],
+    };
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+      expect(request.tools?.[0].function).not.toHaveProperty('strict');
+      expect(request.tools?.[0].function.parameters).toEqual({
+        type: 'object', properties: { query: { type: 'string' } },
+      });
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [],
+      { tools: [{ name: 'search', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } }] } as never,
+      progress() as never,
+      token,
+    );
+    expect(stream).toHaveBeenCalledOnce();
   });
 
   it('uses Claude native payloads, extended thinking, and native tool-choice semantics', async () => {

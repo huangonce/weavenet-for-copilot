@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -197,6 +197,78 @@
                     },
                     "thinking": {
                       "type": "boolean"
+                    },
+                    "contextWindows": {
+                      "type": "array",
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "number",
+                        "minimum": 1
+                      }
+                    },
+                    "openai": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "%configuration.modelOpenAICapabilities.description%",
+                      "properties": {
+                        "tokenLimitField": {
+                          "type": "string",
+                          "enum": [
+                            "max_tokens",
+                            "max_completion_tokens",
+                            "omit"
+                          ]
+                        },
+                        "contextWindow": {
+                          "type": "boolean"
+                        },
+                        "promptCacheKey": {
+                          "type": "boolean"
+                        },
+                        "store": {
+                          "type": "boolean"
+                        },
+                        "strictTools": {
+                          "type": "boolean"
+                        },
+                        "parallelToolCalls": {
+                          "type": "boolean"
+                        },
+                        "developerRole": {
+                          "type": "boolean"
+                        },
+                        "clientRequestId": {
+                          "type": "boolean"
+                        },
+                        "reasoningEfforts": {
+                          "type": "array",
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "defaultReasoningEffort": {
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
+                        }
+                      }
                     }
                   }
                 }

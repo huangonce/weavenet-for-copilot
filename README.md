@@ -87,10 +87,36 @@ src/
 - 自动发现会并发刷新每个连接的 `/models` 目录；返回的 `claude-*` 模型使用 Claude 原生路由，其余模型使用 OpenAI 路由。各连接的固定模型会与其发现结果合并。某个连接发现失败时只保留该连接上一次成功的发现快照；如果没有快照但配置了固定模型，则以降级状态仅展示其固定模型。
 - `weavenet-copilot.requestTimeoutSeconds`：等待响应头的秒数。模型发现 GET 最多安全重试一次，聊天 POST 不做网络盲重试。
 - `weavenet-copilot.streamIdleTimeoutSeconds`：流式响应数据块之间允许的空闲秒数。
-- `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数，同时转发到 OpenAI 兼容和 Claude 请求。
+- `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数。OpenAI 同时配置两者时只发送 `temperature`；Claude 保持已有转发行为。
 - `weavenet-copilot.claudePromptCachingTTL`：Claude 缓存断点 TTL，支持 `5m` 和 `1h`。自动模式会覆盖 system、tools 和最近两条用户消息。
 
 协议兼容层同时支持标准 SSE、无空格 `data:`、CRLF、完整 JSON 响应、reasoning、usage 和增量工具调用。只有在没有任何上游处理证据时，流式请求才允许安全降级为非流式请求。
+
+OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明实际支持的请求能力。未声明时维持旧版请求负载，不假定第三方 Relay 支持 OpenAI 的全部新字段。例如：
+
+```json
+{
+  "id": "gpt-modern",
+  "route": "openai",
+  "toolCalling": true,
+  "thinking": true,
+  "contextWindows": [32768, 128000],
+  "openai": {
+    "tokenLimitField": "max_completion_tokens",
+    "contextWindow": true,
+    "promptCacheKey": true,
+    "store": true,
+    "strictTools": true,
+    "parallelToolCalls": true,
+    "developerRole": true,
+    "clientRequestId": true,
+    "reasoningEfforts": ["minimal", "low", "medium", "high"],
+    "defaultReasoningEffort": "medium"
+  }
+}
+```
+
+`context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。Responses API 不会被自动启用，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 

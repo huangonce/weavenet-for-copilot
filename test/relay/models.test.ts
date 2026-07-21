@@ -75,6 +75,27 @@ describe('model routing', () => {
     });
   });
 
+  it('normalizes explicit OpenAI request capabilities conservatively', () => {
+    expect(toRoutedModel({
+      id: 'modern-model',
+      capabilities: {
+        openai: {
+          tokenLimitField: 'max_completion_tokens',
+          contextWindow: true,
+          reasoningEfforts: ['minimal', 'high', 'invalid'],
+          defaultReasoningEffort: 'minimal',
+        },
+      },
+    }, 'openai')).toMatchObject({
+      openai: {
+        tokenLimitField: 'max_completion_tokens',
+        contextWindow: true,
+        reasoningEfforts: ['minimal', 'high'],
+        defaultReasoningEffort: 'minimal',
+      },
+    });
+  });
+
   it('filters, sorts, and formats models for the picker', () => {
     const config = {
       modelNamePrefix: 'WeaveNet',

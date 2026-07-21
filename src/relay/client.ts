@@ -77,12 +77,14 @@ export class RelayClient {
     request: ChatRequest,
     callbacks: StreamCallbacks,
     token?: CancellationToken,
+    sendClientRequestId = false,
   ): Promise<void> {
     await streamOpenAIChatCompletion({
       baseUrl: this.options.baseUrl,
       headers: this.headers(),
       requestTimeoutMs: this.options.requestTimeoutMs,
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      sendClientRequestId,
     }, request, callbacks, token);
   }
 

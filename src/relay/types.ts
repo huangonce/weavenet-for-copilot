@@ -26,6 +26,8 @@ export interface RoutedModel extends RelayModel {
   imageInput?: boolean;
   thinking?: boolean;
   contextWindows?: number[];
+  /** Explicit OpenAI request-field support. Unknown capabilities stay omitted. */
+  openai?: OpenAIRequestCapabilities;
   /** Public catalog reference pricing. It is never used for relay billing. */
   referencePricing?: ReferencePricing;
   metadataSources?: ModelMetadataSources;
@@ -58,7 +60,7 @@ export interface ModelsResponse {
 }
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: 'system' | 'developer' | 'user' | 'assistant' | 'tool';
   content: string | ChatContentPart[] | null;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
@@ -81,6 +83,7 @@ export interface ToolDefinition {
     name: string;
     description?: string;
     parameters?: Record<string, unknown>;
+    strict?: true;
   };
 }
 
@@ -100,23 +103,47 @@ export interface ChatRequest {
   tools?: ToolDefinition[];
   tool_choice?: 'auto' | 'required';
   max_tokens?: number;
+  max_completion_tokens?: number;
   temperature?: number;
   top_p?: number;
   context_window?: number;
   reasoning_effort?: ReasoningEffort;
   prompt_cache_key?: string;
+  store?: false;
+  parallel_tool_calls?: boolean;
   stream_options?: {
     include_usage: true;
   };
 }
 
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface OpenAIRequestCapabilities {
+  /** Defaults to max_tokens for compatibility when sendMaxTokens is enabled. */
+  tokenLimitField?: 'max_tokens' | 'max_completion_tokens' | 'omit';
+  /** Relay-private request extension, never inferred from public context limits. */
+  contextWindow?: boolean;
+  promptCacheKey?: boolean;
+  store?: boolean;
+  strictTools?: boolean;
+  parallelToolCalls?: boolean;
+  developerRole?: boolean;
+  clientRequestId?: boolean;
+  reasoningEfforts?: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+}
 
 export interface OpenAIUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  total_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+    accepted_prediction_tokens?: number;
+    rejected_prediction_tokens?: number;
   };
 }
 
@@ -131,6 +158,7 @@ export interface StreamChunk {
   choices?: Array<{
     delta?: {
       content?: string | null;
+      refusal?: string | null;
       reasoning_content?: string | null;
       reasoning?: string | null;
       tool_calls?: Array<{
@@ -151,6 +179,7 @@ export interface OpenAIFullResponse extends StreamChunk {
   choices?: Array<{
     message?: {
       content?: string | Array<{ text?: string }> | null;
+      refusal?: string | null;
       reasoning_content?: string | null;
       reasoning?: string | null;
       tool_calls?: ToolCall[];
@@ -278,11 +307,26 @@ export interface StreamCallbacks {
   onContent(text: string): void;
   onReasoning(text: string): void;
   onToolCall(toolCall: ToolCall): void;
+  onRefusal?(text: string): void;
+  onOpenAIFinishReason?(reason: string): void;
   onOpenAIUsage?(usage: OpenAIUsage): void;
   onClaudeUsage?(usage: ClaudeUsage, responseId?: string): void;
   /** HTTP response metadata only; authentication headers and bodies are never exposed. */
-  onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string): void;
+  onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
   onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
   /** Called only when the protocol's normal terminal event is received. */
   onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+}
+
+export interface ResponseDiagnosticsMetadata {
+  readonly requestId?: string;
+  readonly clientRequestId?: string;
+  readonly processingMs?: number;
+  readonly rateLimitLimitRequests?: string;
+  readonly rateLimitRemainingRequests?: string;
+  readonly rateLimitResetRequests?: string;
+  readonly rateLimitLimitTokens?: string;
+  readonly rateLimitRemainingTokens?: string;
+  readonly rateLimitResetTokens?: string;
+  readonly retryAfter?: string;
 }

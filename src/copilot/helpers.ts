@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { isReasoningEffort } from '../relay/openaiCapabilities';
 import type { ClaudeThinking, ReasoningEffort, RoutedModel } from '../relay/types';
 
 export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
@@ -9,6 +10,10 @@ export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
 export function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
   if (!model?.thinking) return undefined;
   const value = options.modelOptions?.reasoningEffort ?? options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort;
+  if (model.protocol === 'openai' && model.openai?.reasoningEfforts?.length) {
+    if (isReasoningEffort(value) && model.openai.reasoningEfforts.includes(value)) return value;
+    return model.openai.defaultReasoningEffort;
+  }
   return isReasoningEffort(value) ? value : 'high';
 }
 
@@ -20,13 +25,9 @@ export function getConfiguredContextWindow(model: RoutedModel | undefined, optio
   return Number.isFinite(window) && model.contextWindows.includes(window) ? window : undefined;
 }
 
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max';
-}
-
 export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens: number): { thinking: ClaudeThinking } | undefined {
-  if (!effort) return undefined;
-  const requested = { low: 1024, medium: 4096, high: 8192, xhigh: 12000, max: 16000 }[effort];
+  if (!effort || effort === 'none') return undefined;
+  const requested = { minimal: 1024, low: 1024, medium: 4096, high: 8192, xhigh: 12000, max: 16000 }[effort];
   const budget = Math.min(requested, Math.max(0, maxTokens - 1024));
   return budget >= 1024 ? { thinking: { type: 'enabled', budget_tokens: budget } } : undefined;
 }

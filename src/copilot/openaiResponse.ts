@@ -32,7 +32,9 @@ export interface OpenAIResponseContext {
 
 export async function provideOpenAIResponse(context: OpenAIResponseContext): Promise<void> {
   const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
-  const tools = supportsToolCallingForModel(routedModel, config) ? convertTools(options.tools) : undefined;
+  const tools = supportsToolCallingForModel(routedModel, config)
+    ? convertTools(options.tools, routedModel.openai?.strictTools === true)
+    : undefined;
   const client = new RelayClient({
     baseUrl: config.baseUrl,
     apiKey,
@@ -40,12 +42,21 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
-  const promptCacheKey = config.openaiPromptCaching && isOpenAIPromptCacheModel(routedModel.upstreamId)
+  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
     ? getOpenAIPromptCacheKey(config)
     : undefined;
-  const convertedMessages = convertMessages(messages, supportsImageInputForRoutedModel(routedModel, config));
+  const convertedMessages = convertMessages(
+    messages,
+    supportsImageInputForRoutedModel(routedModel, config),
+    routedModel.openai?.developerRole === true,
+  );
   const hasImageInput = convertedMessages.some((message) =>
     Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'));
+  const contextWindow = getConfiguredContextWindow(routedModel, options);
+  const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
+  const tokenLimit = !hasImageInput && config.sendMaxTokens
+    ? createTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
+    : {};
   // Match VS Code's built-in Custom Endpoint payload for multimodal Chat
   // Completions. Optional relay hints can change upstream routing and are
   // deliberately omitted when an image is present.
@@ -54,15 +65,18 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     messages: convertedMessages,
     stream: true,
     temperature: config.temperature,
-    top_p: config.topP,
+    // OpenAI recommends changing temperature or top_p, but not both.
+    top_p: config.temperature === undefined ? config.topP : undefined,
     ...(tools?.length ? {
       tools,
       tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
     } : {}),
-    ...(!hasImageInput && config.sendMaxTokens ? { max_tokens: model.maxOutputTokens ?? config.maxOutputTokens } : {}),
-    ...(!hasImageInput && getConfiguredContextWindow(routedModel, options) ? { context_window: getConfiguredContextWindow(routedModel, options) } : {}),
-    ...(!hasImageInput && getConfiguredReasoningEffort(routedModel, options) ? { reasoning_effort: getConfiguredReasoningEffort(routedModel, options) } : {}),
+    ...tokenLimit,
+    ...(!hasImageInput && routedModel.openai?.contextWindow === true && contextWindow ? { context_window: contextWindow } : {}),
+    ...(!hasImageInput && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(!hasImageInput && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(!hasImageInput && routedModel.openai?.store === true ? { store: false as const } : {}),
+    ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
     stream_options: { include_usage: true },
   };
   logOpenAIRequest(debug, config, request);
@@ -81,6 +95,11 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage),
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
+      onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
+      onRefusal: (text) => {
+        diagnostics.onRefusal();
+        progress.report(new vscode.LanguageModelTextPart(text));
+      },
       onToolCall: (toolCall) => {
         const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
@@ -90,7 +109,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
           argumentsValue,
         ));
       },
-    }, token);
+    }, token, routedModel.openai?.clientRequestId === true);
     diagnostics.complete();
   } catch (error) {
     if (token.isCancellationRequested) {
@@ -127,7 +146,10 @@ function logOpenAIUsage(debug: DebugLogger, config: ExtensionConfig, usage: Open
     config,
     `OpenAI usage: prompt=${usage.prompt_tokens ?? 'n/a'}, `
       + `cached=${usage.prompt_tokens_details?.cached_tokens ?? 'n/a'}, `
-      + `completion=${usage.completion_tokens ?? 'n/a'}`,
+      + `completion=${usage.completion_tokens ?? 'n/a'}, total=${usage.total_tokens ?? 'n/a'}, `
+      + `reasoning=${usage.completion_tokens_details?.reasoning_tokens ?? 'n/a'}, `
+      + `predictionAccepted=${usage.completion_tokens_details?.accepted_prediction_tokens ?? 'n/a'}, `
+      + `predictionRejected=${usage.completion_tokens_details?.rejected_prediction_tokens ?? 'n/a'}`,
   );
 }
 
@@ -136,8 +158,18 @@ function countOpenAIImages(request: ChatRequest): number {
     count + (Array.isArray(message.content) ? message.content.filter((part) => part.type === 'image_url').length : 0), 0);
 }
 
-function isOpenAIPromptCacheModel(modelId: string): boolean {
-  return modelId.toLowerCase().startsWith('gpt-');
+function supportsPromptCacheKey(model: RoutedModel): boolean {
+  if (model.openai?.promptCacheKey !== undefined) return model.openai.promptCacheKey;
+  // Preserve 0.4.0 behavior for existing GPT Relay configurations.
+  return model.upstreamId.toLowerCase().startsWith('gpt-');
+}
+
+function createTokenLimit(model: RoutedModel, value: number): Pick<ChatRequest, 'max_tokens' | 'max_completion_tokens'> {
+  switch (model.openai?.tokenLimitField ?? 'max_tokens') {
+    case 'max_completion_tokens': return { max_completion_tokens: value };
+    case 'omit': return {};
+    default: return { max_tokens: value };
+  }
 }
 
 function hashString(value: string): string {

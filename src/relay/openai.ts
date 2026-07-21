@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import type { CancellationToken } from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
-import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readRelayErrorResponse, readResponseText, readWithIdleTimeout } from './http';
+import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readRelayErrorResponse, readResponseText, readWithIdleTimeout, responseDiagnosticsMetadata } from './http';
 import type { ChatRequest, OpenAIFullResponse, StreamCallbacks, StreamChunk, ToolCall } from './types';
 import { relayEndpointUrl } from './url';
 
@@ -9,12 +10,14 @@ export interface OpenAIRequestOptions {
   readonly headers: Record<string, string>;
   readonly requestTimeoutMs: number;
   readonly streamIdleTimeoutMs: number;
+  readonly sendClientRequestId?: boolean;
 }
 
 interface OpenAIStreamState {
   responseParts: number;
   started: boolean;
   sawFinishReason: boolean;
+  finishReason?: string;
 }
 
 const MAX_SSE_EVENT_BYTES = 1024 * 1024;
@@ -27,9 +30,15 @@ export async function streamOpenAIChatCompletion(
 ): Promise<void> {
   let currentRequest = request;
   let fallbackUsed = false;
+  const clientRequestId = randomUUID();
   while (true) {
-    const response = await fetchOpenAI(options, currentRequest, token);
-    callbacks.onResponse?.('OpenAI', response.status, response.headers.get('content-type') ?? 'unknown');
+    const response = await fetchOpenAI(options, currentRequest, clientRequestId, token);
+    callbacks.onResponse?.(
+      'OpenAI',
+      response.status,
+      response.headers.get('content-type') ?? 'unknown',
+      { ...responseDiagnosticsMetadata(response), clientRequestId },
+    );
     if (!response.ok) {
       const failure = await readRelayErrorResponse(response, options.streamIdleTimeoutMs, token);
       if (!fallbackUsed && currentRequest.stream && isStreamingUnsupported(response.status, response.statusText, failure.body)) {
@@ -67,13 +76,19 @@ export async function streamOpenAIChatCompletion(
 async function fetchOpenAI(
   options: OpenAIRequestOptions,
   request: ChatRequest,
+  clientRequestId: string,
   token?: CancellationToken,
 ): Promise<Response> {
   // Never retry network-level POST failures. The upstream may already have
   // accepted the request, which could duplicate billing or tool execution.
   return fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'chat/completions'), {
     method: 'POST',
-    headers: { ...options.headers, 'Content-Type': 'application/json' },
+    headers: {
+      ...options.headers,
+      'Content-Type': 'application/json',
+      Accept: request.stream ? 'text/event-stream' : 'application/json',
+      ...(options.sendClientRequestId ? { 'X-Client-Request-Id': clientRequestId } : {}),
+    },
     body: JSON.stringify(request),
   }, options.requestTimeoutMs, token);
 }
@@ -167,9 +182,15 @@ export function processOpenAISseLine(
     callbacks.onContent(delta.content);
     state.responseParts++;
   }
+  if (delta?.refusal) {
+    callbacks.onRefusal?.(delta.refusal);
+    state.responseParts++;
+  }
   if (delta?.tool_calls) mergeToolCallDeltas(delta.tool_calls, pendingToolCalls);
   if (choice?.finish_reason) {
     state.sawFinishReason = true;
+    state.finishReason = choice.finish_reason;
+    callbacks.onOpenAIFinishReason?.(choice.finish_reason);
     state.responseParts += flushToolCalls(pendingToolCalls, callbacks);
   }
   return false;
@@ -191,16 +212,19 @@ export async function processOpenAIFullResponse(
   }
   if (payload.error) throw createRelayStreamError('OpenAI', payload.error);
   if (payload.usage) callbacks.onOpenAIUsage?.(payload.usage);
-  const message = payload.choices?.[0]?.message;
+  const choice = payload.choices?.[0];
+  const message = choice?.message;
   let parts = 0;
   const text = extractText(message?.content);
   const reasoning = message?.reasoning_content ?? message?.reasoning;
   if (reasoning) { callbacks.onReasoning(reasoning); parts++; }
   if (text) { callbacks.onContent(text); parts++; }
+  if (message?.refusal) { callbacks.onRefusal?.(message.refusal); parts++; }
   for (const toolCall of message?.tool_calls ?? []) {
     callbacks.onToolCall(toolCall);
     parts++;
   }
+  if (choice?.finish_reason) callbacks.onOpenAIFinishReason?.(choice.finish_reason);
   if (parts === 0) throw createIncompleteStreamError('OpenAI', 'empty-response');
 }
 

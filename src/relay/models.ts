@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ConfiguredModel, ExtensionConfig } from '../config/config';
 import { enrichModelsWithOpenRouter } from '../metadata/openrouterFallback';
+import { normalizeOpenAIRequestCapabilities } from './openaiCapabilities';
 import type { ModelMetadataSources, ModelProtocol, ReasoningEffort, RelayModel, RoutedModel } from './types';
 
 export type PickerModelInformation = vscode.LanguageModelChatInformation & {
@@ -53,24 +54,21 @@ export function toChatInformation(
   };
 }
 
-const REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const LEGACY_REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function toConfigurationSchema(model: RoutedModel): { configurationSchema?: object } {
   const properties: Record<string, object> = {};
   if (model.thinking) {
+    const efforts = model.protocol === 'openai' && model.openai?.reasoningEfforts?.length
+      ? model.openai.reasoningEfforts
+      : LEGACY_REASONING_EFFORTS;
     properties.reasoningEffort = {
       type: 'string',
       title: '思考工作量',
-      enum: REASONING_EFFORTS,
-      enumItemLabels: ['Low', 'Medium', 'High', 'Extra High', 'Max'],
-      enumDescriptions: [
-        'Faster responses with less reasoning',
-        'Balanced reasoning and speed',
-        'Greater reasoning depth but slower',
-        'Extra reasoning depth for complex tasks',
-        'Maximum reasoning budget',
-      ],
-      default: 'high',
+      enum: efforts,
+      enumItemLabels: efforts.map(reasoningEffortLabel),
+      enumDescriptions: efforts.map(reasoningEffortDescription),
+      default: model.openai?.defaultReasoningEffort ?? (efforts.includes('high') ? 'high' : efforts[0]),
       group: 'navigation',
     };
   }
@@ -86,6 +84,22 @@ function toConfigurationSchema(model: RoutedModel): { configurationSchema?: obje
     };
   }
   return Object.keys(properties).length > 0 ? { configurationSchema: { properties } } : {};
+}
+
+function reasoningEffortLabel(value: ReasoningEffort): string {
+  return { none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' }[value];
+}
+
+function reasoningEffortDescription(value: ReasoningEffort): string {
+  return {
+    none: 'Disable model reasoning when supported',
+    minimal: 'Minimal reasoning for the lowest latency',
+    low: 'Faster responses with less reasoning',
+    medium: 'Balanced reasoning and speed',
+    high: 'Greater reasoning depth but slower',
+    xhigh: 'Extra reasoning depth for complex tasks',
+    max: 'Maximum reasoning budget',
+  }[value];
 }
 
 function formatContextWindow(value: number): string {
@@ -163,6 +177,9 @@ export function toRoutedModel(
 ): RoutedModel {
   const record = model as unknown as Record<string, unknown>;
   const capabilities = objectFrom(model.capabilities);
+  const openai = normalizeOpenAIRequestCapabilities(
+    capabilities.openai ?? record.openai ?? record.openai_request_capabilities,
+  );
   const maxInputTokens = numberFrom(model.context_length, model.context_window, record.max_input_tokens);
   const maxOutputTokens = numberFrom(model.max_completion_tokens, model.max_output_tokens, record.max_tokens);
   const imageInput = booleanFrom(
@@ -200,6 +217,7 @@ export function toRoutedModel(
     imageInput,
     toolCalling,
     thinking,
+    openai,
     metadataSources,
   };
 }
@@ -218,6 +236,8 @@ export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
     toolCalling: model.toolCalling,
     imageInput: model.imageInput,
     thinking: model.thinking,
+    contextWindows: model.contextWindows,
+    openai: model.openai,
     metadataSources: {},
   };
 }

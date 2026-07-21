@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION } from '../constants';
+import { normalizeOpenAIRequestCapabilities } from '../relay/openaiCapabilities';
+import type { OpenAIRequestCapabilities } from '../relay/types';
 import { normalizeRelayBaseUrl } from '../relay/url';
 
 const RESERVED_REQUEST_HEADERS = new Set([
@@ -31,6 +33,8 @@ export interface ConfiguredModel {
   toolCalling?: boolean;
   imageInput?: boolean;
   thinking?: boolean;
+  contextWindows?: number[];
+  openai?: OpenAIRequestCapabilities;
 }
 
 export interface ConnectionProfile {
@@ -168,6 +172,8 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
       toolCalling: typeof record.toolCalling === 'boolean' ? record.toolCalling : undefined,
       imageInput: typeof record.imageInput === 'boolean' ? record.imageInput : undefined,
       thinking: typeof record.thinking === 'boolean' ? record.thinking : undefined,
+      contextWindows: positiveNumberArray(record.contextWindows),
+      openai: normalizeOpenAIRequestCapabilities(record.openai),
     });
   }
   return models;
@@ -228,4 +234,11 @@ function stringArray(value: unknown): string[] | undefined {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function positiveNumberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = [...new Set(value.map(positiveNumber).filter((entry): entry is number => entry !== undefined))]
+    .sort((left, right) => left - right);
+  return result.length ? result : undefined;
 }

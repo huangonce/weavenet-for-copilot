@@ -1,4 +1,5 @@
 import type { CancellationToken } from 'vscode';
+import type { ResponseDiagnosticsMetadata } from './types';
 import { createRelayRequestError, RelayRequestError } from './errors';
 
 export const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
@@ -48,6 +49,24 @@ export function safeResponseMetadata(response: Response): SafeResponseMetadata {
     status: response.status,
     responseType: safeHeaderValue(response.headers.get('content-type'), MAX_RESPONSE_TYPE_LENGTH) ?? 'unknown',
     requestId: safeHeaderValue(response.headers.get('x-request-id'), MAX_REQUEST_ID_LENGTH),
+  };
+}
+
+export function responseDiagnosticsMetadata(response: Response): ResponseDiagnosticsMetadata {
+  const safe = (name: string, maximumLength = 100): string | undefined =>
+    safeHeaderValue(response.headers.get(name), maximumLength);
+  const processing = Number(response.headers.get('openai-processing-ms'));
+  return {
+    requestId: safe('x-request-id'),
+    clientRequestId: safe('x-client-request-id'),
+    processingMs: Number.isFinite(processing) && processing >= 0 ? processing : undefined,
+    rateLimitLimitRequests: safe('x-ratelimit-limit-requests'),
+    rateLimitRemainingRequests: safe('x-ratelimit-remaining-requests'),
+    rateLimitResetRequests: safe('x-ratelimit-reset-requests'),
+    rateLimitLimitTokens: safe('x-ratelimit-limit-tokens'),
+    rateLimitRemainingTokens: safe('x-ratelimit-remaining-tokens'),
+    rateLimitResetTokens: safe('x-ratelimit-reset-tokens'),
+    retryAfter: safe('retry-after'),
   };
 }
 
