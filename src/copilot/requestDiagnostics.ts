@@ -1,6 +1,7 @@
 import type { ExtensionConfig } from '../config/config';
 import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
+import { InvalidToolArgumentsError } from './helpers';
 
 export interface RequestDiagnostics {
   onContent(): void;
@@ -72,6 +73,9 @@ export function createRequestDiagnostics(
 }
 
 export function formatLogError(error: unknown): string {
+  if (error instanceof InvalidToolArgumentsError) {
+    return `InvalidToolArgumentsError(reason=${error.reason}, length=${error.argumentLength})`;
+  }
   if (error instanceof RelayRequestError) {
     const details = [
       `status=${error.status}`,

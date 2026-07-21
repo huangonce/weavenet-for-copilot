@@ -82,11 +82,12 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onToolCall: (toolCall) => {
+        const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
         progress.report(new vscode.LanguageModelToolCallPart(
           toolCall.id,
           toolCall.function.name,
-          parseToolArguments(toolCall.function.arguments),
+          argumentsValue,
         ));
       },
     }, token);

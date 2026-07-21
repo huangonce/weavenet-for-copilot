@@ -225,11 +225,33 @@ function mergeToolCallDeltas(
     }
     const argumentsDelta: unknown = delta.function?.arguments;
     if (typeof argumentsDelta === 'string') {
-      current.function.arguments += argumentsDelta;
+      current.function.arguments = mergeToolArgumentDelta(current.function.arguments, argumentsDelta);
     } else if (argumentsDelta !== undefined && argumentsDelta !== null) {
       current.function.arguments = JSON.stringify(argumentsDelta);
     }
     pendingToolCalls.set(delta.index, current);
+  }
+}
+
+function mergeToolArgumentDelta(current: string, incoming: string): string {
+  if (!current) return incoming;
+  const currentLooksLikeObject = current.trimStart().startsWith('{');
+  const incomingLooksLikeObject = incoming.trimStart().startsWith('{');
+  if (currentLooksLikeObject && incomingLooksLikeObject && incoming.length > current.length && incoming.startsWith(current)) {
+    return incoming;
+  }
+  if (incomingLooksLikeObject && (incoming === current || current.startsWith(incoming)) && isCompleteJsonObject(current)) {
+    return current;
+  }
+  return current + incoming;
+}
+
+function isCompleteJsonObject(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed);
+  } catch {
+    return false;
   }
 }
 

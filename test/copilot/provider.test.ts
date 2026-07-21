@@ -17,6 +17,7 @@ import { RELAY_API_KEY_SECRET } from '../../src/constants';
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
+import { formatLogError } from '../../src/copilot/requestDiagnostics';
 import { InMemoryMemento } from '../support/memento';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
@@ -425,6 +426,10 @@ describe('Provider request helpers', () => {
     expect(parseToolArguments('{"path":"README.md"}')).toEqual({ path: 'README.md' });
     expect(() => parseToolArguments('[]')).toThrow('invalid tool call arguments');
     expect(() => parseToolArguments('{')).toThrow('invalid tool call arguments');
+    try { parseToolArguments('{'); }
+    catch (error) { expect(formatLogError(error)).toBe('InvalidToolArgumentsError(reason=malformed-json, length=1)'); }
+    try { parseToolArguments('[]'); }
+    catch (error) { expect(formatLogError(error)).toBe('InvalidToolArgumentsError(reason=non-object, length=2)'); }
     expect(estimateTextTokens('你好abcd')).toBe(3);
     expect(estimateTextTokens('')).toBe(1);
   });

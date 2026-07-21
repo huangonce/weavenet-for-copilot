@@ -31,17 +31,30 @@ export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens:
   return budget >= 1024 ? { thinking: { type: 'enabled', budget_tokens: budget } } : undefined;
 }
 
+export class InvalidToolArgumentsError extends Error {
+  readonly reason: 'malformed-json' | 'non-object';
+  readonly argumentLength: number;
+
+  constructor(reason: InvalidToolArgumentsError['reason'], argumentLength: number) {
+    super('Relay returned invalid tool call arguments.');
+    this.name = 'InvalidToolArgumentsError';
+    this.reason = reason;
+    this.argumentLength = argumentLength;
+  }
+}
+
 export function parseToolArguments(value: string): object {
   if (!value.trim()) return {};
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Tool call arguments must be a JSON object.');
-    }
-    return parsed;
+    parsed = JSON.parse(value);
   } catch {
-    throw new Error('Relay returned invalid tool call arguments.');
+    throw new InvalidToolArgumentsError('malformed-json', value.length);
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidToolArgumentsError('non-object', value.length);
+  }
+  return parsed;
 }
 
 export function estimateTextTokens(value: string): number {

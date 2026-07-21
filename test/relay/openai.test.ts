@@ -77,6 +77,60 @@ describe('OpenAI response parsing', () => {
     ]);
   });
 
+  it('uses repeated or progressively complete tool argument snapshots without duplicating JSON', () => {
+    const cb = callbacks();
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    const tools = new Map<number, ToolCall>();
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}',
+      tools,
+      cb,
+      state,
+    );
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}',
+      tools,
+      cb,
+      state,
+    );
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}]}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'read', arguments: '{"path":"README.md"}' },
+    }));
+  });
+
+  it('does not discard identical fragments before tool arguments form complete JSON', () => {
+    const cb = callbacks();
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    const tools = new Map<number, ToolCall>();
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"echo","arguments":"{\\"value\\":\\"a"}}]}}]}',
+      tools,
+      cb,
+      state,
+    );
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a"}}]}}]}',
+      tools,
+      cb,
+      state,
+    );
+    processOpenAISseLine(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a\\"}"}}]},"finish_reason":"tool_calls"}]}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'echo', arguments: '{"value":"aaa"}' },
+    }));
+  });
+
   it('combines truly fragmented tool names without duplicating full snapshots', () => {
     const cb = callbacks();
     const state = { responseParts: 0, started: false, sawFinishReason: false };
