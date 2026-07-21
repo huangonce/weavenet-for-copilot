@@ -34,6 +34,7 @@ export interface ConfiguredModel {
 }
 
 export interface ConnectionProfile {
+  id: string;
   name: string;
   baseUrl: string;
   requestHeaders?: Record<string, string>;
@@ -43,6 +44,7 @@ export interface ConnectionProfile {
 }
 
 export interface ExtensionConfig {
+  profileId?: string;
   profileName?: string;
   baseUrl: string;
   anthropicVersion: string;
@@ -71,22 +73,16 @@ export interface ExtensionConfig {
 }
 
 export interface ProfileConfiguration {
-  activeProfile: string;
   profiles: ConnectionProfile[];
 }
 
-export function getConfig(): ExtensionConfig {
+export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  const { activeProfile, profiles } = getProfileConfiguration();
-  const connection = selectActiveProfile(profiles, activeProfile);
-  const legacyIncludeModels = stringArray(config.get<unknown>('includeModels')) ?? [];
-  const legacyExcludeModels = stringArray(config.get<unknown>('excludeModels')) ?? [];
-  const legacyRequestHeaders = objectHeaders(config.get<unknown>('requestHeaders')) ?? {};
-  const legacyModels = normalizeModels(arrayValue(config.get<unknown>('models')));
 
   return {
-    profileName: connection?.name,
-    baseUrl: connection?.baseUrl ?? '',
+    profileId: profile?.id,
+    profileName: profile?.name,
+    baseUrl: profile?.baseUrl ?? '',
     anthropicVersion: (config.get<string>('anthropicVersion') ?? '2023-06-01').trim() || '2023-06-01',
     openaiPromptCaching: config.get<boolean>('openaiPromptCaching') ?? true,
     openaiPromptCacheKey: (config.get<string>('openaiPromptCacheKey') ?? '').trim(),
@@ -98,8 +94,8 @@ export function getConfig(): ExtensionConfig {
     streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
     debug: config.get<boolean>('debug') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
-    includeModels: compileRegexList(connection?.includeModels ?? legacyIncludeModels),
-    excludeModels: compileRegexList(connection?.excludeModels ?? legacyExcludeModels),
+    includeModels: compileRegexList(profile?.includeModels ?? []),
+    excludeModels: compileRegexList(profile?.excludeModels ?? []),
     maxInputTokens: Math.max(1, config.get<number>('maxInputTokens') ?? 128000),
     maxOutputTokens: Math.max(1, config.get<number>('maxOutputTokens') ?? 16384),
     sendMaxTokens: config.get<boolean>('sendMaxTokens') ?? false,
@@ -108,19 +104,15 @@ export function getConfig(): ExtensionConfig {
     imageInputModels: compileRegexList(config.get<string[]>('imageInputModels') ?? []),
     disabledImageInputModels: compileRegexList(config.get<string[]>('disabledImageInputModels') ?? []),
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
-    requestHeaders: connection?.requestHeaders ?? legacyRequestHeaders,
-    models: connection?.models ?? legacyModels,
+    requestHeaders: profile?.requestHeaders ?? {},
+    models: profile?.models ?? [],
   };
 }
 
 export function getProfileConfiguration(): ProfileConfiguration {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
   const profiles = normalizeConnectionProfiles(config.inspect<unknown[]>('profiles')?.globalValue ?? []);
-  const activeProfile = selectActiveProfile(profiles, config.inspect<string>('activeProfile')?.globalValue ?? '');
-  return {
-    activeProfile: activeProfile?.name ?? profiles[0]?.name ?? '',
-    profiles,
-  };
+  return { profiles };
 }
 
 function compileRegexList(values: string[]): RegExp[] {
@@ -183,18 +175,22 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
 
 export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfile[] {
   const profiles: ConnectionProfile[] = [];
+  const seenIds = new Set<string>();
   const seenNames = new Set<string>();
   for (const value of values) {
     if (!value || typeof value !== 'object') continue;
     const record = value as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id.trim().toLowerCase() : '';
     const name = typeof record.name === 'string' ? record.name.trim() : '';
     const baseUrl = typeof record.baseUrl === 'string' ? normalizeRelayBaseUrl(record.baseUrl) ?? '' : '';
-    if (!isValidProfileName(name) || !baseUrl || seenNames.has(name)) continue;
+    if (!isValidProfileId(id) || !isValidProfileName(name) || !baseUrl || seenIds.has(id) || seenNames.has(name)) continue;
+    seenIds.add(id);
     seenNames.add(name);
     const includeModels = stringArray(record.includeModels);
     const excludeModels = stringArray(record.excludeModels);
     const models = Array.isArray(record.models) ? normalizeModels(record.models) : undefined;
     profiles.push({
+      id,
       name,
       baseUrl,
       requestHeaders: objectHeaders(record.requestHeaders),
@@ -211,17 +207,13 @@ export function isValidProfileName(value: string): boolean {
   return Boolean(name) && name.length <= MAX_PROFILE_NAME_LENGTH && !UNSAFE_PROFILE_NAME.test(name);
 }
 
+export function isValidProfileId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.trim().toLowerCase());
+}
+
 /** Headers owned by the extension and never configurable per connection. */
 export function isReservedRelayHeader(name: string): boolean {
   return RESERVED_REQUEST_HEADERS.has(name.trim().toLowerCase());
-}
-
-export function selectActiveProfile(
-  profiles: readonly ConnectionProfile[],
-  activeProfileName: string,
-): ConnectionProfile | undefined {
-  const name = activeProfileName.trim();
-  return name ? profiles.find((profile) => profile.name === name) : undefined;
 }
 
 function objectHeaders(value: unknown): Record<string, string> | undefined {
@@ -232,10 +224,6 @@ function objectHeaders(value: unknown): Record<string, string> | undefined {
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
-}
-
-function arrayValue(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
 }
 
 function positiveNumber(value: unknown): number | undefined {

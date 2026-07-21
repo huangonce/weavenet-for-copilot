@@ -6,30 +6,25 @@ import {
   OPENAI_API_KEY_SECRET,
   RELAY_API_KEY_SECRET,
 } from '../constants';
+import type { ConnectionProfile } from '../config/config';
+
+type AuthProfile = Pick<ConnectionProfile, 'id' | 'name'>;
 
 export class AuthManager {
   constructor(private readonly secrets: vscode.SecretStorage) {}
 
-  async getApiKey(profileName?: string): Promise<string | undefined> {
-    const value = await this.secrets.get(secretKey(profileName));
+  async getApiKey(profile: AuthProfile): Promise<string | undefined> {
+    const value = await this.secrets.get(secretKey(profile))
+      ?? await this.secrets.get(legacyProfileSecretKey(profile.name));
     return value?.trim() || undefined;
   }
 
-  async hasApiKey(profileName?: string): Promise<boolean> {
-    return Boolean(await this.getApiKey(profileName));
+  async hasApiKey(profile: AuthProfile): Promise<boolean> {
+    return Boolean(await this.getApiKey(profile));
   }
 
-  async promptForApiKey(profileName?: string): Promise<boolean> {
-    const apiKey = await this.promptForApiKeyValue(profileName);
-    if (!apiKey) return false;
-    await this.storeApiKey(profileName, apiKey);
-    const relayLabel = profileName ? `“${profileName}”` : 'Default Relay';
-    vscode.window.showInformationMessage(`WeaveNet API key for ${relayLabel} saved.`);
-    return true;
-  }
-
-  async promptForApiKeyValue(profileName?: string): Promise<string | undefined> {
-    const relayLabel = profileName ? `“${profileName}”` : 'Default Relay';
+  async promptForApiKeyValue(profileName: string): Promise<string | undefined> {
+    const relayLabel = `“${profileName}”`;
     const apiKey = await vscode.window.showInputBox({
       prompt: `Enter the API key for ${relayLabel}`,
       placeHolder: 'sk-...',
@@ -41,52 +36,43 @@ export class AuthManager {
     return apiKey?.trim() || undefined;
   }
 
-  async storeApiKey(profileName: string | undefined, apiKey: string): Promise<void> {
-    await this.secrets.store(secretKey(profileName), apiKey.trim());
+  async storeApiKey(profile: AuthProfile, apiKey: string): Promise<void> {
+    await this.secrets.store(secretKey(profile), apiKey.trim());
   }
 
-  async clearApiKey(profileName?: string): Promise<void> {
-    if (profileName) await this.clearProfileApiKey(profileName);
-    else await this.clearAllRelayApiKeys([]);
-    const relayLabel = profileName ? `“${profileName}”` : 'Default Relay';
-    vscode.window.showInformationMessage(`WeaveNet API key for ${relayLabel} cleared.`);
+  async clearProfileApiKey(profile: AuthProfile): Promise<void> {
+    await this.deleteSecretKeys([secretKey(profile), legacyProfileSecretKey(profile.name)]);
   }
 
-  async moveApiKey(fromProfileName: string | undefined, toProfileName: string): Promise<boolean> {
-    const fromKey = secretKey(fromProfileName);
-    const toKey = secretKey(toProfileName);
-    if (fromKey === toKey) return Boolean(await this.getApiKey(fromProfileName));
-
-    const [apiKey, destinationValue] = await Promise.all([this.secrets.get(fromKey), this.secrets.get(toKey)]);
-    if (destinationValue !== undefined) {
-      throw new Error('The destination connection already has an API key. Clear it before renaming this connection.');
-    }
-    if (!apiKey?.trim()) return false;
-
-    try {
-      await this.secrets.store(toKey, apiKey);
-      await this.secrets.delete(fromKey);
-      return true;
-    } catch (error) {
-      await restoreSecret(this.secrets, fromKey, apiKey);
-      await restoreSecret(this.secrets, toKey, destinationValue);
-      throw error;
-    }
-  }
-
-  async clearProfileApiKey(profileName: string): Promise<void> {
-    await this.deleteSecretKeys([secretKey(profileName)]);
-  }
-
-  async clearAllRelayApiKeys(profileNames: readonly string[]): Promise<void> {
+  async clearAllRelayApiKeys(profiles: readonly AuthProfile[]): Promise<void> {
     await this.deleteSecretKeys([
-      ...profileNames.map((profileName) => secretKey(profileName)),
+      ...profiles.flatMap((profile) => [secretKey(profile), legacyProfileSecretKey(profile.name)]),
       RELAY_API_KEY_SECRET,
       OPENAI_API_KEY_SECRET,
       LEGACY_API_KEY_SECRET,
       CHATGPT_API_KEY_SECRET,
       CLAUDE_API_KEY_SECRET,
     ]);
+  }
+
+  async migrateProfileApiKeys(profiles: readonly AuthProfile[]): Promise<void> {
+    for (const profile of profiles) await this.migrateProfileApiKey(profile);
+  }
+
+  private async migrateProfileApiKey(profile: AuthProfile): Promise<void> {
+    const targetKey = secretKey(profile);
+    const sourceKey = legacyProfileSecretKey(profile.name);
+    const [target, source] = await Promise.all([this.secrets.get(targetKey), this.secrets.get(sourceKey)]);
+    if (target !== undefined || !source?.trim()) return;
+    try {
+      await this.secrets.store(targetKey, source);
+      if (await this.secrets.get(targetKey) !== source) throw new Error('Could not verify the migrated API key.');
+      await this.secrets.delete(sourceKey);
+    } catch {
+      await restoreSecret(this.secrets, targetKey, target);
+      // Keep the legacy source intact so getApiKey can continue to use it.
+      await restoreSecret(this.secrets, sourceKey, source);
+    }
   }
 
   private async deleteSecretKeys(keys: readonly string[]): Promise<void> {
@@ -106,8 +92,16 @@ export class AuthManager {
   }
 }
 
-function secretKey(profileName?: string): string {
-  return profileName ? `${RELAY_API_KEY_SECRET}.profile.${encodeURIComponent(profileName)}` : RELAY_API_KEY_SECRET;
+export function profileSecretKey(profileId: string): string {
+  return `${RELAY_API_KEY_SECRET}.profileId.${profileId}`;
+}
+
+function secretKey(profile: AuthProfile): string {
+  return profileSecretKey(profile.id);
+}
+
+function legacyProfileSecretKey(profileName: string): string {
+  return `${RELAY_API_KEY_SECRET}.profile.${encodeURIComponent(profileName)}`;
 }
 
 async function restoreSecret(secrets: vscode.SecretStorage, key: string, value: string | undefined): Promise<void> {

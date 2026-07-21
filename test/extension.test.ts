@@ -1,23 +1,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { addConnection, clearActiveRelayKey, clearAllConnections, configureActiveRelay, copyConnection, deleteConnection, editConnection, errorMessage, formatConnectionFailure, parseSingleProfile, queueConnectionMutation, renderStatus, saveProfiles, setDefaultConnection, testConnection, validateProfileName } from '../src/extension';
+import {
+  addConnection,
+  clearActiveRelayKey,
+  clearAllConnections,
+  configureActiveRelay,
+  copyConnection,
+  deleteConnection,
+  editConnection,
+  errorMessage,
+  formatConnectionFailure,
+  queueConnectionMutation,
+  renderStatus,
+  saveProfiles,
+  setDefaultConnection,
+  testConnection,
+  validateProfileName,
+} from '../src/extension';
+import type { ConnectionProfile } from '../src/config/config';
 
-function configurationFixture(initialProfiles = [{ name: 'Work', baseUrl: 'https://work.example.test/v1' }], initialActiveProfile = 'Work') {
+const WORK_ID = '11111111-1111-4111-8111-111111111111';
+const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
+const WORK_PROFILE: ConnectionProfile = { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1' };
+const PERSONAL_PROFILE: ConnectionProfile = { id: PERSONAL_ID, name: 'Personal', baseUrl: 'https://personal.example.test/v1' };
+
+function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFILE]) {
   let profiles = initialProfiles;
-  let activeProfile = initialActiveProfile;
   const update = vi.fn(async (key: string, value: unknown) => {
-    if (key === 'profiles') profiles = (value ?? []) as typeof profiles;
-    if (key === 'activeProfile') activeProfile = (value ?? '') as string;
+    if (key === 'profiles') profiles = (value ?? []) as ConnectionProfile[];
   });
   vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-    inspect: <T>(key: string) => key === 'profiles'
-      ? { globalValue: profiles as T }
-      : key === 'activeProfile'
-        ? { globalValue: activeProfile as T }
-        : undefined,
+    get: <T>() => undefined as T | undefined,
+    inspect: <T>(key: string) => key === 'profiles' ? { globalValue: profiles as T } : undefined,
     update,
   } as never);
-  return { get profiles() { return profiles; }, get activeProfile() { return activeProfile; }, update };
+  return { get profiles() { return profiles; }, update };
 }
 
 function providerFixture(overrides: Record<string, unknown> = {}) {
@@ -26,79 +43,99 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     storeRelayKey: vi.fn().mockResolvedValue(undefined),
     clearRelayKeyForProfile: vi.fn().mockResolvedValue(undefined),
     clearAllRelayKeys: vi.fn().mockResolvedValue(undefined),
-    hasRelayKey: vi.fn().mockResolvedValue(false),
-    moveRelayKey: vi.fn().mockResolvedValue(true),
     testConnection: vi.fn().mockResolvedValue({
-      host: 'relay.example.test', modelCount: 2, elapsedMs: 10, overall: 'success',
+      schemaVersion: 2,
+      profileId: WORK_ID,
+      fingerprint: 'a'.repeat(64),
+      connectionName: 'Work',
+      host: 'relay.example.test',
+      testedAt: 1,
+      completedAt: 11,
+      modelCount: 2,
+      elapsedMs: 10,
+      overall: 'success',
+      capabilities: {
+        openai: { nonStreaming: 'supported', streaming: 'supported', mode: 'streaming' },
+        claude: { nonStreaming: 'skipped', streaming: 'skipped', mode: 'unknown' },
+      },
       probes: [{ probe: 'models', verdict: 'supported', endpointPath: '/models', startedAt: 1, elapsedMs: 2, status: 200, responseType: 'application/json' }],
     }),
     clearConnectionDiagnostics: vi.fn().mockResolvedValue(undefined),
     clearAllConnectionDiagnostics: vi.fn().mockResolvedValue(undefined),
     logMetadata: vi.fn(),
     refreshModels: vi.fn().mockResolvedValue(undefined),
+    refreshConnection: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as never;
+}
+
+function pickProfile(profile: ConnectionProfile): void {
+  vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile } as never);
 }
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('connection mutation queue', () => {
-  it('runs queued configuration and secret mutations strictly in order', async () => {
+  it('runs queued mutations strictly in order and continues after failures', async () => {
     const order: string[] = [];
     let releaseFirst: (() => void) | undefined;
     const first = queueConnectionMutation(Promise.resolve(), async () => {
       order.push('first:start');
       await new Promise<void>((resolve) => { releaseFirst = resolve; });
       order.push('first:end');
+      throw new Error('first failed');
     });
     const second = queueConnectionMutation(first.next, async () => {
       order.push('second');
+      return 'completed';
     });
 
     await Promise.resolve();
     expect(order).toEqual(['first:start']);
     releaseFirst?.();
-    await Promise.all([first.result, second.result]);
+    await expect(first.result).rejects.toThrow('first failed');
+    await expect(second.result).resolves.toBe('completed');
     expect(order).toEqual(['first:start', 'first:end', 'second']);
   });
 
-  it('continues processing later mutations when an earlier mutation fails', async () => {
-    const first = queueConnectionMutation(Promise.resolve(), async () => {
-      throw new Error('first failed');
-    });
-    const second = queueConnectionMutation(first.next, async () => 'completed');
-
-    await expect(first.result).rejects.toThrow('first failed');
-    await expect(second.result).resolves.toBe('completed');
-  });
-
-  it('validates unique connection names and parses exactly one safe profile', () => {
-    const profiles = [{ name: 'Work', baseUrl: 'https://work.example.test/v1' }];
+  it('validates safe and unique connection names', () => {
+    const profiles = [WORK_PROFILE];
     expect(validateProfileName('   ', profiles)).toBe('Connection name is required.');
     expect(validateProfileName('Work', profiles)).toBe('A connection with this name already exists.');
     expect(validateProfileName('Personal', profiles)).toBeUndefined();
     expect(validateProfileName('bad\nname', profiles)).toContain('control characters');
     expect(validateProfileName('x'.repeat(101), profiles)).toContain('100 characters');
-    expect(parseSingleProfile('{"name":"Personal","baseUrl":"https://personal.example.test/v1"}', 'Work', profiles))
-      .toEqual({ name: 'Personal', baseUrl: 'https://personal.example.test/v1' });
-    expect(parseSingleProfile('{"name":"Work","baseUrl":"not a URL"}', 'Work', profiles)).toBeUndefined();
-    expect(parseSingleProfile('{"name":"Work","baseUrl":"https://other.example.test/v1"}', 'Other', profiles)).toBeUndefined();
-    expect(parseSingleProfile('{', 'Work', profiles)).toBeUndefined();
   });
 
-  it('renders every connection state with a useful label and tooltip', () => {
+  it('renders aggregate connection states with per-connection details', () => {
     const item = { text: '', tooltip: '' } as never;
-    renderStatus(item, { phase: 'unconfigured', modelCount: 0 });
+    renderStatus(item, {
+      phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
+    });
     expect(item.text).toContain('Add Relay Connection');
-    renderStatus(item, { connectionName: 'Work', host: 'relay.example.test', phase: 'keyMissing', modelCount: 0 });
-    expect(item.text).toContain('API key required');
-    renderStatus(item, { connectionName: 'Work', phase: 'refreshing', modelCount: 2 });
+
+    renderStatus(item, {
+      phase: 'refreshing', connectionCount: 2, modelCount: 1, warningCount: 1, refreshingCount: 1,
+      connections: [
+        { profileId: WORK_ID, connectionName: 'Work', host: 'work.example.test', phase: 'ready', modelCount: 1 },
+        { profileId: PERSONAL_ID, connectionName: 'Personal', host: 'personal.example.test', phase: 'refreshing', modelCount: 0 },
+      ],
+    });
+    expect(item.text).toContain('2 connections');
     expect(item.text).toContain('refreshing');
-    renderStatus(item, { connectionName: 'Work', host: 'relay.example.test', phase: 'ready', modelCount: 3 });
+    expect(item.tooltip).toContain('Work (work.example.test)');
+    expect(item.tooltip).toContain('Personal (personal.example.test)');
+
+    renderStatus(item, {
+      phase: 'degraded', connectionCount: 2, modelCount: 3, warningCount: 1, refreshingCount: 0,
+      connections: [
+        { profileId: WORK_ID, connectionName: 'Work', phase: 'ready', modelCount: 3 },
+        { profileId: PERSONAL_ID, connectionName: 'Personal', phase: 'error', modelCount: 0, message: 'offline' },
+      ],
+    });
     expect(item.text).toContain('3 models');
-    expect(item.tooltip).toContain('relay.example.test');
-    renderStatus(item, { connectionName: 'Work', phase: 'error', modelCount: 0, message: 'denied' });
-    expect(item.text).toContain('denied');
+    expect(item.text).toContain('1 warning');
+    expect(item.tooltip).toContain('offline');
   });
 
   it('formats structured failures without losing request diagnostics', () => {
@@ -108,7 +145,7 @@ describe('connection mutation queue', () => {
     expect(errorMessage('failed')).toBe('Unknown error.');
   });
 
-  it('creates and activates a connection before saving its profile-scoped key', async () => {
+  it('creates a UUID connection and stores its key against that profile', async () => {
     const config = configurationFixture([]);
     const provider = providerFixture();
     vi.spyOn(vscode.window, 'showInputBox')
@@ -117,13 +154,14 @@ describe('connection mutation queue', () => {
 
     await addConnection(provider);
 
-    expect(config.profiles).toEqual([{ name: 'Personal', baseUrl: 'https://personal.example.test/v1' }]);
-    expect(config.activeProfile).toBe('Personal');
-    expect(provider.storeRelayKey).toHaveBeenCalledWith('Personal', 'new-key');
+    expect(config.profiles).toHaveLength(1);
+    expect(config.profiles[0]).toMatchObject({ name: 'Personal', baseUrl: 'https://personal.example.test/v1' });
+    expect(config.profiles[0].id).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(provider.storeRelayKey).toHaveBeenCalledWith(config.profiles[0], 'new-key');
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('rolls configuration back when storing a newly created key fails', async () => {
+  it('rolls profile creation back and deletes its UUID key when secret storage fails', async () => {
     const config = configurationFixture([]);
     const provider = providerFixture({ storeRelayKey: vi.fn().mockRejectedValue(new Error('secret failure')) });
     vi.spyOn(vscode.window, 'showInputBox')
@@ -134,80 +172,77 @@ describe('connection mutation queue', () => {
     await addConnection(provider);
 
     expect(config.profiles).toEqual([]);
-    expect(config.activeProfile).toBe('');
-    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith('Personal');
+    const failedProfile = provider.storeRelayKey.mock.calls[0][0];
+    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith(failedProfile);
     expect(showError).toHaveBeenCalledWith(expect.stringContaining('secret failure'));
   });
 
-  it('deletes a connection key and selects the remaining connection as default', async () => {
-    const config = configurationFixture([
-      { name: 'Work', baseUrl: 'https://work.example.test/v1' },
-      { name: 'Personal', baseUrl: 'https://personal.example.test/v1' },
-    ]);
+  it('deletes a connection and always deletes its UUID-scoped key', async () => {
+    const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
-    vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async () => ({ profile: config.profiles[0] } as never));
-    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection' as never);
-
-    await deleteConnection(provider);
-
-    expect(config.profiles.map((profile) => profile.name)).toEqual(['Personal']);
-    expect(config.activeProfile).toBe('Personal');
-    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith('Work');
-    expect(provider.refreshModels).toHaveBeenCalledOnce();
-  });
-
-  it('does not roll back deletion when diagnostic cache cleanup fails', async () => {
-    const config = configurationFixture([
-      { name: 'Work', baseUrl: 'https://work.example.test/v1' },
-      { name: 'Personal', baseUrl: 'https://personal.example.test/v1' },
-    ]);
-    const provider = providerFixture({ clearConnectionDiagnostics: vi.fn().mockRejectedValue(new Error('memento failure')) });
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
+    pickProfile(WORK_PROFILE);
     vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection and API Key' as never);
 
     await deleteConnection(provider);
 
-    expect(config.profiles.map((profile) => profile.name)).toEqual(['Personal']);
-    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith('Work');
-    expect(provider.logMetadata).toHaveBeenCalledWith(expect.stringContaining('memento failure'));
+    expect(config.profiles).toEqual([PERSONAL_PROFILE]);
+    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith(WORK_PROFILE);
+    expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(WORK_PROFILE);
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('clears keys for the current profiles after confirmation', async () => {
-    const config = configurationFixture([
-      { name: 'Work', baseUrl: 'https://work.example.test/v1' },
-      { name: 'Personal', baseUrl: 'https://personal.example.test/v1' },
-    ]);
+  it('rolls deletion back if key deletion fails but does not roll back for diagnostic cleanup failures', async () => {
+    const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
+    const provider = providerFixture({ clearRelayKeyForProfile: vi.fn().mockRejectedValue(new Error('secret delete failed')) });
+    pickProfile(WORK_PROFILE);
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection and API Key' as never);
+
+    await deleteConnection(provider);
+    expect(config.profiles).toEqual([WORK_PROFILE, PERSONAL_PROFILE]);
+    expect(provider.refreshModels).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+    const cleanupConfig = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
+    const cleanupProvider = providerFixture({ clearConnectionDiagnostics: vi.fn().mockRejectedValue(new Error('memento failure')) });
+    pickProfile(WORK_PROFILE);
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection and API Key' as never);
+    await deleteConnection(cleanupProvider);
+    expect(cleanupConfig.profiles).toEqual([PERSONAL_PROFILE]);
+    expect(cleanupProvider.logMetadata).toHaveBeenCalledWith(expect.stringContaining('memento failure'));
+  });
+
+  it('clears all current profiles, keys, and diagnostics after confirmation', async () => {
+    const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
     vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Clear All Connections' as never);
 
     await clearAllConnections(provider);
 
     expect(config.profiles).toEqual([]);
-    expect(config.activeProfile).toBe('');
-    expect(provider.clearAllRelayKeys).toHaveBeenCalledWith(['Work', 'Personal']);
+    expect(provider.clearAllRelayKeys).toHaveBeenCalledWith([WORK_PROFILE, PERSONAL_PROFILE]);
+    expect(provider.clearAllConnectionDiagnostics).toHaveBeenCalledOnce();
+    expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('rejects stale default selections and restores profile updates after active-profile save failures', async () => {
-    const config = configurationFixture([{ name: 'Work', baseUrl: 'https://work.example.test/v1' }]);
+  it('keeps legacy default commands compatible without changing routing state', async () => {
+    const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: { name: 'Gone', baseUrl: 'https://gone.example.test/v1' } } as never);
-    const showError = vi.spyOn(vscode.window, 'showErrorMessage');
+    const info = vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue(undefined);
+
     await setDefaultConnection(provider);
-    expect(showError).toHaveBeenCalledWith(expect.stringContaining('changed while selecting'));
 
-    config.update.mockImplementation(async (key: string) => {
-      if (key === 'activeProfile') throw new Error('active update failed');
-    });
-    await expect(saveProfiles([{ name: 'Personal', baseUrl: 'https://personal.example.test/v1' }], 'Personal'))
-      .rejects.toThrow('active update failed');
-    expect(config.update).toHaveBeenLastCalledWith('profiles', config.profiles, vscode.ConfigurationTarget.Global);
+    expect(info).toHaveBeenCalledWith(
+      'All WeaveNet connections are enabled simultaneously; a default connection is no longer required.',
+      'Manage Connections',
+    );
+    expect(config.update).not.toHaveBeenCalled();
+    expect(provider.refreshModels).not.toHaveBeenCalled();
   });
 
-  it('renames a connection and moves its profile-scoped key before persisting settings', async () => {
-    const config = configurationFixture();
+  it('edits a connection while preserving its UUID and key identity', async () => {
+    const config = configurationFixture([WORK_PROFILE]);
     const provider = providerFixture();
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
+    pickProfile(WORK_PROFILE);
     vi.spyOn(vscode.window, 'showInputBox')
       .mockResolvedValueOnce('Company')
       .mockResolvedValueOnce('https://company.example.test/v1')
@@ -218,6 +253,7 @@ describe('connection mutation queue', () => {
     await editConnection(provider);
 
     expect(config.profiles).toEqual([{
+      id: WORK_ID,
       name: 'Company',
       baseUrl: 'https://company.example.test/v1',
       requestHeaders: { 'X-Tenant': 'team-a' },
@@ -225,58 +261,51 @@ describe('connection mutation queue', () => {
       excludeModels: ['legacy'],
       models: [{ id: 'gpt-test', route: 'openai' }],
     }]);
-    expect(config.activeProfile).toBe('Company');
-    expect(provider.moveRelayKey).toHaveBeenCalledWith('Work', 'Company');
+    expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(WORK_PROFILE);
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('copies settings without copying API keys', async () => {
-    const config = configurationFixture();
+  it('copies settings under a new UUID without copying or probing an API key', async () => {
+    const config = configurationFixture([WORK_PROFILE]);
     const provider = providerFixture();
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
+    pickProfile(WORK_PROFILE);
     vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('Work copy');
 
     await copyConnection(provider);
 
-    expect(config.profiles).toEqual([
-      { name: 'Work', baseUrl: 'https://work.example.test/v1' },
-      { name: 'Work copy', baseUrl: 'https://work.example.test/v1' },
-    ]);
-    expect(provider.moveRelayKey).not.toHaveBeenCalled();
+    expect(config.profiles).toHaveLength(2);
+    expect(config.profiles[1]).toMatchObject({ name: 'Work copy', baseUrl: WORK_PROFILE.baseUrl });
+    expect(config.profiles[1].id).not.toBe(WORK_ID);
+    expect(provider.storeRelayKey).not.toHaveBeenCalled();
+    expect(provider.clearRelayKeyForProfile).not.toHaveBeenCalled();
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('does not let a copied connection inherit an orphaned destination key', async () => {
-    const config = configurationFixture();
-    const provider = providerFixture({ hasRelayKey: vi.fn().mockResolvedValue(true) });
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
-    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('Work copy');
-    const showError = vi.spyOn(vscode.window, 'showErrorMessage');
-
-    await copyConnection(provider);
-
-    expect(config.profiles).toEqual([{ name: 'Work', baseUrl: 'https://work.example.test/v1' }]);
-    expect(showError).toHaveBeenCalledWith(expect.stringContaining('already has a stored API key'));
-    expect(provider.refreshModels).not.toHaveBeenCalled();
-  });
-
-  it('shows connection test diagnostics and safely presents structured failures', async () => {
-    configurationFixture();
+  it('shows per-profile connection test diagnostics and structured failures', async () => {
+    configurationFixture([WORK_PROFILE]);
     const provider = providerFixture();
     const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { profile: unknown }[]) => items[0] as never);
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
+
     await testConnection(provider);
+
     expect(pick).toHaveBeenCalledOnce();
-    expect(provider.testConnection).toHaveBeenCalledWith(expect.objectContaining({ name: 'Work', baseUrl: 'https://work.example.test/v1' }));
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('connection test success'), expect.objectContaining({ detail: expect.stringContaining('models: supported') }));
+    expect(provider.testConnection).toHaveBeenCalledWith(WORK_PROFILE);
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('connection test success'),
+      expect.objectContaining({ detail: expect.stringContaining('models: supported') }),
+    );
 
     provider.testConnection.mockRejectedValueOnce(new Error('offline'));
     const error = vi.spyOn(vscode.window, 'showErrorMessage');
     await testConnection(provider);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Connection failed.'), expect.objectContaining({ detail: 'Category: unknown' }));
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('Connection failed.'),
+      expect.objectContaining({ detail: 'Category: unknown' }),
+    );
   });
 
-  it('creates a connection when setting an API key without an active connection', async () => {
+  it('creates a connection when setting a key with an empty pool', async () => {
     const config = configurationFixture([]);
     const provider = providerFixture();
     vi.spyOn(vscode.window, 'showInputBox')
@@ -285,54 +314,45 @@ describe('connection mutation queue', () => {
 
     await configureActiveRelay(provider);
 
-    expect(config.activeProfile).toBe('Personal');
-    expect(provider.storeRelayKey).toHaveBeenCalledWith('Personal', 'new-key');
+    expect(config.profiles).toHaveLength(1);
+    expect(provider.storeRelayKey).toHaveBeenCalledWith(config.profiles[0], 'new-key');
   });
 
-  it('reuses an orphaned API key without exposing or replacing it', async () => {
-    const config = configurationFixture([]);
-    const provider = providerFixture({ hasRelayKey: vi.fn().mockResolvedValue(true) });
-    vi.spyOn(vscode.window, 'showInputBox')
-      .mockResolvedValueOnce('Personal')
-      .mockResolvedValueOnce('https://personal.example.test/v1');
-    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Use Saved API Key' as never);
-
-    await addConnection(provider);
-
-    expect(config.activeProfile).toBe('Personal');
-    expect(provider.promptForRelayKeyValue).not.toHaveBeenCalled();
-    expect(provider.storeRelayKey).not.toHaveBeenCalled();
-  });
-
-  it('can delete a connection while retaining its API key', async () => {
-    const config = configurationFixture();
+  it('selects among multiple profiles when setting or clearing a key and refreshes only that connection', async () => {
+    configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
-    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: config.profiles[0] } as never);
-    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete Connection, Keep API Key' as never);
-
-    await deleteConnection(provider);
-
-    expect(config.profiles).toEqual([]);
-    expect(provider.clearRelayKeyForProfile).not.toHaveBeenCalled();
-    expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(expect.objectContaining({ name: 'Work' }));
-  });
-
-  it('saves and clears an active connection key with an invalidating refresh', async () => {
-    configurationFixture();
-    const provider = providerFixture();
+    const pick = vi.spyOn(vscode.window, 'showQuickPick')
+      .mockResolvedValueOnce({ profile: PERSONAL_PROFILE } as never)
+      .mockResolvedValueOnce({ profile: WORK_PROFILE } as never);
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
 
     await configureActiveRelay(provider);
-    expect(provider.storeRelayKey).toHaveBeenCalledWith('Work', 'new-key');
-    expect(provider.refreshModels).toHaveBeenCalledWith('invalidate');
+    expect(provider.storeRelayKey).toHaveBeenCalledWith(PERSONAL_PROFILE, 'new-key');
+    expect(provider.refreshConnection).toHaveBeenCalledWith(PERSONAL_ID);
 
     await clearActiveRelayKey(provider);
-    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith('Work');
-    expect(provider.refreshModels).toHaveBeenLastCalledWith('invalidate');
+    expect(provider.clearRelayKeyForProfile).toHaveBeenCalledWith(WORK_PROFILE);
+    expect(provider.refreshConnection).toHaveBeenCalledWith(WORK_ID);
     expect(info).toHaveBeenCalledWith('WeaveNet API key for “Work” cleared.');
+    expect(pick).toHaveBeenCalledTimes(2);
+  });
 
+  it('reports an empty connection pool when clearing a key', async () => {
     configurationFixture([]);
+    const provider = providerFixture();
+    const info = vi.spyOn(vscode.window, 'showInformationMessage');
+
     await clearActiveRelayKey(provider);
-    expect(info).toHaveBeenCalledWith('WeaveNet has no active Relay connection API key to clear.');
+
+    expect(info).toHaveBeenCalledWith('WeaveNet has no Relay connection API key to clear.');
+    expect(provider.clearRelayKeyForProfile).not.toHaveBeenCalled();
+  });
+
+  it('saves only the UUID profile array and never writes activeProfile', async () => {
+    const config = configurationFixture([]);
+    await saveProfiles([WORK_PROFILE]);
+    expect(config.profiles).toEqual([WORK_PROFILE]);
+    expect(config.update).toHaveBeenCalledOnce();
+    expect(config.update).toHaveBeenCalledWith('profiles', [WORK_PROFILE], vscode.ConfigurationTarget.Global);
   });
 });

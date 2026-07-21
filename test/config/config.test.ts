@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { getConfig, isValidProfileName, normalizeConnectionProfiles, selectActiveProfile } from '../../src/config/config';
+import {
+  getConfig,
+  isValidProfileId,
+  isValidProfileName,
+  normalizeConnectionProfiles,
+} from '../../src/config/config';
+
+const WORK_ID = '11111111-1111-4111-8111-111111111111';
+const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('connection profiles', () => {
-  it('normalizes valid profiles and rejects invalid or duplicate entries', () => {
+  it('normalizes valid profiles and rejects invalid or duplicate identities', () => {
     const profiles = normalizeConnectionProfiles([
       {
+        id: WORK_ID.toUpperCase(),
         name: ' Work ',
         baseUrl: ' https://relay.example.com/v1/ ',
         apiKey: 'must-not-be-used',
@@ -16,12 +25,14 @@ describe('connection profiles', () => {
         excludeModels: ['deprecated'],
         models: [{ id: 'private-model', route: 'openai' }],
       },
-      { name: 'Work', baseUrl: 'https://another.example.com/v1' },
-      { name: 'Missing endpoint' },
-      { name: '', baseUrl: 'https://relay.example.com/v1' },
+      { id: WORK_ID, name: 'Other ID duplicate', baseUrl: 'https://another.example.com/v1' },
+      { id: PERSONAL_ID, name: 'Work', baseUrl: 'https://another.example.com/v1' },
+      { id: 'not-a-uuid', name: 'Invalid ID', baseUrl: 'https://relay.example.com/v1' },
+      { id: PERSONAL_ID, name: 'Missing endpoint' },
     ]);
 
     expect(profiles).toEqual([{
+      id: WORK_ID,
       name: 'Work',
       baseUrl: 'https://relay.example.com/v1',
       requestHeaders: { 'X-Tenant': 'work' },
@@ -31,26 +42,17 @@ describe('connection profiles', () => {
     }]);
   });
 
-  it('selects only an existing active profile', () => {
-    const profiles = normalizeConnectionProfiles([
-      { name: 'Work', baseUrl: 'https://relay.example.com/v1' },
-    ]);
-    expect(selectActiveProfile(profiles, ' Work ')?.name).toBe('Work');
-    expect(selectActiveProfile(profiles, 'Missing')).toBeUndefined();
-    expect(selectActiveProfile(profiles, '')).toBeUndefined();
-  });
-
   it('keeps an empty profile list unconfigured', () => {
     expect(normalizeConnectionProfiles([])).toEqual([]);
-    expect(selectActiveProfile([], '')).toBeUndefined();
   });
 
   it('rejects unsafe endpoint forms and protected request headers', () => {
     const profiles = normalizeConnectionProfiles([
-      { name: 'Credentials', baseUrl: 'https://key@relay.example.com/v1' },
-      { name: 'Query', baseUrl: 'https://relay.example.com/v1?token=secret' },
-      { name: 'Fragment', baseUrl: 'https://relay.example.com/v1#secret' },
+      { id: '10000000-0000-4000-8000-000000000001', name: 'Credentials', baseUrl: 'https://key@relay.example.com/v1' },
+      { id: '10000000-0000-4000-8000-000000000002', name: 'Query', baseUrl: 'https://relay.example.com/v1?token=secret' },
+      { id: '10000000-0000-4000-8000-000000000003', name: 'Fragment', baseUrl: 'https://relay.example.com/v1#secret' },
       {
+        id: WORK_ID,
         name: 'Safe',
         baseUrl: 'https://relay.example.com/v1/',
         requestHeaders: {
@@ -67,6 +69,7 @@ describe('connection profiles', () => {
     ]);
 
     expect(profiles).toEqual([{
+      id: WORK_ID,
       name: 'Safe',
       baseUrl: 'https://relay.example.com/v1',
       requestHeaders: { 'X-Tenant': 'team-a' },
@@ -76,55 +79,53 @@ describe('connection profiles', () => {
     }]);
   });
 
-  it('rejects control characters and excessive connection names', () => {
+  it('validates UUIDs and rejects unsafe connection names', () => {
+    expect(isValidProfileId(WORK_ID)).toBe(true);
+    expect(isValidProfileId(WORK_ID.toUpperCase())).toBe(true);
+    expect(isValidProfileId('not-a-uuid')).toBe(false);
     expect(isValidProfileName('Normal connection')).toBe(true);
     expect(isValidProfileName('bad\nname')).toBe(false);
     expect(isValidProfileName('x'.repeat(101))).toBe(false);
-    expect(normalizeConnectionProfiles([
-      { name: 'bad\nname', baseUrl: 'https://relay.example.test/v1' },
-      { name: 'x'.repeat(101), baseUrl: 'https://relay.example.test/v1' },
-    ])).toEqual([]);
   });
 });
 
-describe('legacy connection setting compatibility', () => {
-  function mockConfiguration(profile: Record<string, unknown>, legacy: Record<string, unknown>): void {
+describe('connection-scoped route settings', () => {
+  function mockConfiguration(values: Record<string, unknown>): void {
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-      get: <T>(key: string) => legacy[key] as T | undefined,
-      inspect: <T>(key: string) => key === 'profiles'
-        ? { globalValue: [{ name: 'Work', baseUrl: 'https://relay.example.test/v1', ...profile }] as T }
-        : key === 'activeProfile'
-          ? { globalValue: 'Work' as T }
-          : undefined,
+      get: <T>(key: string) => values[key] as T | undefined,
     } as never);
   }
 
-  it('falls back to legacy top-level route settings when a profile omits them', () => {
-    mockConfiguration({}, {
-      includeModels: ['^legacy-'],
-      excludeModels: ['-old$'],
-      requestHeaders: { 'X-Tenant': 'legacy', Authorization: 'ignored' },
-      models: [{ id: 'legacy-private', route: 'claude' }],
-    });
-
-    const config = getConfig();
-    expect(config.includeModels.map((entry) => entry.source)).toEqual(['^legacy-']);
-    expect(config.excludeModels.map((entry) => entry.source)).toEqual(['-old$']);
-    expect(config.requestHeaders).toEqual({ 'X-Tenant': 'legacy' });
-    expect(config.models).toEqual([{ id: 'legacy-private', route: 'claude' }]);
-  });
-
-  it('gives explicit profile route settings priority, including empty values', () => {
-    mockConfiguration({ includeModels: [], excludeModels: [], requestHeaders: {}, models: [] }, {
+  it('uses only the explicitly selected profile route settings', () => {
+    mockConfiguration({
       includeModels: ['^legacy-'],
       excludeModels: ['-old$'],
       requestHeaders: { 'X-Tenant': 'legacy' },
       models: [{ id: 'legacy-private', route: 'claude' }],
     });
+    const profile = normalizeConnectionProfiles([{
+      id: WORK_ID,
+      name: 'Work',
+      baseUrl: 'https://relay.example.test/v1',
+      includeModels: ['^profile-'],
+      excludeModels: [],
+      requestHeaders: {},
+      models: [],
+    }])[0];
 
-    const config = getConfig();
-    expect(config.includeModels).toEqual([]);
+    const config = getConfig(profile);
+    expect(config.profileId).toBe(WORK_ID);
+    expect(config.includeModels.map((entry) => entry.source)).toEqual(['^profile-']);
     expect(config.excludeModels).toEqual([]);
+    expect(config.requestHeaders).toEqual({});
+    expect(config.models).toEqual([]);
+  });
+
+  it('does not read deprecated top-level route settings without a profile', () => {
+    mockConfiguration({ includeModels: ['^legacy-'], requestHeaders: { 'X-Tenant': 'legacy' } });
+    const config = getConfig();
+    expect(config.baseUrl).toBe('');
+    expect(config.includeModels).toEqual([]);
     expect(config.requestHeaders).toEqual({});
     expect(config.models).toEqual([]);
   });

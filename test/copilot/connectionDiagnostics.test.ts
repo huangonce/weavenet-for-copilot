@@ -15,7 +15,9 @@ import {
 } from '../../src/copilot/connectionDiagnosticsStore';
 import { InMemoryMemento } from '../support/memento';
 
+const PROFILE_ID = '11111111-1111-4111-8111-111111111111';
 const profile: ConnectionProfile = {
+  id: PROFILE_ID,
   name: 'Work',
   baseUrl: 'https://relay.example.test/v1/',
   requestHeaders: { 'X-Tenant': 'team-a', 'X-Region': 'west' },
@@ -43,7 +45,8 @@ function snapshot(fingerprint = fingerprintConnection(profile)): ConnectionDiagn
     probe({ probe: 'claude.streaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
   ] as const;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    profileId: PROFILE_ID,
     fingerprint,
     connectionName: 'Work',
     host: 'relay.example.test',
@@ -81,6 +84,7 @@ describe('connection diagnostics', () => {
       requestHeaders: { 'x-region': 'west', 'x-tenant': 'team-a' },
     })).toBe(fingerprint);
     expect(fingerprintConnection({ ...profile, name: 'Personal' })).not.toBe(fingerprint);
+    expect(fingerprintConnection({ ...profile, id: '22222222-2222-4222-8222-222222222222' })).not.toBe(fingerprint);
     expect(fingerprintConnection({ ...profile, requestHeaders: { 'X-Tenant': 'team-b' } })).not.toBe(fingerprint);
   });
 
@@ -98,7 +102,7 @@ describe('connection diagnostics', () => {
     const store = new ConnectionDiagnosticsStore(state as never);
     await store.update(snapshot());
     await state.update('unrelated', true);
-    await store.deleteProfile('Work');
+    await store.deleteProfile(PROFILE_ID);
     expect(store.get(profile)).toBeUndefined();
     await store.update(snapshot());
     await store.clear();
@@ -108,7 +112,8 @@ describe('connection diagnostics', () => {
   it('ignores damaged, mismatched, unsafe, and future-schema values', () => {
     const valid = snapshot();
     expect(parseConnectionDiagnosticsSnapshot(valid, valid.fingerprint, 2_000)).toEqual(valid);
-    expect(parseConnectionDiagnosticsSnapshot({ ...valid, schemaVersion: 2 }, valid.fingerprint, 2_000)).toBeUndefined();
+    expect(parseConnectionDiagnosticsSnapshot({ ...valid, schemaVersion: 3 }, valid.fingerprint, 2_000)).toBeUndefined();
+    expect(parseConnectionDiagnosticsSnapshot({ ...valid, profileId: 'not-a-uuid' }, valid.fingerprint, 2_000)).toBeUndefined();
     expect(parseConnectionDiagnosticsSnapshot({ ...valid, fingerprint: 'a'.repeat(64) }, valid.fingerprint, 2_000)).toBeUndefined();
     expect(parseConnectionDiagnosticsSnapshot({ ...valid, host: 'relay\nsecret' }, valid.fingerprint, 2_000)).toBeUndefined();
     expect(parseConnectionDiagnosticsSnapshot({ ...valid, testedAt: 100_000_000 }, valid.fingerprint, 2_000)).toBeUndefined();

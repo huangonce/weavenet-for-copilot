@@ -40,7 +40,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
-  const promptCacheKey = config.openaiPromptCaching && isOpenAIPromptCacheModel(model.id)
+  const promptCacheKey = config.openaiPromptCaching && isOpenAIPromptCacheModel(routedModel.upstreamId)
     ? getOpenAIPromptCacheKey(config)
     : undefined;
   const convertedMessages = convertMessages(messages, supportsImageInputForRoutedModel(routedModel, config));

@@ -19,40 +19,38 @@ src/
 
 1. 安装本地 VSIX 扩展。
 2. 在你的 Relay 中创建一把可访问所需模型的 API Key。
-3. 首次启动时，扩展会显示一次非阻塞提示；点击 **Add Relay Connection**，输入连接名称、Relay Base URL 和 API Key。也可在命令面板运行 `WeaveNet: Add Relay Connection`。
-4. 运行 `WeaveNet: Refresh Models`，然后在 Copilot Chat 模型选择器里选择 `WeaveNet ...` 模型。
+3. 首次启动时，扩展会显示一次非阻塞提示；点击 **Add Relay Connection**，输入连接名称、Relay Base URL 和 API Key。也可继续添加更多连接，所有连接会同时启用。
+4. 运行 `WeaveNet: Refresh Models` 聚合刷新所有连接，然后在 Copilot Chat 模型选择器里选择 `WeaveNet ...` 模型。模型详情会显示其来源连接和脱敏 Host。
 5. 需要立即更新 OpenRouter 能力目录时，运行 `WeaveNet: Refresh Model Metadata`。
 
 ### Relay 连接管理
 
-可用配置档在工作、中转站或模型集之间快速切换，而不必反复改写设置：
+可用配置档同时连接工作、中转站或不同模型集，而不必反复改写设置：
 
 1. 在命令面板运行 `WeaveNet: Add Relay Connection`，依次填写名称、Relay API 地址和 API Key。
-2. 使用 `WeaveNet: Manage Relay Connections` 新增、编辑、复制、测试、删除连接或设置默认连接。状态栏会显示当前连接和模型刷新状态。
+2. 使用 `WeaveNet: Manage Relay Connections` 新增、编辑、复制、测试、删除连接，或刷新全部/指定连接。状态栏会汇总所有连接及模型刷新状态。
 
-每个连接可选地设置 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接只有一把 Relay API Key，密钥不会写入 `settings.json`，而是按连接隔离存储在 VS Code SecretStorage。复制连接不会复制其 API Key。`requestHeaders` 的值仍属于普通 VS Code 设置，不受 SecretStorage 保护，不得用于保存 API Key、令牌或其他敏感信息。
+每个连接可选地设置 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接有扩展管理的稳定 UUID 和一把 Relay API Key；UUID 不属于秘密，密钥不会写入 `settings.json`，而是按 UUID 隔离存储在 VS Code SecretStorage。复制连接会生成新 UUID，且不会复制 API Key。`requestHeaders` 的值仍属于普通 VS Code 设置，不受 SecretStorage 保护，不得用于保存 API Key、令牌或其他敏感信息。
 
 ## 命令
 
-- `WeaveNet: Add Relay Connection`：新建 Relay 连接，收集地址和 API Key 后自动设为默认连接。
+- `WeaveNet: Add Relay Connection`：新建并启用 Relay 连接，收集地址和 API Key。
 - `WeaveNet: Manage Relay Connections`：打开连接管理菜单。
-- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、额外请求头、模型过滤规则和固定模型。改名时会迁移该连接的 API Key。
+- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、额外请求头、模型过滤规则和固定模型。改名不影响基于 UUID 存储的 API Key。
 - `WeaveNet: Copy Relay Connection`：复制不含 API Key 的连接配置。
-- `WeaveNet: Test Relay Connection`：由用户显式触发 `/models` 与最小 OpenAI/Claude 流式及非流式请求，并显示结构化结果。最小模型请求可能产生极少量服务费用；扩展不会在后台自动执行这些付费探测。
-- `WeaveNet: Test Relay Connection`：通过 `/models` 测试地址、认证和模型发现；发现 `claude-*` 模型时也会以最小请求验证 Claude `/messages`。结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。
-- `WeaveNet: Set Default Relay Connection`：选择 Copilot 使用的连接。
-- `WeaveNet: Delete Relay Connection`：删除连接时可选择同时删除 API Key，或保留 SecretStorage 中的 API Key供以后复用。
+- `WeaveNet: Test Relay Connection`：由用户显式触发 `/models` 与最小 OpenAI/Claude 流式及非流式请求；结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。最小模型请求可能产生极少量服务费用；扩展不会在后台自动执行这些付费探测。
+- `WeaveNet: Delete Relay Connection`：删除连接及对应 API Key。
 - `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
-- `WeaveNet: Set Relay API Key`：设置当前连接的唯一 API Key。
-- `WeaveNet: Clear Relay API Key`：删除当前连接的 API Key。
-- `WeaveNet: Refresh Models`：使用当前 Relay API Key 刷新模型列表。
+- `WeaveNet: Set Relay API Key`：单连接时直接设置；多连接时先选择连接。
+- `WeaveNet: Clear Relay API Key`：单连接时直接删除；多连接时先选择连接。
+- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型；后台刷新不会执行可能产生费用的能力探测 POST。
 - `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
 - `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
 - `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
 
 ## 协议路由
 
-插件使用当前 Relay 的同一把 API Key 获取模型，并按模型协议发送请求：
+插件使用每个 Relay 各自的 API Key 获取模型。每个模型都绑定发现它的连接、配置修订和请求协议，聊天请求始终发送到该来源 Relay：
 
 - OpenAI 兼容模型：走 `POST /chat/completions`，使用 `Authorization: Bearer` 认证。
 - Claude 模型：走 Anthropic-compatible `POST /messages`，使用 `x-api-key` 认证。
@@ -69,15 +67,15 @@ src/
 
 ## 常用设置
 
-- `weavenet-copilot.activeProfile`：当前使用的 Relay 连接名称；仅全局保存，且仅在没有任何连接时为空。
-- `weavenet-copilot.profiles`：全局保存的 Relay 连接列表。每项至少包含 `name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
+- `weavenet-copilot.activeProfile`：仅为从 `0.3.x` 升级保留的废弃字段；首次迁移排序后自动清空，不再控制路由。
+- `weavenet-copilot.profiles`：全局保存且同时启用的 Relay 连接池。每项包含扩展管理的 `id`、`name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
 - `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会为 system、最后一个工具定义和最近两条用户消息设置显式缓存断点，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
 - `weavenet-copilot.debug`：开启后将请求摘要和 Claude 缓存用量写入 VS Code 的 `WeaveNet` 输出通道，不记录 API Key 或 prompt 正文。通过 `WeaveNet: Show Debug Log` 打开。
   - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
-- `weavenet-copilot.includeModels` / `excludeModels`：旧版顶层兼容设置。仅当当前配置档省略同名字段时作为模型 ID 正则白名单/黑名单回退；新配置应写入 `profiles` 中。
+- `weavenet-copilot.includeModels` / `excludeModels`：仅供从 `0.3.x` 升级迁移使用的废弃顶层模型过滤设置；新配置应写入 `profiles` 中。
 - `weavenet-copilot.maxInputTokens`：向 Copilot 声明的输入 token 硬上限，默认 `128000`。即使模型元数据声明了更大的上下文，也不会超过这个值；OAuth 上游的实际窗口较小时应相应调低。
 - `weavenet-copilot.supportsToolCalling`：是否向 Copilot 声明工具调用能力。
 - `weavenet-copilot.supportsImageInput`：是否为所有模型向 Copilot 声明图片输入能力，默认关闭。
@@ -85,8 +83,8 @@ src/
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
-- `weavenet-copilot.models`：旧版顶层兼容的固定模型列表；仅当当前配置档省略 `models` 时作为回退。新配置应写入 `profiles` 中。
-- 自动发现通过当前连接的 `/models` 目录一次性刷新；返回的 `claude-*` 模型使用 Claude 原生路由，其余模型使用 OpenAI 路由。固定模型会与发现结果合并。发现失败时会保留上一次成功的发现快照；如果没有快照但配置了固定模型，则以降级状态仅展示固定模型。
+- `weavenet-copilot.models`：仅供从 `0.3.x` 升级迁移使用的废弃顶层固定模型列表；新配置应写入 `profiles` 中。
+- 自动发现会并发刷新每个连接的 `/models` 目录；返回的 `claude-*` 模型使用 Claude 原生路由，其余模型使用 OpenAI 路由。各连接的固定模型会与其发现结果合并。某个连接发现失败时只保留该连接上一次成功的发现快照；如果没有快照但配置了固定模型，则以降级状态仅展示其固定模型。
 - `weavenet-copilot.requestTimeoutSeconds`：等待响应头的秒数。模型发现 GET 最多安全重试一次，聊天 POST 不做网络盲重试。
 - `weavenet-copilot.streamIdleTimeoutSeconds`：流式响应数据块之间允许的空闲秒数。
 - `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数，同时转发到 OpenAI 兼容和 Claude 请求。
@@ -98,9 +96,11 @@ src/
 
 API Key 会存储在 VS Code SecretStorage 中。
 
-请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接。单个删除命令会询问是否保留 API Key；清空全部连接会同时清除对应 API Key。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
+请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；命令会同时清除对应 API Key，避免产生无法归属的 Secret。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
 
-连接测试结果会按连接配置的 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时对应诊断会失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。
+连接测试结果会按稳定连接 UUID 与配置 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时只会使对应连接诊断失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。
+
+从 `0.3.x` 升级时，扩展会为连接自动生成稳定 UUID，将旧默认连接排到首位，并只把旧顶层模型规则、固定模型和请求头物化到该旧默认连接。名称型 Secret 会在验证新 UUID Secret 写入成功后再删除；迁移可重复运行且不会覆盖已有 UUID Secret。
 
 从旧版单一 Relay 配置首次升级到连接配置档版本时，扩展会执行一次性清理：删除旧版顶层 Base URL 与旧版 API Key，并要求重新创建 Relay 连接。完成标记保存在 VS Code 全局状态中，后续升级不会重复执行，也不会删除新版连接配置或连接专属 API Key。
 

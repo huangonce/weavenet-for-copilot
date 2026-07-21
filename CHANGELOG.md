@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.4.0 - 2026-07-20
+
+- Enabled all Relay connections simultaneously and aggregated their independently refreshed model catalogs with a concurrency limit of three connections.
+- Bound every picker model to its source connection, immutable effective configuration, and stable UUID so requests cannot be rerouted by later connection selection or rename operations.
+- Migrated profile identities and SecretStorage keys from names to UUIDs with verified, retry-safe upgrade behavior and connection-local diagnostic invalidation.
+- Replaced default-connection UX with aggregate status and refresh summaries; deleting a connection now always deletes its API key.
+
 ## 0.3.4 - 2026-07-20
 
 - Added explicit structured Relay diagnostics for model discovery and OpenAI/Anthropic streaming and non-streaming protocol support.

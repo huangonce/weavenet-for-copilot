@@ -40,6 +40,7 @@ export function fingerprintConnection(
     .map(([name, value]) => [name.trim().toLowerCase(), value] as const)
     .sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue));
   const identity = {
+    profileId: profile.id,
     name: profile.name.trim(),
     baseUrl: normalizeRelayBaseUrl(profile.baseUrl) ?? profile.baseUrl.trim(),
     requestHeaders: headers,
@@ -76,13 +77,13 @@ export class ConnectionDiagnosticsStore {
     await this.state.update(diagnosticsKey(fingerprint), undefined);
   }
 
-  async deleteProfile(connectionName: string): Promise<void> {
+  async deleteProfile(profileId: string): Promise<void> {
     const updates: Thenable<void>[] = [];
     for (const key of this.state.keys()) {
       if (!key.startsWith(CONNECTION_DIAGNOSTICS_KEY_PREFIX)) continue;
       const fingerprint = key.slice(CONNECTION_DIAGNOSTICS_KEY_PREFIX.length);
       const snapshot = this.getByFingerprint(fingerprint);
-      if (snapshot?.connectionName === connectionName) updates.push(this.state.update(key, undefined));
+      if (snapshot?.profileId === profileId) updates.push(this.state.update(key, undefined));
     }
     await Promise.all(updates);
   }
@@ -105,6 +106,7 @@ export function parseConnectionDiagnosticsSnapshot(
 ): ConnectionDiagnosticsSnapshot | undefined {
   if (!isRecord(value)
     || value.schemaVersion !== CONNECTION_DIAGNOSTICS_SCHEMA_VERSION
+    || !isProfileId(value.profileId)
     || !isFingerprint(value.fingerprint)
     || (expectedFingerprint !== undefined && value.fingerprint !== expectedFingerprint)
     || !isSafeString(value.connectionName)
@@ -123,7 +125,8 @@ export function parseConnectionDiagnosticsSnapshot(
   const capabilities = parseCapabilities(value.capabilities);
   if (!capabilities) return undefined;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    profileId: value.profileId,
     fingerprint: value.fingerprint,
     connectionName: value.connectionName,
     host: value.host,
@@ -209,6 +212,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isFingerprint(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function isProfileId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value);
 }
 
 function isSafeString(value: unknown): value is string {

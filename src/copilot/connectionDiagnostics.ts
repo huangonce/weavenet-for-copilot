@@ -44,7 +44,8 @@ export interface ConnectionCapabilities {
 }
 
 export interface ConnectionDiagnosticsSnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
+  readonly profileId: string;
   readonly fingerprint: string;
   readonly connectionName: string;
   readonly host: string;

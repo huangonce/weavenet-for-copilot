@@ -29,15 +29,15 @@ export function toChatInformation(
   model: RoutedModel,
   config: ExtensionConfig,
   hasApiKey: boolean,
+  source?: { readonly name: string; readonly host?: string },
 ): PickerModelInformation {
-  const owner = model.owned_by ? `owned by ${model.owned_by}` : 'from your relay';
   const protocolLabel = model.protocol === 'claude' ? 'Claude native' : 'OpenAI compatible';
   return {
     id: model.pickerId || model.id,
     name: `${config.modelNamePrefix} ${model.name || model.upstreamId}`,
     family: model.protocol === 'claude' ? 'claude' : 'weavenet',
     version: model.upstreamId,
-    detail: hasApiKey ? `${protocolLabel}, ${owner}${model.referencePricing ? ', public reference pricing' : ''}` : 'API key required',
+    detail: hasApiKey ? detailFor(model, source) : 'API key required',
     tooltip: hasApiKey ? buildTooltip(model, protocolLabel) : 'Run a WeaveNet key command first.',
     maxInputTokens: Math.min(model.maxInputTokens ?? config.maxInputTokens, config.maxInputTokens),
     maxOutputTokens: model.maxOutputTokens ?? config.maxOutputTokens,
@@ -90,6 +90,15 @@ function toConfigurationSchema(model: RoutedModel): { configurationSchema?: obje
 
 function formatContextWindow(value: number): string {
   return value >= 1_000_000 ? `${value / 1_000_000}M` : `${Math.round(value / 1000)}K`;
+}
+
+function detailFor(model: RoutedModel, source?: { readonly name: string; readonly host?: string }): string {
+  const protocolLabel = model.protocol === 'claude' ? 'Claude native' : 'OpenAI compatible';
+  const owner = model.owned_by ? `owned by ${model.owned_by}` : 'from your relay';
+  const parts = [protocolLabel, owner];
+  if (source) parts.push(`${source.name}${source.host ? ` (${source.host})` : ''}`);
+  if (model.referencePricing) parts.push('public reference pricing');
+  return parts.join(', ');
 }
 
 function buildTooltip(model: RoutedModel, protocolLabel: string): string {

@@ -9,8 +9,6 @@ import {
   parseToolArguments,
   safeEndpoint,
   safeHost,
-  shouldApplyTestConnectionStatus,
-  shouldInvalidateModelRefresh,
   toClaudeThinking,
   toLanguageModelError,
   WeaveNetChatProvider,
@@ -21,8 +19,14 @@ import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
 import { InMemoryMemento } from '../support/memento';
 
+const WORK_ID = '11111111-1111-4111-8111-111111111111';
+const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
+const WORK_PROFILE = { id: WORK_ID, name: 'work', baseUrl: 'https://work.example.test/v1' };
+const PERSONAL_PROFILE = { id: PERSONAL_ID, name: 'personal', baseUrl: 'https://personal.example.test/v1' };
+
 class InMemorySecrets {
   readonly values = new Map<string, string>();
+  notificationsEnabled = true;
   private readonly listeners = new Set<(event: { key: string }) => void>();
 
   async get(key: string): Promise<string | undefined> { return this.values.get(key); }
@@ -39,30 +43,43 @@ class InMemorySecrets {
     return { dispose: () => this.listeners.delete(listener) };
   }
   private fire(key: string): void {
+    if (!this.notificationsEnabled) return;
     for (const listener of this.listeners) listener({ key });
   }
 }
 
-function providerFixture(
-  activeProfile = 'work',
-  configValues: Record<string, unknown> = {},
-): { provider: WeaveNetChatProvider; secrets: InMemorySecrets; setActiveProfile(value: string): void } {
-  let currentActiveProfile = activeProfile;
-  const profiles = [
-    { name: 'work', baseUrl: 'https://work.example.test/v1' },
-    { name: 'personal', baseUrl: 'https://personal.example.test/v1' },
-  ];
+function providerFixture(options: {
+  profiles?: Array<{ id: string; name: string; baseUrl: string; requestHeaders?: Record<string, string> }>;
+  configValues?: Record<string, unknown>;
+  secrets?: InMemorySecrets;
+  keys?: Record<string, string>;
+} = {}): {
+  provider: WeaveNetChatProvider;
+  secrets: InMemorySecrets;
+  setProfiles(value: typeof options.profiles): void;
+} {
+  let profiles = options.profiles ?? [WORK_PROFILE];
+  const configValues = options.configValues ?? {};
   vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
     get: <T>(key: string) => configValues[key] as T | undefined,
     inspect: <T>(key: string) => key === 'profiles'
       ? { globalValue: profiles as T }
-      : key === 'activeProfile'
-        ? { globalValue: currentActiveProfile as T }
-        : undefined,
+      : undefined,
   } as never);
-  const secrets = new InMemorySecrets();
+  const secrets = options.secrets ?? new InMemorySecrets();
+  for (const [profileId, value] of Object.entries(options.keys ?? {})) secrets.values.set(keyFor(profileId), value);
+  secrets.notificationsEnabled = false;
   const provider = new WeaveNetChatProvider({ secrets, globalState: new InMemoryMemento(), subscriptions: [] } as never);
-  return { provider, secrets, setActiveProfile: (value) => { currentActiveProfile = value; } };
+  secrets.notificationsEnabled = true;
+  return { provider, secrets, setProfiles: (value) => { profiles = value ?? []; } };
+}
+
+function keyFor(profileId: string): string {
+  return `${RELAY_API_KEY_SECRET}.profileId.${profileId}`;
+}
+
+function relayModelRequestCount(fetchMock: ReturnType<typeof vi.spyOn>): number {
+  return fetchMock.mock.calls.filter(([input]) => String(input).includes('.example.test')).length;
 }
 
 async function flushAsyncWork(): Promise<void> {
@@ -73,56 +90,54 @@ async function flushAsyncWork(): Promise<void> {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe('model refresh invalidation', () => {
-  it('reuses an in-flight refresh for passive duplicate requests on one connection', () => {
-    expect(shouldInvalidateModelRefresh('passive', 'work', 'work')).toBe(false);
+describe('connection pool model refresh', () => {
+  it('aggregates models from every configured connection and namespaces duplicate IDs', async () => {
+    const { provider } = providerFixture({
+      profiles: [WORK_PROFILE, PERSONAL_PROFILE],
+      keys: { [WORK_ID]: 'work-key', [PERSONAL_ID]: 'personal-key' },
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ data: [{ id: 'gpt-test' }] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(relayModelRequestCount(fetchMock)).toBe(2);
+    expect(information).toHaveLength(2);
+    expect(new Set(information.map((model) => model.id)).size).toBe(2);
+    expect(information.map((model) => model.id)).toEqual(expect.arrayContaining([
+      `weavenet::${WORK_ID}::gpt-test`,
+      `weavenet::${PERSONAL_ID}::gpt-test`,
+    ]));
+    expect(information.map((model) => model.detail)).toEqual(expect.arrayContaining([
+      expect.stringContaining('work (work.example.test)'),
+      expect.stringContaining('personal (personal.example.test)'),
+    ]));
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', connectionCount: 2, modelCount: 2 });
   });
 
-  it('invalidates an in-flight refresh after a secret or configuration change', () => {
-    expect(shouldInvalidateModelRefresh('invalidate', 'work', 'work')).toBe(true);
-  });
-
-  it('invalidates an in-flight refresh when the active connection changes', () => {
-    expect(shouldInvalidateModelRefresh('passive', 'work', 'personal')).toBe(true);
-  });
-
-  it('updates the global connection status only for the active connection test', () => {
-    expect(shouldApplyTestConnectionStatus('work', 'work')).toBe(true);
-    expect(shouldApplyTestConnectionStatus('work', 'personal')).toBe(false);
-    expect(shouldApplyTestConnectionStatus(undefined, 'personal')).toBe(false);
-  });
-
-  it('coalesces passive duplicate model refreshes into one Relay request', async () => {
-    const { provider, secrets } = providerFixture();
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-test' }] }), {
-      headers: { 'content-type': 'application/json' },
-    }));
+  it('coalesces duplicate refreshes and reuses a resolved aggregate catalog', async () => {
+    const { provider } = providerFixture({
+      profiles: [WORK_PROFILE, PERSONAL_PROFILE],
+      keys: { [WORK_ID]: 'work-key', [PERSONAL_ID]: 'personal-key' },
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ data: [] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
 
     await Promise.all([provider.refreshModels(), provider.refreshModels()]);
+    await provider.refreshModels();
+    await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
 
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', connectionName: 'work', modelCount: 1 });
+    expect(relayModelRequestCount(fetchMock)).toBe(2);
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', connectionCount: 2, modelCount: 0 });
   });
 
-  it('reuses a resolved model catalog for sequential passive refreshes', async () => {
-    const { provider, secrets } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
-      headers: { 'content-type': 'application/json' },
-    }));
-
-    await provider.refreshModels();
-    await provider.refreshModels();
-    await provider.provideLanguageModelChatInformation({} as never, {} as never);
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'ready', modelCount: 0 });
-  });
-
-  it('keeps silent model discovery quiet and notifies after an explicit refresh', async () => {
-    const { provider, secrets } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+  it('keeps background discovery quiet and emits one aggregate explicit-refresh summary', async () => {
+    const { provider, secrets } = providerFixture({ profiles: [WORK_PROFILE, PERSONAL_PROFILE] });
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-test' }] }), {
       headers: { 'content-type': 'application/json' },
     }));
@@ -133,64 +148,14 @@ describe('model refresh invalidation', () => {
 
     await provider.refreshModels('invalidate', true);
     expect(information).toHaveBeenCalledOnce();
-    expect(information).toHaveBeenCalledWith('WeaveNet loaded 1 model(s).');
+    expect(information).toHaveBeenCalledWith('WeaveNet loaded 1 model(s) from 0/2 connection(s); 2 warning(s).');
   });
 
-  it('does not transfer an explicit refresh notification to another connection', async () => {
-    const { provider, secrets, setActiveProfile } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.personal`, 'personal-key');
-    let resolveWork: ((response: Response) => void) | undefined;
-    let signalWorkStarted: (() => void) | undefined;
-    const workStarted = new Promise<void>((resolve) => { signalWorkStarted = resolve; });
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (String(input).includes('work.example.test')) {
-        return new Promise<Response>((resolve) => {
-          resolveWork = resolve;
-          signalWorkStarted?.();
-        });
-      }
-      return new Response(JSON.stringify({ data: [{ id: 'gpt-personal' }] }), {
-        headers: { 'content-type': 'application/json' },
-      });
+  it('reloads every resolved connection when explicitly invalidated', async () => {
+    const { provider } = providerFixture({
+      profiles: [WORK_PROFILE, PERSONAL_PROFILE],
+      keys: { [WORK_ID]: 'work-key', [PERSONAL_ID]: 'personal-key' },
     });
-    const information = vi.spyOn(vscode.window, 'showInformationMessage');
-
-    const workRefresh = provider.refreshModels('invalidate', true);
-    await workStarted;
-    setActiveProfile('personal');
-    const personalRefresh = provider.refreshModels('invalidate');
-    resolveWork?.(new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), {
-      headers: { 'content-type': 'application/json' },
-    }));
-    await Promise.all([workRefresh, personalRefresh]);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(provider.getConnectionStatus()).toMatchObject({ connectionName: 'personal', modelCount: 1 });
-    expect(information).not.toHaveBeenCalled();
-  });
-
-  it('does not reload after a model change event causes VS Code to query the picker', async () => {
-    const { provider, secrets } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-test' }] }), {
-      headers: { 'content-type': 'application/json' },
-    }));
-    const pickerQueries: Promise<vscode.LanguageModelChatInformation[]>[] = [];
-    const subscription = provider.onDidChangeLanguageModelChatInformation(() => {
-      pickerQueries.push(provider.provideLanguageModelChatInformation({} as never, {} as never));
-    });
-
-    await provider.refreshModels();
-    await Promise.all(pickerQueries);
-    subscription.dispose();
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('reloads a resolved model catalog when explicitly invalidated', async () => {
-    const { provider, secrets } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
       JSON.stringify({ data: [{ id: 'gpt-test' }] }),
       { headers: { 'content-type': 'application/json' } },
@@ -199,14 +164,13 @@ describe('model refresh invalidation', () => {
     await provider.refreshModels();
     await provider.refreshModels('invalidate');
 
-    const modelRequests = fetchMock.mock.calls.filter(([input]) => String(input).includes('work.example.test'));
-    expect(modelRequests).toHaveLength(2);
+    expect(relayModelRequestCount(fetchMock)).toBe(4);
   });
 
-  it('does not commit an old model result after the active key is deleted in flight', async () => {
+  it('does not commit an old model result after that connection key is deleted in flight', async () => {
     const { provider, secrets } = providerFixture();
-    const key = `${RELAY_API_KEY_SECRET}.profile.work`;
-    await secrets.store(key, 'work-key');
+    const key = keyFor(WORK_ID);
+    secrets.values.set(key, 'work-key');
     let resolveResponse: ((response: Response) => void) | undefined;
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => {
       resolveResponse = resolve;
@@ -215,32 +179,146 @@ describe('model refresh invalidation', () => {
     const refresh = provider.refreshModels();
     await flushAsyncWork();
     expect(fetchMock).toHaveBeenCalledOnce();
-    await secrets.delete(key);
+    const deletion = secrets.delete(key);
     resolveResponse?.(new Response(JSON.stringify({ data: [{ id: 'stale-model' }] }), {
       headers: { 'content-type': 'application/json' },
     }));
-    await refresh;
+    await Promise.all([refresh, deletion]);
 
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', connectionName: 'work', modelCount: 0 });
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', connectionCount: 1, modelCount: 0 });
+    expect(provider.getConnectionStatus().connections[0]).toMatchObject({ phase: 'keyMissing', connectionName: 'work' });
   });
 
-  it('keeps the active status unchanged when testing a non-active connection', async () => {
-    const { provider, secrets } = providerFixture('work');
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.personal`, 'personal-key');
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-personal' }] }), {
+  it('isolates a failed connection without clearing healthy connection models', async () => {
+    const { provider, secrets } = providerFixture({ profiles: [WORK_PROFILE, PERSONAL_PROFILE] });
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
+    secrets.values.set(keyFor(PERSONAL_ID), 'personal-key');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('personal.example.test')) throw new TypeError('offline');
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), { headers: { 'content-type': 'application/json' } });
+    });
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(information).toHaveLength(1);
+    expect(information[0].version).toBe('gpt-work');
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
+    expect(provider.getConnectionStatus().connections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ connectionName: 'work', phase: 'ready', modelCount: 1 }),
+      expect.objectContaining({ connectionName: 'personal', phase: 'error', modelCount: 0 }),
+    ]));
+  });
+
+  it('retains a previous connection catalog when its next refresh fails', async () => {
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' } });
+    let relayCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (!String(input).includes('.example.test')) {
+        return new Response(JSON.stringify({ data: [] }), { headers: { 'content-type': 'application/json' } });
+      }
+      relayCalls++;
+      if (relayCalls >= 2) throw new TypeError('offline');
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), { headers: { 'content-type': 'application/json' } });
+    });
+
+    await provider.refreshModels();
+    await provider.refreshModels('invalidate');
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(relayModelRequestCount(fetchMock)).toBe(3);
+    expect(information).toHaveLength(1);
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
+  });
+
+  it('limits aggregate model refreshes to three concurrent connections', async () => {
+    const profiles = Array.from({ length: 5 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      name: `relay-${index + 1}`,
+      baseUrl: `https://relay-${index + 1}.example.test/v1`,
+    }));
+    const { provider, secrets } = providerFixture({ profiles });
+    for (const profile of profiles) secrets.values.set(keyFor(profile.id), `key-${profile.name}`);
+    let active = 0;
+    let maximum = 0;
+    const resolvers: Array<() => void> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+      active--;
+      return new Response(JSON.stringify({ data: [] }), { headers: { 'content-type': 'application/json' } });
+    });
+
+    const refresh = provider.refreshModels();
+    await flushAsyncWork();
+    expect(maximum).toBe(3);
+    for (let completed = 0; completed < profiles.length;) {
+      while (resolvers.length === 0) await flushAsyncWork();
+      completed += resolvers.length;
+      resolvers.splice(0).forEach((resolve) => resolve());
+      await flushAsyncWork();
+    }
+    await refresh;
+
+    expect(maximum).toBe(3);
+  });
+
+  it('isolates SecretStorage read failures to the affected connection', async () => {
+    class ReadFailingSecrets extends InMemorySecrets {
+      override async get(key: string): Promise<string | undefined> {
+        if (key === keyFor(PERSONAL_ID)) throw new Error('secret read failed');
+        return super.get(key);
+      }
+    }
+    const secrets = new ReadFailingSecrets();
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
+    const { provider } = providerFixture({ profiles: [WORK_PROFILE, PERSONAL_PROFILE], secrets });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), {
       headers: { 'content-type': 'application/json' },
     }));
-    await flushAsyncWork();
-    const activeStatus = provider.getConnectionStatus();
 
-    await provider.testConnection({ name: 'personal', baseUrl: 'https://personal.example.test/v1' });
+    await expect(provider.refreshModels()).resolves.toBeUndefined();
 
-    expect(provider.getConnectionStatus()).toEqual(activeStatus);
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
+    expect(provider.getConnectionStatus().connections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ connectionName: 'personal', phase: 'error', message: expect.stringContaining('Could not read the API key') }),
+    ]));
+  });
+
+  it('keeps Picker models available when a later API key status read fails', async () => {
+    class ToggleFailingSecrets extends InMemorySecrets {
+      failProfileId?: string;
+      override async get(key: string): Promise<string | undefined> {
+        if (key === this.failProfileId) throw new Error('secret status read failed');
+        return super.get(key);
+      }
+    }
+    const secrets = new ToggleFailingSecrets();
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
+    secrets.values.set(keyFor(PERSONAL_ID), 'personal-key');
+    const { provider } = providerFixture({ profiles: [WORK_PROFILE, PERSONAL_PROFILE], secrets });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ data: [{ id: 'gpt-test' }] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+    await provider.refreshModels();
+    secrets.failProfileId = keyFor(PERSONAL_ID);
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(information).toHaveLength(2);
+    expect(information.find((model) => model.id.includes(WORK_ID))).toMatchObject({
+      detail: expect.stringContaining('work (work.example.test)'),
+    });
+    expect(information.find((model) => model.id.includes(PERSONAL_ID))).toMatchObject({
+      detail: 'API key required',
+      statusIcon: expect.objectContaining({ id: 'warning' }),
+    });
   });
 
   it('returns model diagnostics while treating a failed optional Claude probe as a warning', async () => {
     const { provider, secrets } = providerFixture();
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'claude-test' }, { id: 'gpt-test' }] }), {
         headers: { 'content-type': 'application/json', 'x-request-id': 'models-request' },
@@ -254,7 +332,8 @@ describe('model refresh invalidation', () => {
         headers: { 'content-type': 'application/json', 'x-request-id': 'claude-request' },
       }));
 
-    await expect(provider.testConnection({ name: 'work', baseUrl: 'https://work.example.test/v1' })).resolves.toMatchObject({
+    await expect(provider.testConnection(WORK_PROFILE)).resolves.toMatchObject({
+      profileId: WORK_ID,
       connectionName: 'work',
       host: 'work.example.test',
       modelCount: 2,
@@ -264,19 +343,19 @@ describe('model refresh invalidation', () => {
         expect.objectContaining({ probe: 'claude.nonStreaming', verdict: 'indeterminate' }),
       ]),
     });
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 2 });
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'error', modelCount: 0 });
   });
 
   it('reports invalid URLs and missing keys with structured connection failures', async () => {
     const { provider } = providerFixture();
 
-    await expect(provider.testConnection({ name: 'work', baseUrl: 'ftp://relay.example.test' })).rejects.toMatchObject({
+    await expect(provider.testConnection({ ...WORK_PROFILE, baseUrl: 'ftp://relay.example.test' })).rejects.toMatchObject({
       failure: { category: 'url' },
     });
-    await expect(provider.testConnection({ name: 'work', baseUrl: 'https://work.example.test/v1' })).rejects.toMatchObject({
+    await expect(provider.testConnection(WORK_PROFILE)).rejects.toMatchObject({
       failure: { category: 'authentication' },
     });
-    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', modelCount: 0 });
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', connectionCount: 1, modelCount: 0 });
   });
 
   it('classifies Relay errors consistently for UI connection tests and chat responses', () => {
@@ -354,39 +433,49 @@ describe('Provider request helpers', () => {
 describe('Provider chat responses', () => {
   const token = { isCancellationRequested: false } as never;
   const progress = () => ({ report: vi.fn() });
-  const openAIModel = {
-    id: 'gpt-test', pickerId: 'gpt-test', upstreamId: 'gpt-test', protocol: 'openai', route: 'openai',
-    toolCalling: true, thinking: true, contextWindows: [128_000],
-  } as never;
-  const claudeModel = {
-    id: 'claude-test', pickerId: 'claude-test', upstreamId: 'claude-test', protocol: 'claude', route: 'claude',
-    toolCalling: true, thinking: true,
-  } as never;
+  const openAIModel = { id: 'gpt-test', capabilities: { tool_calling: true, reasoning: true }, context_length: 128_000 };
+  const claudeModel = { id: 'claude-test', capabilities: { tool_calling: true, reasoning: true } };
 
-  async function readyProvider(model: typeof openAIModel | typeof claudeModel, configValues: Record<string, unknown> = {}) {
-    const { provider, secrets } = providerFixture('work', { sendMaxTokens: true, supportsToolCalling: true, ...configValues });
-    secrets.values.set(`${RELAY_API_KEY_SECRET}.profile.work`, 'work-key');
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: model.id }] }), {
+  async function readyProvider(
+    model: typeof openAIModel | typeof claudeModel,
+    configValues: Record<string, unknown> = {},
+    profile = WORK_PROFILE,
+  ) {
+    const { provider, secrets } = providerFixture({
+      profiles: [profile],
+      configValues: {
+        sendMaxTokens: true,
+        supportsToolCalling: true,
+        openaiPromptCaching: true,
+        ...configValues,
+      },
+    });
+    secrets.values.set(keyFor(profile.id), `${profile.name}-key`);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [model] }), {
       headers: { 'content-type': 'application/json' },
     }));
     await provider.refreshModels();
-    (provider as unknown as { cachedModels: unknown[] }).cachedModels = [model];
-    return provider;
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
+    return { provider, model: information[0] };
   }
 
   it('provides refreshed picker information with connection key state', async () => {
-    const provider = await readyProvider(openAIModel);
+    const { provider } = await readyProvider(openAIModel);
     const information = await provider.provideLanguageModelChatInformation({} as never, token);
     expect(information).toEqual([expect.objectContaining({
-      id: 'gpt-test', isBYOK: true, capabilities: { toolCalling: true, imageInput: false },
+      id: `weavenet::${WORK_ID}::gpt-test`, isBYOK: true, capabilities: { toolCalling: true, imageInput: false },
     })]);
   });
 
   it('converts OpenAI requests and streamed content, reasoning, and tools to VS Code parts', async () => {
-    const provider = await readyProvider(openAIModel);
+    const profile = {
+      ...WORK_PROFILE,
+      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+    };
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({
-        model: 'gpt-test', stream: true, max_tokens: 16, context_window: 128_000, reasoning_effort: 'max',
+        model: 'gpt-test', stream: true, max_tokens: 16, reasoning_effort: 'max',
         tool_choice: 'required', prompt_cache_key: expect.stringMatching(/^weavenet-/),
       });
       callbacks.onResponse?.('OpenAI', 200, 'text/event-stream');
@@ -398,9 +487,9 @@ describe('Provider chat responses', () => {
     const output = progress();
 
     await provider.provideLanguageModelChatResponse(
-      { id: 'gpt-test', maxOutputTokens: 16 } as never,
+      { ...model, maxOutputTokens: 16 } as never,
       [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
-      { tools: [{ name: 'search', description: 'Search', inputSchema: {} }], toolMode: vscode.LanguageModelChatToolMode.Required, modelOptions: { reasoningEffort: 'max', contextWindow: '128000' } } as never,
+      { tools: [{ name: 'search', description: 'Search', inputSchema: {} }], toolMode: vscode.LanguageModelChatToolMode.Required, modelOptions: { reasoningEffort: 'max' } } as never,
       output as never,
       token,
     );
@@ -414,7 +503,7 @@ describe('Provider chat responses', () => {
   });
 
   it('uses Claude native payloads, extended thinking, and native tool-choice semantics', async () => {
-    const provider = await readyProvider(claudeModel, { temperature: 2, topP: 0.5 });
+    const { provider, model } = await readyProvider(claudeModel, { temperature: 2, topP: 0.5 });
     const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({
         model: 'claude-test', max_tokens: 9_000, stream: true,
@@ -429,7 +518,7 @@ describe('Provider chat responses', () => {
     const output = progress();
 
     await provider.provideLanguageModelChatResponse(
-      { id: 'claude-test', maxOutputTokens: 9_000 } as never,
+      { ...model, maxOutputTokens: 9_000 } as never,
       [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
       { tools: [{ name: 'search', description: 'Search', inputSchema: {} }], toolMode: vscode.LanguageModelChatToolMode.Required, modelOptions: { reasoningEffort: 'max' } } as never,
       output as never,
@@ -441,7 +530,7 @@ describe('Provider chat responses', () => {
   });
 
   it('uses multimodal-compatible OpenAI payloads without Relay routing hints', async () => {
-    const provider = await readyProvider(openAIModel, { supportsImageInput: true });
+    const { provider, model } = await readyProvider(openAIModel, { supportsImageInput: true });
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({ model: 'gpt-test', stream: true });
       expect(request).not.toHaveProperty('max_tokens');
@@ -452,7 +541,7 @@ describe('Provider chat responses', () => {
     });
 
     await provider.provideLanguageModelChatResponse(
-      { id: 'gpt-test', maxOutputTokens: 32 } as never,
+      { ...model, maxOutputTokens: 32 } as never,
       [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')] }] as never,
       { modelOptions: { reasoningEffort: 'max', contextWindow: '128000' } } as never,
       progress() as never,
@@ -462,13 +551,13 @@ describe('Provider chat responses', () => {
   });
 
   it('uses Claude forced tool choice when extended thinking is disabled', async () => {
-    const provider = await readyProvider(claudeModel);
+    const { provider, model } = await readyProvider(claudeModel);
     const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
       expect(request).toMatchObject({ tool_choice: { type: 'any' }, temperature: undefined, top_p: undefined });
     });
 
     await provider.provideLanguageModelChatResponse(
-      { id: 'claude-test', maxOutputTokens: 32 } as never,
+      { ...model, maxOutputTokens: 32 } as never,
       [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
       { tools: [{ name: 'search', description: 'Search', inputSchema: {} }], toolMode: vscode.LanguageModelChatToolMode.Required } as never,
       progress() as never,
@@ -477,31 +566,74 @@ describe('Provider chat responses', () => {
     expect(stream).toHaveBeenCalledOnce();
   });
 
-  it('rejects stale, unknown, and unauthenticated response requests safely', async () => {
+  it('rejects stale and unknown response requests safely', async () => {
     const { provider } = providerFixture();
     await expect(provider.provideLanguageModelChatResponse({ id: 'missing' } as never, [], {} as never, progress() as never, token))
-      .rejects.toThrow('active Relay connection changed');
-
-    const providerWithKey = await readyProvider(openAIModel);
-    await expect(providerWithKey.provideLanguageModelChatResponse({ id: 'missing' } as never, [], {} as never, progress() as never, token))
       .rejects.toThrow('Unknown WeaveNet model route');
 
-    const { provider: noKey } = providerFixture();
-    (noKey as never as { cachedModels: unknown[]; cacheConnectionKey: string }).cachedModels = [openAIModel];
-    (noKey as never as { cachedModels: unknown[]; cacheConnectionKey: string }).cacheConnectionKey = JSON.stringify({
-      profileName: 'work', baseUrl: 'https://work.example.test/v1', requestHeaders: {}, includeModels: [], excludeModels: [], models: [],
+    const { provider: providerWithKey } = await readyProvider(openAIModel);
+    await expect(providerWithKey.provideLanguageModelChatResponse({ id: 'missing' } as never, [], {} as never, progress() as never, token))
+      .rejects.toThrow('Unknown WeaveNet model route');
+  });
+
+  it('routes duplicate model IDs through the selected model source URL, headers, and key', async () => {
+    const work = { ...WORK_PROFILE, requestHeaders: { 'x-relay': 'work' } };
+    const personal = { ...PERSONAL_PROFILE, requestHeaders: { 'x-relay': 'personal' } };
+    const { provider } = providerFixture({
+      profiles: [work, personal],
+      configValues: { sendMaxTokens: true },
+      keys: { [WORK_ID]: 'work-key', [PERSONAL_ID]: 'personal-key' },
     });
-    await expect(noKey.provideLanguageModelChatResponse({ id: 'gpt-test' } as never, [], {} as never, progress() as never, token))
-      .rejects.toThrow('API key is not configured');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ data: [openAIModel] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
+    const selected = information.find((model) => model.id.includes(PERSONAL_ID));
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async function (request) {
+      expect(request.model).toBe('gpt-test');
+      expect(this).toMatchObject({
+        options: {
+          baseUrl: 'https://personal.example.test/v1',
+          apiKey: 'personal-key',
+          requestHeaders: { 'x-relay': 'personal' },
+        },
+      });
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      selected as never,
+      [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it('invalidates old model bindings after a connection configuration revision', async () => {
+    const { provider, secrets, setProfiles } = providerFixture();
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [openAIModel] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const [oldModel] = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
+
+    setProfiles([{ ...WORK_PROFILE, baseUrl: 'https://new-work.example.test/v1' }]);
+    await provider.refreshModels();
+
+    await expect(provider.provideLanguageModelChatResponse(oldModel, [], {} as never, progress() as never, token))
+      .rejects.toThrow('Unknown WeaveNet model route');
   });
 
   it('maps cancellation and Relay failures to VS Code language-model errors', async () => {
-    const provider = await readyProvider(openAIModel);
+    const { provider, model } = await readyProvider(openAIModel);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockRejectedValue(new RelayRequestError('denied', 401, 'json'));
-    await expect(provider.provideLanguageModelChatResponse({ id: 'gpt-test' } as never, [], {} as never, progress() as never, token))
+    await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, token))
       .rejects.toMatchObject({ code: 'NoPermissions' });
     stream.mockRejectedValueOnce(new Error('cancelled'));
-    await expect(provider.provideLanguageModelChatResponse({ id: 'gpt-test' } as never, [], {} as never, progress() as never, { isCancellationRequested: true } as never))
+    await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, { isCancellationRequested: true } as never))
       .rejects.toBeInstanceOf(vscode.CancellationError);
   });
 });

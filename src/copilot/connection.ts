@@ -10,10 +10,6 @@ export interface ConnectionTestFailure {
   readonly requestId?: string;
 }
 
-export function shouldApplyTestConnectionStatus(activeProfileName: string | undefined, testedProfileName: string): boolean {
-  return activeProfileName === testedProfileName;
-}
-
 export function safeHost(baseUrl: string): string | undefined {
   try {
     const url = new URL(baseUrl);

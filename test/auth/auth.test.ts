@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import * as vscode from 'vscode';
-import { AuthManager } from '../../src/auth/auth';
+import { describe, expect, it } from 'vitest';
+import { AuthManager, profileSecretKey } from '../../src/auth/auth';
 import {
   CHATGPT_API_KEY_SECRET,
   CLAUDE_API_KEY_SECRET,
@@ -9,20 +8,15 @@ import {
   RELAY_API_KEY_SECRET,
 } from '../../src/constants';
 
+const work = { id: '11111111-1111-4111-8111-111111111111', name: 'Work relay' };
+const personal = { id: '22222222-2222-4222-8222-222222222222', name: 'Personal relay' };
+
 class InMemorySecrets {
   readonly values = new Map<string, string>();
 
-  async get(key: string): Promise<string | undefined> {
-    return this.values.get(key);
-  }
-
-  async store(key: string, value: string): Promise<void> {
-    this.values.set(key, value);
-  }
-
-  async delete(key: string): Promise<void> {
-    this.values.delete(key);
-  }
+  async get(key: string): Promise<string | undefined> { return this.values.get(key); }
+  async store(key: string, value: string): Promise<void> { this.values.set(key, value); }
+  async delete(key: string): Promise<void> { this.values.delete(key); }
 }
 
 class FailingSecrets extends InMemorySecrets {
@@ -40,100 +34,96 @@ class FailingSecrets extends InMemorySecrets {
   }
 }
 
+function legacyProfileKey(name: string): string {
+  return `${RELAY_API_KEY_SECRET}.profile.${encodeURIComponent(name)}`;
+}
+
 describe('Relay API key storage', () => {
-  it('isolates a single API key for each connection profile', async () => {
+  it('isolates API keys by stable profile UUID and prefers the UUID key', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
+    await secrets.store(profileSecretKey(work.id), 'uuid-key');
+    await secrets.store(legacyProfileKey(work.name), 'legacy-key');
 
-    await secrets.store(RELAY_API_KEY_SECRET, 'default-key');
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work%20relay`, 'work-key');
-
-    await expect(auth.getApiKey()).resolves.toBe('default-key');
-    await expect(auth.getApiKey('Work relay')).resolves.toBe('work-key');
-    await expect(auth.getApiKey('Personal relay')).resolves.toBeUndefined();
+    await expect(auth.getApiKey(work)).resolves.toBe('uuid-key');
+    await expect(auth.getApiKey(personal)).resolves.toBeUndefined();
   });
 
-  it('removes unified and legacy default keys when clearing Default Relay', async () => {
+  it('temporarily falls back to the legacy name-addressed key', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
-    await Promise.all([
-      secrets.store(RELAY_API_KEY_SECRET, 'new-key'),
-      secrets.store(OPENAI_API_KEY_SECRET, 'openai-key'),
-      secrets.store(CHATGPT_API_KEY_SECRET, 'gpt-key'),
-      secrets.store(CLAUDE_API_KEY_SECRET, 'claude-key'),
-      secrets.store(LEGACY_API_KEY_SECRET, 'legacy-key'),
-    ]);
-
-    await auth.clearApiKey();
-
-    await expect(auth.getApiKey()).resolves.toBeUndefined();
+    await secrets.store(legacyProfileKey(work.name), '  legacy-key  ');
+    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
   });
 
-  it('moves a profile key when a connection is renamed', async () => {
+  it('migrates a legacy key by copying, verifying, and deleting the source', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key');
+    await secrets.store(legacyProfileKey(work.name), 'work-key');
 
-    await expect(auth.moveApiKey('Work', 'Company relay')).resolves.toBe(true);
-    await expect(auth.getApiKey('Work')).resolves.toBeUndefined();
-    await expect(auth.getApiKey('Company relay')).resolves.toBe('work-key');
+    await auth.migrateProfileApiKeys([work]);
+
+    expect(secrets.values.get(profileSecretKey(work.id))).toBe('work-key');
+    expect(secrets.values.has(legacyProfileKey(work.name))).toBe(false);
   });
 
-  it('restores the source key when a key move cannot delete the source', async () => {
+  it('does not overwrite an existing UUID key during migration', async () => {
+    const secrets = new InMemorySecrets();
+    const auth = new AuthManager(secrets as never);
+    await secrets.store(profileSecretKey(work.id), 'existing-key');
+    await secrets.store(legacyProfileKey(work.name), 'legacy-key');
+
+    await auth.migrateProfileApiKeys([work]);
+
+    await expect(auth.getApiKey(work)).resolves.toBe('existing-key');
+    expect(secrets.values.get(legacyProfileKey(work.name))).toBe('legacy-key');
+  });
+
+  it('keeps the legacy key usable when migration storage fails', async () => {
     const secrets = new FailingSecrets();
     const auth = new AuthManager(secrets as never);
-    const sourceKey = `${RELAY_API_KEY_SECRET}.profile.Work`;
-    await secrets.store(sourceKey, 'work-key');
-    secrets.failDeleteKey = sourceKey;
+    await secrets.store(legacyProfileKey(work.name), 'legacy-key');
+    secrets.failStoreKey = profileSecretKey(work.id);
 
-    await expect(auth.moveApiKey('Work', 'Company relay')).rejects.toThrow('delete failed');
-    await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
-    await expect(auth.getApiKey('Company relay')).resolves.toBeUndefined();
+    await auth.migrateProfileApiKeys([work]);
+
+    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
+    expect(secrets.values.has(profileSecretKey(work.id))).toBe(false);
   });
 
-  it('does not overwrite an existing destination key during a rename', async () => {
-    const secrets = new InMemorySecrets();
+  it('keeps both copies usable when migration cannot delete the source', async () => {
+    const secrets = new FailingSecrets();
     const auth = new AuthManager(secrets as never);
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key');
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Company`, 'existing-key');
+    await secrets.store(legacyProfileKey(work.name), 'legacy-key');
+    secrets.failDeleteKey = legacyProfileKey(work.name);
 
-    await expect(auth.moveApiKey('Work', 'Company')).rejects.toThrow('already has an API key');
-    await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
-    await expect(auth.getApiKey('Company')).resolves.toBe('existing-key');
+    await auth.migrateProfileApiKeys([work]);
+
+    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
+    expect(secrets.values.get(legacyProfileKey(work.name))).toBe('legacy-key');
   });
 
-  it('does not adopt a destination key when the renamed source has no key', async () => {
-    const secrets = new InMemorySecrets();
-    const auth = new AuthManager(secrets as never);
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Company`, 'orphan-key');
-
-    await expect(auth.moveApiKey('Work', 'Company')).rejects.toThrow('already has an API key');
-    await expect(auth.getApiKey('Work')).resolves.toBeUndefined();
-    await expect(auth.getApiKey('Company')).resolves.toBe('orphan-key');
-  });
-
-  it('clears a selected connection key without touching other connections', async () => {
+  it('deletes both UUID and legacy keys for one profile without touching others', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
     await Promise.all([
-      secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key'),
-      secrets.store(`${RELAY_API_KEY_SECRET}.profile.Personal`, 'personal-key'),
-      secrets.store(`${RELAY_API_KEY_SECRET}.profile.Keep`, 'keep-key'),
+      secrets.store(profileSecretKey(work.id), 'work-key'),
+      secrets.store(legacyProfileKey(work.name), 'legacy-work-key'),
+      secrets.store(profileSecretKey(personal.id), 'personal-key'),
     ]);
 
-    await auth.clearProfileApiKey('Work');
+    await auth.clearProfileApiKey(work);
 
-    await expect(auth.getApiKey('Work')).resolves.toBeUndefined();
-    await expect(auth.getApiKey('Personal')).resolves.toBe('personal-key');
-    await expect(auth.getApiKey('Keep')).resolves.toBe('keep-key');
+    await expect(auth.getApiKey(work)).resolves.toBeUndefined();
+    await expect(auth.getApiKey(personal)).resolves.toBe('personal-key');
   });
 
-  it('clears every current and legacy Relay key when clearing all connections', async () => {
+  it('clears all current and legacy Relay keys transactionally', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
     await Promise.all([
-      secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key'),
-      secrets.store(`${RELAY_API_KEY_SECRET}.profile.Personal`, 'personal-key'),
+      secrets.store(profileSecretKey(work.id), 'work-key'),
+      secrets.store(legacyProfileKey(work.name), 'legacy-work-key'),
       secrets.store(RELAY_API_KEY_SECRET, 'default-key'),
       secrets.store(OPENAI_API_KEY_SECRET, 'openai-key'),
       secrets.store(CHATGPT_API_KEY_SECRET, 'chatgpt-key'),
@@ -141,75 +131,21 @@ describe('Relay API key storage', () => {
       secrets.store(LEGACY_API_KEY_SECRET, 'legacy-key'),
     ]);
 
-    await auth.clearAllRelayApiKeys(['Work', 'Personal']);
+    await auth.clearAllRelayApiKeys([work]);
 
-    await expect(auth.getApiKey('Work')).resolves.toBeUndefined();
-    await expect(auth.getApiKey('Personal')).resolves.toBeUndefined();
-    await expect(auth.getApiKey()).resolves.toBeUndefined();
+    expect(secrets.values.size).toBe(0);
   });
 
-  it('waits for serial deletes before restoring snapshots after a failure', async () => {
+  it('restores deleted key snapshots after a clear failure', async () => {
     const secrets = new FailingSecrets();
     const auth = new AuthManager(secrets as never);
-    const workKey = `${RELAY_API_KEY_SECRET}.profile.Work`;
-    const personalKey = `${RELAY_API_KEY_SECRET}.profile.Personal`;
-    await secrets.store(workKey, 'work-key');
-    await secrets.store(personalKey, 'personal-key');
-    secrets.failDeleteKey = personalKey;
+    await secrets.store(profileSecretKey(work.id), 'work-key');
+    await secrets.store(profileSecretKey(personal.id), 'personal-key');
+    secrets.failDeleteKey = profileSecretKey(personal.id);
 
-    await expect(auth.clearAllRelayApiKeys(['Work', 'Personal'])).rejects.toThrow('delete failed');
-    await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
-    await expect(auth.getApiKey('Personal')).resolves.toBe('personal-key');
+    await expect(auth.clearAllRelayApiKeys([work, personal])).rejects.toThrow('delete failed');
+    await expect(auth.getApiKey(work)).resolves.toBe('work-key');
+    await expect(auth.getApiKey(personal)).resolves.toBe('personal-key');
   });
 
-  it('normalizes empty values and handles same-profile moves without mutating storage', async () => {
-    const secrets = new InMemorySecrets();
-    const auth = new AuthManager(secrets as never);
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work%20relay`, '  work-key  ');
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Empty`, '   ');
-
-    await expect(auth.getApiKey('Work relay')).resolves.toBe('work-key');
-    await expect(auth.hasApiKey('Empty')).resolves.toBe(false);
-    await expect(auth.moveApiKey('Work relay', 'Work relay')).resolves.toBe(true);
-    await expect(auth.moveApiKey('Empty', 'Other')).resolves.toBe(false);
-  });
-
-  it('restores both key snapshots when storing the renamed destination fails', async () => {
-    const secrets = new FailingSecrets();
-    const auth = new AuthManager(secrets as never);
-    const sourceKey = `${RELAY_API_KEY_SECRET}.profile.Work`;
-    await secrets.store(sourceKey, 'work-key');
-    secrets.failStoreKey = `${RELAY_API_KEY_SECRET}.profile.Company`;
-
-    await expect(auth.moveApiKey('Work', 'Company')).rejects.toThrow('store failed');
-    await expect(auth.getApiKey('Work')).resolves.toBe('work-key');
-    await expect(auth.getApiKey('Company')).resolves.toBeUndefined();
-  });
-
-  it('prompts, trims, stores, and reports an API key only when input is present', async () => {
-    const secrets = new InMemorySecrets();
-    const auth = new AuthManager(secrets as never);
-    const input = vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('  prompted-key  ');
-    const info = vi.spyOn(vscode.window, 'showInformationMessage');
-
-    await expect(auth.promptForApiKey('Work')).resolves.toBe(true);
-    expect(input).toHaveBeenCalledWith(expect.objectContaining({ password: true }));
-    await expect(auth.getApiKey('Work')).resolves.toBe('prompted-key');
-    expect(info).toHaveBeenCalledWith('WeaveNet API key for “Work” saved.');
-
-    input.mockResolvedValueOnce('   ');
-    await expect(auth.promptForApiKey()).resolves.toBe(false);
-  });
-
-  it('reports selected and default key clearing after deleting the corresponding secrets', async () => {
-    const secrets = new InMemorySecrets();
-    const auth = new AuthManager(secrets as never);
-    const info = vi.spyOn(vscode.window, 'showInformationMessage');
-    await secrets.store(`${RELAY_API_KEY_SECRET}.profile.Work`, 'work-key');
-
-    await auth.clearApiKey('Work');
-    expect(info).toHaveBeenCalledWith('WeaveNet API key for “Work” cleared.');
-    await auth.clearApiKey();
-    expect(info).toHaveBeenCalledWith('WeaveNet API key for Default Relay cleared.');
-  });
 });

@@ -21,14 +21,13 @@ export interface ModelLoadResult {
 
 export async function loadAllModels(
   config: ExtensionConfig,
-  getApiKey: (profileName?: string) => Promise<string | undefined>,
+  apiKey: string | undefined,
   debug: DebugLogger,
   previousSnapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]> = new Map(),
   token?: vscode.CancellationToken,
 ): Promise<ModelLoadResult> {
   void scheduleOpenRouterRefresh(config.metadataRefreshHours * 3_600_000);
 
-  const apiKey = await getApiKey(config.profileName);
   const routes: Array<{ readonly name: RoutedModel['route']; readonly task: Promise<RoutedModel[]> }> = [];
   if (apiKey) {
     routes.push({

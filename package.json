@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -59,10 +59,6 @@
         "title": "%command.clearRelayKey%"
       },
       {
-        "command": "weavenet-copilot.switchProfile",
-        "title": "%command.switchProfile%"
-      },
-      {
         "command": "weavenet-copilot.createProfile",
         "title": "%command.createProfile%"
       },
@@ -89,10 +85,6 @@
       {
         "command": "weavenet-copilot.testConnection",
         "title": "%command.testConnection%"
-      },
-      {
-        "command": "weavenet-copilot.setDefaultConnection",
-        "title": "%command.setDefaultConnection%"
       },
       {
         "command": "weavenet-copilot.manageConnections",
@@ -122,7 +114,8 @@
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "%configuration.activeProfile.description%"
+          "description": "%configuration.activeProfile.description%",
+          "deprecationMessage": "%configuration.activeProfile.deprecation%"
         },
         "weavenet-copilot.profiles": {
           "type": "array",
@@ -133,10 +126,16 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
+              "id",
               "name",
               "baseUrl"
             ],
             "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+                "description": "Extension-managed stable connection identifier."
+              },
               "name": {
                 "type": "string"
               },
@@ -292,7 +291,8 @@
             "type": "string"
           },
           "default": [],
-          "description": "%configuration.includeModels.description%"
+          "description": "%configuration.includeModels.description%",
+          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
         },
         "weavenet-copilot.excludeModels": {
           "type": "array",
@@ -300,7 +300,8 @@
             "type": "string"
           },
           "default": [],
-          "description": "%configuration.excludeModels.description%"
+          "description": "%configuration.excludeModels.description%",
+          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
         },
         "weavenet-copilot.maxInputTokens": {
           "type": "number",
@@ -354,12 +355,14 @@
         "weavenet-copilot.requestHeaders": {
           "type": "object",
           "default": {},
-          "description": "%configuration.requestHeaders.description%"
+          "description": "%configuration.requestHeaders.description%",
+          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
         },
         "weavenet-copilot.models": {
           "type": "array",
           "default": [],
           "description": "%configuration.models.description%",
+          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%",
           "items": {
             "type": "object",
             "required": [
