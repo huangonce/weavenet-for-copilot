@@ -126,7 +126,6 @@ describe('model routing', () => {
     });
     expect(toChatInformation(models[1], config, false)).toMatchObject({
       detail: 'API key required',
-      statusIcon: { id: 'warning' },
     });
   });
 });

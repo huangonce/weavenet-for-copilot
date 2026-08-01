@@ -7,7 +7,7 @@ import type {
   StreamCallbacks,
 } from './types';
 import { streamClaudeMessages } from './claude';
-import { isReservedRelayHeader } from '../config/config';
+import { isReservedRelayHeader } from './headers';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata } from './http';
 import { streamOpenAIChatCompletion } from './openai';
 import { streamOpenAIResponses } from './openaiResponses';

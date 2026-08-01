@@ -32,6 +32,10 @@ export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens:
   return budget >= 1024 ? { thinking: { type: 'enabled', budget_tokens: budget } } : undefined;
 }
 
+export function clampClaudeTemperature(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : Math.max(0, Math.min(1, value));
+}
+
 export class InvalidToolArgumentsError extends Error {
   readonly reason: 'malformed-json' | 'non-object';
   readonly argumentLength: number;

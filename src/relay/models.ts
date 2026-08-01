@@ -1,6 +1,5 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import type { ConfiguredModel, ExtensionConfig } from '../config/config';
-import { enrichModelsWithOpenRouter } from '../metadata/openrouterFallback';
 import { normalizeOpenAIRequestCapabilities } from './openaiCapabilities';
 import type { ModelMetadataSources, ModelProtocol, ReasoningEffort, RelayModel, RoutedModel } from './types';
 
@@ -44,7 +43,6 @@ export function toChatInformation(
     maxOutputTokens: model.maxOutputTokens ?? config.maxOutputTokens,
     isBYOK: true,
     isUserSelectable: true,
-    statusIcon: hasApiKey ? undefined : new vscode.ThemeIcon('warning'),
     capabilities: {
       toolCalling: supportsToolCallingForModel(model, config),
       imageInput: supportsImageInputForRoutedModel(model, config),
@@ -164,10 +162,6 @@ export function supportsImageInputForRoutedModel(model: RoutedModel, config: Ext
 
 export function supportsToolCallingForModel(model: RoutedModel, config: ExtensionConfig): boolean {
   return config.supportsToolCalling && model.toolCalling === true;
-}
-
-export function enrichModelsWithMetadata(models: RoutedModel[]): RoutedModel[] {
-  return enrichModelsWithOpenRouter(models);
 }
 
 export function toRoutedModel(

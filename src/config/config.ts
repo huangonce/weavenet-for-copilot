@@ -1,26 +1,10 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION } from '../constants';
+import { isReservedRelayHeader } from '../relay/headers';
 import { normalizeOpenAIRequestCapabilities } from '../relay/openaiCapabilities';
 import type { OpenAIRequestCapabilities } from '../relay/types';
 import { normalizeRelayBaseUrl } from '../relay/url';
 
-const RESERVED_REQUEST_HEADERS = new Set([
-  'accept',
-  'anthropic-version',
-  'authorization',
-  'cookie',
-  'connection',
-  'content-length',
-  'content-type',
-  'host',
-  'keep-alive',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-  'x-api-key',
-]);
 const MAX_PROFILE_NAME_LENGTH = 100;
 const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 
@@ -215,11 +199,6 @@ export function isValidProfileName(value: string): boolean {
 
 export function isValidProfileId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.trim().toLowerCase());
-}
-
-/** Headers owned by the extension and never configurable per connection. */
-export function isReservedRelayHeader(name: string): boolean {
-  return RESERVED_REQUEST_HEADERS.has(name.trim().toLowerCase());
 }
 
 function objectHeaders(value: unknown): Record<string, string> | undefined {

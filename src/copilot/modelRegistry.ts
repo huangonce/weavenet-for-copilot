@@ -1,10 +1,9 @@
 import type * as vscode from 'vscode';
 import type { ExtensionConfig } from '../config/config';
-import { scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
+import { enrichModelsWithOpenRouter, scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
 import { RelayClient } from '../relay/client';
 import {
   assignUniquePickerIds,
-  enrichModelsWithMetadata,
   filterModels,
   fromConfiguredModel,
   toRoutedModel,
@@ -61,7 +60,7 @@ export async function loadAllModels(
     }
   }
 
-  loaded.push(...filterModels(enrichModelsWithMetadata(config.models.map(fromConfiguredModel)), config));
+  loaded.push(...filterModels(enrichModelsWithOpenRouter(config.models.map(fromConfiguredModel)), config));
   if (!loaded.length && routes.length > 0 && failedRouteCount === routes.length) {
     throw new Error('All model routes failed to refresh.');
   }
@@ -97,7 +96,7 @@ async function loadModelsForProtocol(
     toRoutedModel(model, isClaudeModel(model.id) ? 'claude' : 'openai', route));
   // A shared /models catalog may advertise both OpenAI-compatible and native
   // Claude models. Route selection happens per model ID above.
-  const filtered = filterModels(enrichModelsWithMetadata(routed), config);
+  const filtered = filterModels(enrichModelsWithOpenRouter(routed), config);
   const withResponsesProbe = await applyResponsesProtocolProbes(client, filtered, config, debug, token);
   debug(config, `[models] loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
   return withResponsesProbe;

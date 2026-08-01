@@ -288,10 +288,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     return entries.flatMap(({ profileId, model }) => {
       const runtime = this.runtimes.get(profileId);
       if (!runtime) return [];
-      return [toChatInformation(model, getConfig(runtime.profile), keyStates.get(profileId) === true, {
+      const hasApiKey = keyStates.get(profileId) === true;
+      const info = toChatInformation(model, getConfig(runtime.profile), hasApiKey, {
         name: runtime.profile.name,
         host: safeHost(runtime.profile.baseUrl),
-      })];
+      });
+      return [hasApiKey ? info : { ...info, statusIcon: new vscode.ThemeIcon('warning') }];
     });
   }
 

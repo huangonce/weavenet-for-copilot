@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import type { ExtensionConfig } from '../config/config';
-import { clampClaudeTemperature, convertClaudeMessages, convertClaudeTools } from '../relay/claude';
 import { RelayClient } from '../relay/client';
 import { supportsImageInputForRoutedModel, supportsToolCallingForModel } from '../relay/models';
 import type { ClaudeRequest, ClaudeUsage, RoutedModel } from '../relay/types';
+import { convertClaudeMessages, convertClaudeTools } from './convert';
 import { toLanguageModelError } from './connection';
 import {
+  clampClaudeTemperature,
   getConfiguredReasoningEffort,
   parseToolArguments,
   reportThinking,

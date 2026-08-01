@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
-import { convertMessages, convertResponsesInput, convertResponsesTools, convertTools } from '../../src/copilot/convert';
+import {
+  applyLastTwoUserCacheControl,
+  convertClaudeMessages,
+  convertClaudeTools,
+  convertMessages,
+  convertResponsesInput,
+  convertResponsesTools,
+  convertTools,
+  normalizeClaudeImageMediaType,
+} from '../../src/copilot/convert';
+import { clampClaudeTemperature } from '../../src/copilot/helpers';
+import type { ClaudeMessage } from '../../src/relay/types';
 
 describe('chat request conversion', () => {
   it('converts assistant text and tool calls, then emits tool results', () => {
@@ -173,5 +184,76 @@ describe('responses input conversion', () => {
       },
       strict: true,
     }]);
+  });
+});
+
+describe('Claude conversion helpers', () => {
+  it('allows only Anthropic-supported image MIME types', () => {
+    expect(normalizeClaudeImageMediaType('image/jpg')).toBe('image/jpeg');
+    expect(normalizeClaudeImageMediaType('image/webp')).toBe('image/webp');
+    expect(normalizeClaudeImageMediaType('image/svg+xml')).toBeUndefined();
+  });
+
+  it('places cache breakpoints on only the latest two user messages', () => {
+    const messages: ClaudeMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'one' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply' }] },
+      { role: 'user', content: [{ type: 'text', text: 'two' }] },
+      { role: 'user', content: [{ type: 'text', text: 'three' }] },
+    ];
+    applyLastTwoUserCacheControl(messages, '1h');
+    expect((messages[0].content[0] as { cache_control?: unknown }).cache_control).toBeUndefined();
+    expect((messages[2].content[0] as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect((messages[3].content[0] as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('drops orphan and interrupted Claude tool chains while preserving matched parallel results', () => {
+    const assistant = (parts: unknown[]) => ({
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: parts,
+    }) as vscode.LanguageModelChatRequestMessage;
+    const user = (parts: unknown[]) => ({
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: parts,
+    }) as vscode.LanguageModelChatRequestMessage;
+    const converted = convertClaudeMessages([
+      user([new vscode.LanguageModelToolResultPart('orphan', [new vscode.LanguageModelTextPart('ignored')])]),
+      assistant([
+        new vscode.LanguageModelToolCallPart('call_1', 'first', {}),
+        new vscode.LanguageModelToolCallPart('call_2', 'second', {}),
+      ]),
+      user([new vscode.LanguageModelToolResultPart('call_1', [new vscode.LanguageModelTextPart('done')])]),
+      user([new vscode.LanguageModelTextPart('continue without second result')]),
+    ], { supportsImageInput: false });
+
+    expect(converted.messages).toEqual([
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'first', input: {} }] },
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: 'done' },
+        { type: 'text', text: 'continue without second result' },
+      ] },
+    ]);
+  });
+
+  it('clamps Claude temperature to its supported range', () => {
+    expect(clampClaudeTemperature(-0.5)).toBe(0);
+    expect(clampClaudeTemperature(0.7)).toBe(0.7);
+    expect(clampClaudeTemperature(1.5)).toBe(1);
+    expect(clampClaudeTemperature(undefined)).toBeUndefined();
+  });
+
+  it('converts system text, images, and cached Claude tools', () => {
+    const system = { role: 3, content: [new vscode.LanguageModelTextPart('system rules')] } as never;
+    const user = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1, 2]), 'image/jpg')],
+    } as never;
+    expect(convertClaudeMessages([system, user], { supportsImageInput: true, promptCaching: true, cacheTTL: '1h' }))
+      .toMatchObject({
+        system: [{ type: 'text', text: 'system rules', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+        messages: [{ role: 'user', content: [{ type: 'image', source: { media_type: 'image/jpeg', data: 'AQI=' }, cache_control: { type: 'ephemeral', ttl: '1h' } }] }],
+      });
+    expect(convertClaudeTools([{ name: 'search', description: 'Search', inputSchema: {} }] as never, true, '1h'))
+      .toMatchObject([{ name: 'search', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
   });
 });
