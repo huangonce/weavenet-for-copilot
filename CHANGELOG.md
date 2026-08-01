@@ -1,5 +1,16 @@
 # Change Log
 
+## 0.5.0 - 2026-08-01
+
+- 新增 OpenAI Responses API 协议层：通过 `/responses` 端点发起无状态请求（`store: false`、无 `previous_response_id`），包含 SSE 流式事件解析、用量映射与独立的协议错误处理。
+- 模型刷新时自动探测 Relay 的 Responses API 支持：先以免费 GET 探测端点可用性，再对受支持端点发送 `max_output_tokens: 1` 的最小化请求验证模型兼容性，并缓存探测结果；不支持的模型回退到 Chat Completions。
+- 将支持 Responses API 的模型路由到 `/responses` 流式请求，保留推理、严格工具调用与无状态约束。
+- 统一终止状态传播：连接测试与持久化诊断接受 `completed`/`incomplete`，探测如实记录截断（`max_output_tokens: 1` 下常见），不再硬编码为已完成。
+- 连接测试新增免费的 `/responses` 端点可用性探测，且不会单独降低整体健康度；纯单协议 Relay 不再因跳过另一协议而显示 degraded。
+- 保留 Responses 请求历史中的 assistant `function_call`，使 `call_id` 与 `function_call_output` 配对，避免严格 Relay 拒绝多轮工具调用历史。
+- 设置或清除 API Key 时捕获 SecretStorage 故障并给出提示，不再产生未处理的拒绝。
+- 强化分层边界，落实全库深度审查发现的修复。
+
 ## 0.4.2 - 2026-07-21
 
 - 新增 OpenAI 请求传输生命周期诊断，可在收到 HTTP 响应前安全关联客户端请求 ID、请求体字节数、请求次数和流式模式。
