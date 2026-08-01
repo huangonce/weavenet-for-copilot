@@ -132,7 +132,7 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 
 `encryptedReasoning`（仅 Responses 协议，默认关闭）是 `replayReasoningContent` 的规范替代方案：启用后请求带 `include: ["reasoning.encrypted_content"]`，扩展把服务端返回的 reasoning item（真实 `id` + 加密载荷）原样寄存在会话历史的思考块上，下一轮按原位逐字回传，从而在不依赖服务端存储的前提下还原真实推理——请求仍为 `store: false`，也从不发送 `previous_response_id`。加密载荷对扩展完全不透明，只做透传。官方 Responses API 在 `store: false` 的无状态模式下支持返回该载荷，但兼容网关的实现可能不同：有些网关只在 `store: true` 或服务端持久化路径下返回 `encrypted_content`，即使请求包含 `include` 也可能省略它。要求 Relay 上游接受 `include` 字段；不认识该字段的网关可能返回 400，关闭该能力即可。若宿主未把加密载荷带回下一轮，则退化为不发送任何 reasoning item——绝不会发送缺少加密载荷的 reasoning item。验证时，首个请求的 `replayedReasoningItems=0` 是预期的；如果连续多轮仍为 0，应优先检查 Relay 是否在 `store: false` 下返回了 `encrypted_content`，而不是假设扩展能够自行生成或解密该载荷。
 
-`reasoningSummary`（仅 Responses 协议，默认关闭）启用后请求带 `reasoning.summary: "auto"`，模型会在最终答案之前流式输出一段可读的思考摘要，显著缩短"看起来在等"的空窗期。它不改变实际推理量，也不影响首字节时延，只让思考过程可见。不支持该字段的网关可能返回 400，部分官方账号还需完成组织验证才会返回摘要，遇到问题关闭即可。调试日志的 `reasoningSummary=` 字段可确认请求是否携带该参数。
+`reasoningSummary`（仅 Responses 协议）默认开启：Responses 请求自动带 `reasoning.summary: "auto"`，模型在最终答案之前流式输出一段可读的思考摘要，显著缩短"看起来在等"的空窗期。它不改变实际推理量，也不影响首字节时延，只让思考过程可见。不支持该字段的网关可能返回 400，部分官方账号还需完成组织验证才会返回摘要，遇到问题可在固定模型上显式声明 `openai.reasoningSummary: false` 关闭。调试日志的 `reasoningSummary=` 字段可确认请求是否携带该参数。
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 

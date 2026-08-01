@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.6.3 - 2026-08-02
+
+- `openai.reasoningSummary` 默认开启：Responses 请求自动带 `reasoning.summary: "auto"`，无需配置；网关不支持该字段时可在固定模型上显式声明 `false` 关闭。
+
 ## 0.6.2 - 2026-08-02
 
 - `weavenet-copilot.openaiApiStrategy` 默认值由 `auto` 改为 `chat`。Responses 与 Chat Completions 的规范化前缀不同，自动探测把已有连接切到 Responses 会造成 Prompt 缓存整体冷启动、首字时延上升；改为默认 Chat Completions 后不再自动切换协议，需要 Responses 时显式选择 `responses` 或 `auto`。

@@ -157,9 +157,9 @@ export interface OpenAIRequestCapabilities {
    */
   encryptedReasoning?: boolean;
   /**
-   * Requests `reasoning.summary: "auto"` on the Responses API so the model streams a readable
-   * summary of its thinking. Off by default: endpoints that do not support the field reject the
-   * request, and some require account verification before summaries are returned.
+   * Sends `reasoning.summary: "auto"` on the Responses API so the model streams a readable
+   * summary of its thinking. Defaults to on for Responses requests; set `false` when the
+   * endpoint rejects the field or the account has no summary access.
    */
   reasoningSummary?: boolean;
   developerRole?: boolean;

@@ -164,7 +164,9 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
-  const reasoningSummary = routedModel.openai?.reasoningSummary === true;
+  // Summaries are streamed as soon as the Responses API starts thinking, so they are
+  // on by default; a gateway that rejects the field can opt out with an explicit false.
+  const reasoningSummary = routedModel.openai?.reasoningSummary !== false;
   const tokenLimit = !hasImageInput && config.sendMaxTokens
     ? createResponsesTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
     : {};

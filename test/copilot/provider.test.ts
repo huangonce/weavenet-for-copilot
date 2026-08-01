@@ -965,7 +965,7 @@ describe('Provider chat responses', () => {
     }));
   });
 
-  it('asks for a reasoning summary alongside the effort only when reasoningSummary is enabled', async () => {
+  it('requests a reasoning summary by default and honors an explicit opt-out', async () => {
     const withCapability = async (openai: Record<string, unknown>): Promise<ResponsesRequest | undefined> => {
       const profile = {
         ...WORK_PROFILE,
@@ -995,9 +995,12 @@ describe('Provider chat responses', () => {
       return request;
     };
 
+    expect(await withCapability({})).toMatchObject({
+      reasoning: { effort: 'low', summary: 'auto' },
+    });
     expect(await withCapability({ reasoningSummary: true })).toMatchObject({
       reasoning: { effort: 'low', summary: 'auto' },
     });
-    expect((await withCapability({}))?.reasoning).toEqual({ effort: 'low' });
+    expect((await withCapability({ reasoningSummary: false }))?.reasoning).toEqual({ effort: 'low' });
   });
 });
