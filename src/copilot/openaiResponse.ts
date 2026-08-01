@@ -146,7 +146,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
-  const input = convertResponsesInput(messages, supportsImageInput);
+  const { input, instructions } = convertResponsesInput(messages, supportsImageInput);
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
@@ -158,6 +158,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     input,
     stream: true,
     store: false,
+    ...(instructions ? { instructions } : {}),
     temperature: config.temperature,
     // OpenAI recommends changing temperature or top_p, but not both.
     top_p: config.temperature === undefined ? config.topP : undefined,

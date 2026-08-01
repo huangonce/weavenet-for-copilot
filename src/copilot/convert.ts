@@ -127,21 +127,35 @@ export function convertTools(
 
 /**
  * Converts VS Code chat messages to OpenAI Responses API input items.
- * Assistant tool calls are preserved as top-level `function_call` items (not
- * nested content parts, which only accept input_text/input_image/etc.) so the
- * following `function_call_output` items keep a matching call_id; dropping
- * them would leave the call_id dangling and can make strict relays reject the
- * history with a 400. Thinking models additionally require a non-empty
- * `reasoning` item before each batch of tool calls.
+ * System instructions are extracted into the top-level `instructions` field
+ * (the Responses spec does not accept `role: 'system'` input items; strict
+ * relays reject them). Assistant tool calls are preserved as top-level
+ * `function_call` items (not nested content parts, which only accept
+ * output_text/input_text/input_image etc.) so the following
+ * `function_call_output` items keep a matching call_id; dropping them would
+ * leave the call_id dangling and can make strict relays reject the history
+ * with a 400. Assistant message text uses `output_text` parts per the
+ * Responses spec; strict relays reject `input_text` on assistant messages.
+ * Thinking models additionally require a non-empty `reasoning` item before
+ * each batch of tool calls.
  */
 export function convertResponsesInput(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
   supportsImageInput: boolean,
-): ResponsesInputItem[] {
+): { input: ResponsesInputItem[]; instructions?: string } {
   const result: ResponsesInputItem[] = [];
+  const instructionParts: string[] = [];
 
   for (const message of messages) {
     const role = mapResponsesRole(message.role);
+    if (role === 'system') {
+      for (const part of message.content) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          instructionParts.push(part.value);
+        }
+      }
+      continue;
+    }
     const contentParts: ResponsesInputContentPart[] = [];
     let textContent = '';
     let thinkingText = '';
@@ -151,7 +165,11 @@ export function convertResponsesInput(
     for (const part of message.content) {
       if (part instanceof vscode.LanguageModelTextPart) {
         textContent += part.value;
-        contentParts.push({ type: 'input_text', text: part.value });
+        contentParts.push(
+          role === 'assistant'
+            ? { type: 'output_text', text: part.value }
+            : { type: 'input_text', text: part.value },
+        );
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
         functionCalls.push({
           type: 'function_call',
@@ -202,7 +220,10 @@ export function convertResponsesInput(
     result.push(...toolResults);
   }
 
-  return result;
+  return {
+    input: result,
+    ...(instructionParts.length > 0 ? { instructions: instructionParts.join('\n\n') } : {}),
+  };
 }
 
 export function convertResponsesTools(

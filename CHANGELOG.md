@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.5.3 - 2026-08-01
+
+- 修复 Responses 请求中 assistant 消息 content 分片类型错误的问题：assistant 文本改为规范的 `output_text`（之前误用 `input_text`），避免严格校验的 Relay 对含 assistant 历史消息的请求返回 `Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'` 的 HTTP 400。
+- 系统指令改为通过顶层 `instructions` 字段发送（Responses 规范的 input item 不接受 `role: 'system'`，严格 Relay 会拒绝），同时保持对宽松 Relay 的兼容。
+- 修正 `reasoning` item 的 `summary` 类型为规范的 `summary_text` 分片数组。
+
 ## 0.5.2 - 2026-08-01
 
 - 修复思考模型拒绝 Responses 工具调用历史的问题：在每组 `function_call` 前回传非空 `reasoning` item（优先复用 VS Code 的思考内容），避免 DeepSeek 等 Relay 返回 `reasoning_text ... must be passed back` 的 HTTP 400。

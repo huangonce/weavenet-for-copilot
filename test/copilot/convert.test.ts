@@ -121,15 +121,17 @@ describe('responses input conversion', () => {
       ],
     }] as never;
 
-    expect(convertResponsesInput(messages, false)).toEqual([
-      {
-        role: 'assistant',
-        content: [{ type: 'input_text', text: 'Calling search.' }],
-      },
-      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
-      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
-      { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
-    ]);
+    expect(convertResponsesInput(messages, false)).toEqual({
+      input: [
+        {
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Calling search.' }],
+        },
+        { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
+        { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
+      ],
+    });
   });
 
   it('reuses thinking content as the reasoning item preceding tool calls', () => {
@@ -141,10 +143,12 @@ describe('responses input conversion', () => {
       ],
     }] as never;
 
-    expect(convertResponsesInput(messages, false)).toEqual([
-      { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Need to look this up.' }], summary: [] },
-      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
-    ]);
+    expect(convertResponsesInput(messages, false)).toEqual({
+      input: [
+        { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Need to look this up.' }], summary: [] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+    });
   });
 
   it('preserves images as input_image parts only when supported', () => {
@@ -156,27 +160,31 @@ describe('responses input conversion', () => {
       ],
     }] as never;
 
-    expect(convertResponsesInput(messages, false)).toEqual([{ role: 'user', content: 'What is this?' }]);
-    expect(convertResponsesInput(messages, true)).toEqual([{
-      role: 'user',
-      content: [
-        { type: 'input_text', text: 'What is this?' },
-        { type: 'input_image', image_url: 'data:image/png;base64,AQID', detail: 'auto' },
-      ],
-    }]);
+    expect(convertResponsesInput(messages, false)).toEqual({ input: [{ role: 'user', content: 'What is this?' }] });
+    expect(convertResponsesInput(messages, true)).toEqual({
+      input: [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'What is this?' },
+          { type: 'input_image', image_url: 'data:image/png;base64,AQID', detail: 'auto' },
+        ],
+      }],
+    });
   });
 
-  it('maps system messages and keeps function calls in assistant history', () => {
+  it('maps system messages to top-level instructions', () => {
     const messages = [
       { role: 3, content: [new vscode.LanguageModelTextPart('system instruction')] },
       { role: vscode.LanguageModelChatMessageRole.Assistant, content: [new vscode.LanguageModelToolCallPart('call-1', 'search', {})] },
     ] as never;
 
-    expect(convertResponsesInput(messages, false)).toEqual([
-      { role: 'system', content: 'system instruction' },
-      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
-      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
-    ]);
+    expect(convertResponsesInput(messages, false)).toEqual({
+      input: [
+        { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+      instructions: 'system instruction',
+    });
   });
 
   it('sanitizes tool schemas into flat Responses tool definitions', () => {
