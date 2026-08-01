@@ -261,6 +261,20 @@ describe('OpenAI response parsing', () => {
     }));
   });
 
+  it('omits processingMs when the upstream omits openai-processing-ms', async () => {
+    const cb = { ...callbacks(), onResponse: vi.fn() };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+
+    await streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb);
+
+    const metadata = cb.onResponse.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(metadata?.processingMs).toBeUndefined();
+  });
+
   it('sends a client request ID only when explicitly enabled', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockImplementation(async () => new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }));

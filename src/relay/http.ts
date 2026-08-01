@@ -63,7 +63,10 @@ export function safeResponseMetadata(response: Response): SafeResponseMetadata {
 export function responseDiagnosticsMetadata(response: Response): ResponseDiagnosticsMetadata {
   const safe = (name: string, maximumLength = 100): string | undefined =>
     safeHeaderValue(response.headers.get(name), maximumLength);
-  const processing = Number(response.headers.get('openai-processing-ms'));
+  // Number(null) is 0, so only parse when the header actually exists;
+  // relays that omit `openai-processing-ms` must not report a fake 0.
+  const rawProcessingMs = response.headers.get('openai-processing-ms');
+  const processing = rawProcessingMs === null ? NaN : Number(rawProcessingMs);
   return {
     requestId: safe('x-request-id'),
     clientRequestId: safe('x-client-request-id'),
