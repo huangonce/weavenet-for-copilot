@@ -109,7 +109,7 @@ function logClaudeRequest(debug: DebugLogger, config: ExtensionConfig, request: 
     : request.system?.reduce((total, block) => total + block.text.length, 0) ?? 0;
   debug(
     config,
-    `Claude request: model=${request.model}, cacheMode=${config.claudePromptCaching}, `
+    `Claude Messages request: model=${request.model}, cacheMode=${config.claudePromptCaching}, `
       + `messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, systemChars=${systemChars}, `
       + `bodyBytes=${Buffer.byteLength(JSON.stringify(request))}`,
   );
@@ -125,7 +125,7 @@ function logClaudeUsage(
   const fields = Object.keys(usage).sort().join(',') || 'none';
   debug(
     config,
-    `Claude usage${responseId ? ` (${responseId})` : ''}: `
+    `Claude Messages usage${responseId ? ` (${responseId})` : ''}: `
       + `input=${value(usage.input_tokens)}, cacheRead=${value(usage.cache_read_input_tokens)}, `
       + `cacheWrite=${value(usage.cache_creation_input_tokens)}, output=${value(usage.output_tokens)}, `
       + `usageFields=${fields}`,

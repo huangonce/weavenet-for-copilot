@@ -36,7 +36,7 @@ import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
 import { provideClaudeResponse } from './claudeResponse';
 import { loadAllModels } from './modelRegistry';
-import { provideOpenAIResponse } from './openaiResponse';
+import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
 import { formatLogError } from './requestDiagnostics';
 
 export {
@@ -271,7 +271,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     try {
       await this.refreshModels('passive', options.silent === false);
     } catch (error) {
-      this.debug(getConfig(), `Model picker refresh failed: ${formatLogError(error)}`);
+      this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
     }
     const entries = [...this.modelBindings.values()];
     const keyStates = new Map<string, boolean>();
@@ -332,6 +332,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       debug: this.debug.bind(this),
     };
     if (routedModel.protocol === 'claude') await provideClaudeResponse(context);
+    else if (routedModel.openaiApi === 'responses') await provideResponsesResponse(context);
     else await provideOpenAIResponse(context);
   }
 

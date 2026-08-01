@@ -737,4 +737,81 @@ describe('Provider chat responses', () => {
     await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, { isCancellationRequested: true } as never))
       .rejects.toBeInstanceOf(vscode.CancellationError);
   });
+
+  it('routes models probed for the Responses API through streamResponses with a stateless request', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      baseUrl: 'https://responses-work.example.test/v1',
+      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+    };
+    // Probe spies must be installed before refreshModels runs the probes.
+    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('supported');
+    vi.spyOn(RelayClient.prototype, 'testOpenAIResponses').mockResolvedValue({
+      endpoint: '/responses',
+      status: 200,
+      responseType: 'application/json',
+      termination: 'completed',
+    } as never);
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      expect(request).toMatchObject({
+        model: 'gpt-test',
+        stream: true,
+        store: false,
+        max_output_tokens: 16,
+        reasoning: { effort: 'max' },
+        tool_choice: 'required',
+      });
+      expect(request).not.toHaveProperty('messages');
+      expect(request).not.toHaveProperty('previous_response_id');
+      expect(request.input).toEqual([{ role: 'user', content: 'hello' }]);
+      callbacks.onReasoning('reason');
+      callbacks.onContent('answer');
+      callbacks.onToolCall({ id: 'call-1', type: 'function', function: { name: 'search', arguments: '{"q":"docs"}' } });
+      callbacks.onStreamEnd?.('Responses', 'completed');
+    });
+    const output = progress();
+
+    await provider.provideLanguageModelChatResponse(
+      { ...model, maxOutputTokens: 16 } as never,
+      [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
+      { tools: [{ name: 'search', description: 'Search', inputSchema: {} }], toolMode: vscode.LanguageModelChatToolMode.Required, modelOptions: { reasoningEffort: 'max' } } as never,
+      output as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+    expect(output.report.mock.calls.map(([part]) => part)).toEqual([
+      expect.objectContaining({ value: 'reason' }),
+      expect.objectContaining({ value: 'answer' }),
+      expect.objectContaining({ callId: 'call-1', name: 'search', input: { q: 'docs' } }),
+    ]);
+  });
+
+  it('keeps Chat Completions for models that fail the Responses probe', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      baseUrl: 'https://chat-probe.example.test/v1',
+      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+    };
+    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('supported');
+    vi.spyOn(RelayClient.prototype, 'testOpenAIResponses').mockRejectedValue(new Error('model does not support /responses'));
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const streamResponses = vi.spyOn(RelayClient.prototype, 'streamResponses').mockResolvedValue(undefined);
+    const streamChat = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
+      expect(request).toMatchObject({ model: 'gpt-test', messages: expect.any(Array) });
+      callbacks.onContent('chat answer');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      { ...model, maxOutputTokens: 16 } as never,
+      [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(streamResponses).not.toHaveBeenCalled();
+    expect(streamChat).toHaveBeenCalledOnce();
+  });
 });

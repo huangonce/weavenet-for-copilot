@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
-import { convertMessages, convertTools } from '../../src/copilot/convert';
+import { convertMessages, convertResponsesInput, convertResponsesTools, convertTools } from '../../src/copilot/convert';
 
 describe('chat request conversion', () => {
   it('converts assistant text and tool calls, then emits tool results', () => {
@@ -96,5 +96,82 @@ describe('chat request conversion', () => {
       { role: 'system', content: 'system instruction' },
       { role: 'tool', tool_call_id: 'call-1', content: '[{"value":"data"}]' },
     ]);
+  });
+});
+
+describe('responses input conversion', () => {
+  it('maps assistant text and tool results without assistant tool calls', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelTextPart('Calling search.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
+        new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('Found it.')]),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false)).toEqual([
+      { role: 'assistant', content: 'Calling search.' },
+      { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
+    ]);
+  });
+
+  it('preserves images as input_image parts only when supported', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [
+        new vscode.LanguageModelTextPart('What is this?'),
+        new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/png'),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false)).toEqual([{ role: 'user', content: 'What is this?' }]);
+    expect(convertResponsesInput(messages, true)).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'What is this?' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AQID', detail: 'auto' },
+      ],
+    }]);
+  });
+
+  it('maps system messages to the system role and drops empty assistant messages', () => {
+    const messages = [
+      { role: 3, content: [new vscode.LanguageModelTextPart('system instruction')] },
+      { role: vscode.LanguageModelChatMessageRole.Assistant, content: [new vscode.LanguageModelToolCallPart('call-1', 'search', {})] },
+    ] as never;
+
+    expect(convertResponsesInput(messages, false)).toEqual([
+      { role: 'system', content: 'system instruction' },
+    ]);
+  });
+
+  it('sanitizes tool schemas into flat Responses tool definitions', () => {
+    expect(convertResponsesTools(undefined)).toBeUndefined();
+    expect(convertResponsesTools([{
+      name: 'search',
+      description: 'Search indexed docs',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', markdownDescription: 'editor-only' } } },
+    }] as never)).toEqual([{
+      type: 'function',
+      name: 'search',
+      description: 'Search indexed docs',
+      parameters: { type: 'object', properties: { query: { type: 'string' } } },
+    }]);
+    expect(convertResponsesTools([{
+      name: 'search',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    }] as never, true)).toEqual([{
+      type: 'function',
+      name: 'search',
+      description: undefined,
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      strict: true,
+    }]);
   });
 });

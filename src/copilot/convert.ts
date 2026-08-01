@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import type {
   ChatContentPart,
   ChatMessage,
+  ResponsesInputContentPart,
+  ResponsesInputItem,
+  ResponsesToolDefinition,
   ToolDefinition,
   ToolCall,
 } from '../relay/types';
@@ -102,6 +105,97 @@ export function convertTools(
       },
     };
   });
+}
+
+/**
+ * Converts VS Code chat messages to OpenAI Responses API input items.
+ * Assistant tool calls are intentionally dropped: the Responses protocol only
+ * carries assistant text and `function_call_output` items in history. The
+ * call_id linkage is preserved through the tool result items.
+ */
+export function convertResponsesInput(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  supportsImageInput: boolean,
+): ResponsesInputItem[] {
+  const result: ResponsesInputItem[] = [];
+
+  for (const message of messages) {
+    const role = mapResponsesRole(message.role);
+    const contentParts: ResponsesInputContentPart[] = [];
+    let textContent = '';
+    const toolResults: ResponsesInputItem[] = [];
+
+    for (const part of message.content) {
+      if (part instanceof vscode.LanguageModelTextPart) {
+        textContent += part.value;
+        contentParts.push({ type: 'input_text', text: part.value });
+      } else if (part instanceof vscode.LanguageModelToolCallPart) {
+        // No function_call input item exists in the Responses protocol.
+      } else if (part instanceof vscode.LanguageModelToolResultPart) {
+        toolResults.push({
+          type: 'function_call_output',
+          call_id: part.callId,
+          output: stringifyToolResult(part.content),
+        });
+      } else if (supportsImageInput) {
+        const imagePart = getImageDataPart(part);
+        if (!imagePart) {
+          continue;
+        }
+        contentParts.push({
+          type: 'input_image',
+          image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
+          detail: 'auto',
+        });
+      }
+    }
+
+    if (role === 'assistant') {
+      if (textContent) {
+        result.push({ role, content: textContent });
+      }
+    } else if (contentParts.length > 0) {
+      result.push({
+        role,
+        content: contentParts.some((part) => part.type === 'input_image') ? contentParts : textContent,
+      });
+    }
+
+    result.push(...toolResults);
+  }
+
+  return result;
+}
+
+export function convertResponsesTools(
+  tools: readonly vscode.LanguageModelChatTool[] | undefined,
+  enableStrict = false,
+): ResponsesToolDefinition[] | undefined {
+  if (!tools?.length) {
+    return undefined;
+  }
+
+  return tools.map((tool) => {
+    const parameters = sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} };
+    const strictParameters = enableStrict ? toStrictJsonSchema(parameters) : undefined;
+    return {
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      parameters: strictParameters ?? parameters,
+      ...(strictParameters ? { strict: true as const } : {}),
+    };
+  });
+}
+
+function mapResponsesRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'user' | 'assistant' {
+  if (role === vscode.LanguageModelChatMessageRole.Assistant) {
+    return 'assistant';
+  }
+  if ((role as number) === SYSTEM_ROLE) {
+    return 'system';
+  }
+  return 'user';
 }
 
 function getImageDataPart(part: unknown): { mimeType: string; data: Uint8Array } | undefined {

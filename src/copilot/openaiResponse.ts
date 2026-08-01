@@ -5,9 +5,14 @@ import {
   supportsImageInputForRoutedModel,
   supportsToolCallingForModel,
 } from '../relay/models';
-import type { ChatRequest, OpenAIUsage, RoutedModel } from '../relay/types';
+import type { ChatRequest, OpenAIUsage, ResponsesRequest, RoutedModel } from '../relay/types';
 import { toLanguageModelError } from './connection';
-import { convertMessages, convertTools } from './convert';
+import {
+  convertMessages,
+  convertResponsesInput,
+  convertResponsesTools,
+  convertTools,
+} from './convert';
 import {
   getConfiguredContextWindow,
   getConfiguredReasoningEffort,
@@ -94,10 +99,94 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
-      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage),
+      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-chat'),
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
+      onRefusal: (text) => {
+        diagnostics.onRefusal();
+        progress.report(new vscode.LanguageModelTextPart(text));
+      },
+      onToolCall: (toolCall) => {
+        const argumentsValue = parseToolArguments(toolCall.function.arguments);
+        diagnostics.onToolCall();
+        progress.report(new vscode.LanguageModelToolCallPart(
+          toolCall.id,
+          toolCall.function.name,
+          argumentsValue,
+        ));
+      },
+    }, token, routedModel.openai?.clientRequestId === true);
+    diagnostics.complete();
+  } catch (error) {
+    if (token.isCancellationRequested) {
+      diagnostics.cancelled();
+      throw new vscode.CancellationError();
+    }
+    diagnostics.failed(error);
+    throw toLanguageModelError(error);
+  }
+}
+
+/**
+ * OpenAI Responses API provider. The initial implementation is stateless:
+ * `store` is always disabled, `previous_response_id` is never sent, and a
+ * failed request never falls back to Chat Completions.
+ */
+export async function provideResponsesResponse(context: OpenAIResponseContext): Promise<void> {
+  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const supportsImageInput = supportsImageInputForRoutedModel(routedModel, config);
+  const tools = supportsToolCallingForModel(routedModel, config)
+    ? convertResponsesTools(options.tools, routedModel.openai?.strictTools === true)
+    : undefined;
+  const client = new RelayClient({
+    baseUrl: config.baseUrl,
+    apiKey,
+    requestHeaders: config.requestHeaders,
+    requestTimeoutMs: config.requestTimeoutMs,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs,
+  });
+  const input = convertResponsesInput(messages, supportsImageInput);
+  const hasImageInput = input.some((item) =>
+    'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
+  const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
+  const tokenLimit = !hasImageInput && config.sendMaxTokens
+    ? createResponsesTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
+    : {};
+  const request: ResponsesRequest = {
+    model: routedModel.upstreamId,
+    input,
+    stream: true,
+    store: false,
+    temperature: config.temperature,
+    // OpenAI recommends changing temperature or top_p, but not both.
+    top_p: config.temperature === undefined ? config.topP : undefined,
+    ...(tools?.length ? {
+      tools,
+      tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
+    } : {}),
+    ...tokenLimit,
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+    ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
+  };
+  logResponsesRequest(debug, config, request);
+  const diagnostics = createRequestDiagnostics(debug, config, 'Responses', model.id, input.length, request.tools?.length ?? 0);
+
+  try {
+    await client.streamResponses(request, {
+      onContent: (text) => {
+        diagnostics.onContent();
+        progress.report(new vscode.LanguageModelTextPart(text));
+      },
+      onReasoning: (text) => {
+        diagnostics.onReasoning();
+        reportThinking(progress, text);
+      },
+      onRequest: diagnostics.onRequest,
+      onRequestSettled: diagnostics.onRequestSettled,
+      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-responses'),
+      onResponse: diagnostics.onResponse,
+      onStreamEnd: diagnostics.onStreamEnd,
       onRefusal: (text) => {
         diagnostics.onRefusal();
         progress.report(new vscode.LanguageModelTextPart(text));
@@ -136,17 +225,34 @@ function logOpenAIRequest(debug: DebugLogger, config: ExtensionConfig, request: 
   const imageParts = countOpenAIImages(request);
   debug(
     config,
-    `OpenAI request: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, `
+    `OpenAI Chat Completions request: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, `
       + `imageParts=${imageParts}, promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `streamUsage=${Boolean(request.stream_options?.include_usage)}, `
       + `customEndpointImageCompatibility=${imageParts > 0}, bodyBytes=${bodyBytes}`,
   );
 }
 
-function logOpenAIUsage(debug: DebugLogger, config: ExtensionConfig, usage: OpenAIUsage): void {
+function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, request: ResponsesRequest): void {
+  const bodyBytes = Buffer.byteLength(JSON.stringify(request));
+  const imageParts = countResponsesImages(request);
   debug(
     config,
-    `OpenAI usage: prompt=${usage.prompt_tokens ?? 'n/a'}, `
+    `OpenAI Responses request: model=${request.model}, inputItems=${typeof request.input === 'string' ? 1 : request.input.length}, `
+      + `tools=${request.tools?.length ?? 0}, imageParts=${imageParts}, store=${Boolean(request.store)}, `
+      + `bodyBytes=${bodyBytes}`,
+  );
+}
+
+function logOpenAIUsage(
+  debug: DebugLogger,
+  config: ExtensionConfig,
+  usage: OpenAIUsage,
+  protocol: 'openai-chat' | 'openai-responses',
+): void {
+  const apiName = protocol === 'openai-chat' ? 'OpenAI Chat Completions' : 'OpenAI Responses';
+  debug(
+    config,
+    `${apiName} usage: prompt=${usage.prompt_tokens ?? 'n/a'}, `
       + `cached=${usage.prompt_tokens_details?.cached_tokens ?? 'n/a'}, `
       + `completion=${usage.completion_tokens ?? 'n/a'}, total=${usage.total_tokens ?? 'n/a'}, `
       + `reasoning=${usage.completion_tokens_details?.reasoning_tokens ?? 'n/a'}, `
@@ -158,6 +264,14 @@ function logOpenAIUsage(debug: DebugLogger, config: ExtensionConfig, usage: Open
 function countOpenAIImages(request: ChatRequest): number {
   return request.messages.reduce((count, message) =>
     count + (Array.isArray(message.content) ? message.content.filter((part) => part.type === 'image_url').length : 0), 0);
+}
+
+function countResponsesImages(request: ResponsesRequest): number {
+  if (typeof request.input === 'string') return 0;
+  return request.input.reduce((count, item) =>
+    count + ('content' in item && Array.isArray(item.content)
+      ? item.content.filter((part) => part.type === 'input_image').length
+      : 0), 0);
 }
 
 function supportsPromptCacheKey(model: RoutedModel): boolean {
@@ -172,6 +286,10 @@ function createTokenLimit(model: RoutedModel, value: number): Pick<ChatRequest, 
     case 'omit': return {};
     default: return { max_tokens: value };
   }
+}
+
+function createResponsesTokenLimit(model: RoutedModel, value: number): Pick<ResponsesRequest, 'max_output_tokens'> {
+  return model.openai?.tokenLimitField === 'omit' ? {} : { max_output_tokens: value };
 }
 
 function hashString(value: string): string {

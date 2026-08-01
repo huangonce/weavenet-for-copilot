@@ -99,7 +99,7 @@ async function loadModelsForProtocol(
   // Claude models. Route selection happens per model ID above.
   const filtered = filterModels(enrichModelsWithMetadata(routed), config);
   const withResponsesProbe = await applyResponsesProtocolProbes(client, filtered, config, debug, token);
-  debug(config, `Models loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
+  debug(config, `[models] loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
   return withResponsesProbe;
 }
 
@@ -188,7 +188,22 @@ function isClaudeModel(modelId: string): boolean {
 
 function dedupeModels(models: RoutedModel[]): RoutedModel[] {
   const byKey = new Map<string, RoutedModel>();
-  for (const model of models) byKey.set(`${model.route}:${model.upstreamId}`, model);
+  for (const model of models) {
+    const key = `${model.route}:${model.upstreamId}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, model);
+      continue;
+    }
+    // Explicitly configured models override discovery metadata, but the
+    // Responses probing verdict attached during discovery must survive the
+    // merge or dispatch would silently fall back to Chat Completions.
+    byKey.set(key, {
+      ...existing,
+      ...model,
+      openaiApi: existing.openaiApi ?? model.openaiApi,
+    });
+  }
   return [...byKey.values()].sort((a, b) => {
     if (a.protocol !== b.protocol) return a.protocol === 'openai' ? -1 : 1;
     return a.id.localeCompare(b.id);
