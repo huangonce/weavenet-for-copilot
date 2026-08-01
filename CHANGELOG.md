@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.5.2 - 2026-08-01
+
+- 修复思考模型拒绝 Responses 工具调用历史的问题：在每组 `function_call` 前回传非空 `reasoning` item（优先复用 VS Code 的思考内容），避免 DeepSeek 等 Relay 返回 `reasoning_text ... must be passed back` 的 HTTP 400。
+
 ## 0.5.1 - 2026-08-01
 
 - 修复 Responses 请求中 assistant `function_call` 被错误嵌套进消息 `content` 数组的问题；改为顶层 input item（与 `function_call_output` 同级），避免严格校验的 Relay（如 DeepSeek）对含工具调用历史的请求返回 HTTP 400。
