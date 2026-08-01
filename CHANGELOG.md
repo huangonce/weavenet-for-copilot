@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.5.8 - 2026-08-01
+
+- 修复切换到 Responses API 后提示词缓存命中率骤降的问题：Responses 请求此前未发送 `prompt_cache_key`，上游失去缓存亲和路由，多轮请求被分散到不同实例导致前缀缓存大量失效。现在 Responses 请求与 Chat Completions 一致：`openaiPromptCaching` 开启且模型支持时发送相同的 `prompt_cache_key`（含图像的请求仍省略该提示字段）。
+
 ## 0.5.7 - 2026-08-01
 
 - 新增 `openai.encryptedReasoning` 能力（Responses 协议，默认关闭）：启用后请求带 `include: ["reasoning.encrypted_content"]`，扩展把服务端返回的 reasoning item（真实 `id` + 加密载荷）原样寄存在会话历史的思考块上，下一轮按原位逐字回传。这是无状态占位回放的规范替代方案——推理内容由服务端加密、客户端无法构造，而回传加密件不需要服务端存储：请求仍为 `store: false`，且从不发送 `previous_response_id`。若宿主未能带回加密载荷，则退化为不发送任何 reasoning item（绝不发送缺少加密载荷的 reasoning item）。

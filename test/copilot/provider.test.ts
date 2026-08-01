@@ -793,6 +793,7 @@ describe('Provider chat responses', () => {
         max_output_tokens: 16,
         reasoning: { effort: 'max' },
         tool_choice: 'required',
+        prompt_cache_key: expect.stringMatching(/^weavenet-/),
       });
       expect(request).not.toHaveProperty('messages');
       expect(request).not.toHaveProperty('previous_response_id');

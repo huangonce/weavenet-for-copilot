@@ -248,6 +248,8 @@ export interface ResponsesRequest {
   reasoning?: { effort?: ReasoningEffort; summary?: 'auto' | 'disabled' };
   store?: false;
   parallel_tool_calls?: boolean;
+  /** Cache-affinity routing hint; same semantics as the Chat Completions field. */
+  prompt_cache_key?: string;
   /** Extra fields to include on output items, e.g. `["reasoning.encrypted_content"]`. */
   include?: string[];
   text?: { format?: { type: 'text' } };

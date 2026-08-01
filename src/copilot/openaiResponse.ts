@@ -151,6 +151,9 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
   const encryptedReasoning = routedModel.openai?.encryptedReasoning === true;
+  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
+    ? getOpenAIPromptCacheKey(config)
+    : undefined;
   const { input, instructions } = convertResponsesInput(
     messages,
     supportsImageInput,
@@ -169,6 +172,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     input,
     stream: true,
     store: false,
+    ...(!hasImageInput && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(encryptedReasoning ? { include: ['reasoning.encrypted_content'] } : {}),
     ...(instructions ? { instructions } : {}),
     temperature: config.temperature,
@@ -263,6 +267,7 @@ function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, reques
     config,
     `OpenAI Responses request: model=${request.model}, inputItems=${typeof request.input === 'string' ? 1 : request.input.length}, `
       + `tools=${request.tools?.length ?? 0}, imageParts=${imageParts}, store=${Boolean(request.store)}, `
+      + `promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `encryptedReasoning=${request.include?.includes('reasoning.encrypted_content') ?? false}, `
       + `replayedReasoningItems=${countReplayedReasoningItems(request)}, `
       + `bodyBytes=${bodyBytes}`,
