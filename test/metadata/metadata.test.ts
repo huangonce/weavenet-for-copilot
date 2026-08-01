@@ -104,9 +104,9 @@ describe('metadata safety', () => {
     }, { force: true });
 
     const [enriched, preserved, ambiguous] = enrichModelsWithOpenRouter([
-      { id: 'unique', pickerId: 'unique', upstreamId: 'unique', protocol: 'openai', route: 'openai', metadataSources: {} },
-      { id: 'vendor/unique', pickerId: 'vendor/unique', upstreamId: 'vendor/unique', protocol: 'openai', route: 'openai', maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } },
-      { id: 'ambiguous', pickerId: 'ambiguous', upstreamId: 'ambiguous', protocol: 'openai', route: 'openai', metadataSources: {} },
+      { id: 'unique', pickerId: 'unique', upstreamId: 'unique', protocol: 'openai', route: 'openai', catalogSource: 'discovery', metadataSources: {} },
+      { id: 'vendor/unique', pickerId: 'vendor/unique', upstreamId: 'vendor/unique', protocol: 'openai', route: 'openai', catalogSource: 'discovery', maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } },
+      { id: 'ambiguous', pickerId: 'ambiguous', upstreamId: 'ambiguous', protocol: 'openai', route: 'openai', catalogSource: 'discovery', metadataSources: {} },
     ]);
     expect(enriched).toMatchObject({ maxInputTokens: 200_000, imageInput: true, contextWindows: [200_000], metadataSources: { maxInputTokens: 'openrouter' } });
     expect(preserved).toMatchObject({ maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } });

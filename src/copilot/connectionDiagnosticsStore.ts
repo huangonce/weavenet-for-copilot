@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type * as vscode from 'vscode';
+import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile } from '../config/config';
 import { normalizeRelayBaseUrl } from '../relay/url';
 import {
@@ -31,6 +32,15 @@ const SKIP_REASONS: readonly ConnectionProbeSkipReason[] = ['modelsUnavailable',
 
 export interface ConnectionFingerprintOptions {
   readonly anthropicVersion?: string;
+}
+
+export function diagnosticsOptions(): ConnectionFingerprintOptions {
+  return { anthropicVersion: getConfig().anthropicVersion };
+}
+
+export function currentProfileFingerprint(profileId: string): string | undefined {
+  const profile = getProfileConfiguration().profiles.find((entry) => entry.id === profileId);
+  return profile ? fingerprintConnection(profile, diagnosticsOptions()) : undefined;
 }
 
 export function fingerprintConnection(

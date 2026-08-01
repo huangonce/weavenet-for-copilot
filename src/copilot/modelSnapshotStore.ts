@@ -109,7 +109,11 @@ function parseRoutedModel(value: unknown): RoutedModel | undefined {
     || (value.protocol !== 'openai' && value.protocol !== 'claude')
     || (value.route !== 'openai' && value.route !== 'chatgpt' && value.route !== 'claude')
   ) return undefined;
-  return value as unknown as RoutedModel;
+  return {
+    ...(value as unknown as RoutedModel),
+    // 旧格式快照没有 catalogSource；恢复时归入 discovery（该字段不参与分派，仅作来源元数据）。
+    catalogSource: value.catalogSource === 'configured' ? 'configured' : 'discovery',
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

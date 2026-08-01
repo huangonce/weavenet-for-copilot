@@ -1,46 +1,29 @@
 import * as vscode from 'vscode';
 import { AuthManager } from '../auth/auth';
 import { getConfig, getProfileConfiguration } from '../config/config';
-import type { ConfiguredModel, ConnectionProfile } from '../config/config';
-import {
-  CHATGPT_API_KEY_SECRET,
-  CLAUDE_API_KEY_SECRET,
-  CONFIG_SECTION,
-  LEGACY_API_KEY_SECRET,
-  OPENAI_API_KEY_SECRET,
-  RELAY_API_KEY_SECRET,
-} from '../constants';
-import { RelayClient } from '../relay/client';
-import type { RelayEndpointTestResult } from '../relay/client';
+import type { ConnectionProfile } from '../config/config';
+import { CONFIG_SECTION } from '../constants';
+import { safeHost } from './connection';
 import { toChatInformation } from '../relay/models';
-import type { ModelsResponse, RoutedModel } from '../relay/types';
+import { provideClaudeResponse } from './claudeResponse';
 import {
-  ConnectionTestError,
-  connectionErrorMessage,
-  describeConnectionTestError,
-  safeHost,
-} from './connection';
-import type { ConnectionTestFailure } from './connection';
-import {
-  deriveConnectionCapabilities,
-  deriveDiagnosticsOverall,
-} from './connectionDiagnostics';
-import type {
-  ConnectionDiagnosticsSnapshot,
-  ConnectionProbeId,
-  ConnectionProbeResult,
-  ConnectionProbeVerdict,
-} from './connectionDiagnostics';
-import { ConnectionDiagnosticsStore, fingerprintConnection } from './connectionDiagnosticsStore';
+  ConnectionRuntimeManager,
+  isCancellationError,
+  isWeaveNetSecretKey,
+} from './connectionRuntimeManager';
+import type { ConnectionStatus, ModelRefreshIntent } from './connectionRuntimeManager';
+import { catalogRevision } from './connectionRuntimeManager';
+import { ConnectionDiagnosticsStore } from './connectionDiagnosticsStore';
+import { ConnectionTestService } from './connectionTestService';
+import type { ConnectionTestResult } from './connectionTestService';
 import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
-import { provideClaudeResponse } from './claudeResponse';
-import { loadAllModels } from './modelRegistry';
+import { ModelBindingRegistry } from './modelBindingRegistry';
+import { ModelCatalogService } from './modelCatalogService';
 import { ModelSnapshotStore } from './modelSnapshotStore';
-import type { ModelSnapshotRecord } from './modelSnapshotStore';
-import { responsesProbeCache } from '../relay/responsesProbeCache';
 import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
 import { formatLogError } from './requestDiagnostics';
+import { resolveOpenAIApiVariant } from '../relay/models';
 
 export {
   ConnectionTestError,
@@ -57,65 +40,22 @@ export {
   parseToolArguments,
   toClaudeThinking,
 } from './helpers';
-
-type ModelRefreshIntent = 'passive' | 'invalidate';
-
-export interface ConnectionStatus {
-  phase: 'unconfigured' | 'keyMissing' | 'refreshing' | 'ready' | 'degraded' | 'error';
-  connectionCount: number;
-  modelCount: number;
-  warningCount: number;
-  refreshingCount: number;
-  connections: readonly ConnectionStatusEntry[];
-  message?: string;
-}
-
-export interface ConnectionStatusEntry {
-  profileId: string;
-  connectionName: string;
-  host?: string;
-  phase: Exclude<ConnectionStatus['phase'], 'unconfigured'>;
-  modelCount: number;
-  modelRefreshedAt?: number;
-  lastDiagnostics?: ConnectionDiagnosticsSnapshot;
-  message?: string;
-}
-
-export type ConnectionTestResult = ConnectionDiagnosticsSnapshot;
-
-interface ConnectionRuntime {
-  profile: ConnectionProfile;
-  revision: string;
-  models: RoutedModel[];
-  snapshots: Map<RoutedModel['route'], RoutedModel[]>;
-  generation: number;
-  resolved: boolean;
-  phase: ConnectionStatusEntry['phase'];
-  refreshedAt?: number;
-  message?: string;
-  lastDiagnostics?: ConnectionDiagnosticsSnapshot;
-  refreshTask?: Promise<void>;
-}
-
-interface BoundModel {
-  readonly profileId: string;
-  readonly revision: string;
-  readonly model: RoutedModel;
-}
+export type { ConnectionStatus, ConnectionStatusEntry } from './connectionRuntimeManager';
+export type { ConnectionTestResult } from './connectionTestService';
 
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly connectionStatusEmitter = new vscode.EventEmitter<ConnectionStatus>();
   private readonly output = vscode.window.createOutputChannel('WeaveNet');
   private readonly auth: AuthManager;
-  private readonly runtimes = new Map<string, ConnectionRuntime>();
-  private readonly modelBindings = new Map<string, BoundModel>();
+  private readonly diagnosticsStore: ConnectionDiagnosticsStore;
+  private readonly modelCatalog: ModelCatalogService;
+  private readonly runtimeManager: ConnectionRuntimeManager;
+  private readonly bindingRegistry = new ModelBindingRegistry();
+  private readonly connectionTest: ConnectionTestService;
   private connectionStatus: ConnectionStatus = {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
   };
-  private readonly diagnosticsStore: ConnectionDiagnosticsStore;
-  private readonly snapshotStore: ModelSnapshotStore;
-  private readonly connectionTestTasks = new Map<string, Promise<ConnectionTestResult>>();
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
   readonly onDidChangeConnectionStatus = this.connectionStatusEmitter.event;
@@ -123,20 +63,41 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   constructor(context: vscode.ExtensionContext) {
     this.auth = new AuthManager(context.secrets);
     this.diagnosticsStore = new ConnectionDiagnosticsStore(context.globalState);
-    this.snapshotStore = new ModelSnapshotStore(context.globalState);
-    this.syncProfiles();
+    this.modelCatalog = new ModelCatalogService(new ModelSnapshotStore(context.globalState), this.debug.bind(this));
+    this.runtimeManager = new ConnectionRuntimeManager({
+      auth: this.auth,
+      diagnosticsStore: this.diagnosticsStore,
+      catalog: this.modelCatalog,
+      debug: this.debug.bind(this),
+      rebuildBindings: () => {
+        this.bindingRegistry.rebuild(this.runtimeManager.getRuntimes());
+      },
+      onStatusChanged: (status) => {
+        this.connectionStatus = status;
+        this.connectionStatusEmitter.fire(status);
+      },
+      onCatalogChanged: () => {
+        this.changeEmitter.fire();
+      },
+    });
+    this.connectionTest = new ConnectionTestService({
+      auth: this.auth,
+      diagnosticsStore: this.diagnosticsStore,
+      onTestStatus: (profileId, fingerprint, status) => this.runtimeManager.setTestConnectionStatus(profileId, fingerprint, status),
+    });
+    this.runtimeManager.syncProfiles();
     context.subscriptions.push(
       this.changeEmitter,
       this.connectionStatusEmitter,
       this.output,
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(CONFIG_SECTION)) {
-          void this.reconcileConfiguration();
+          void this.runtimeManager.reconcileConfiguration();
         }
       }),
       context.secrets.onDidChange((event) => {
         if (isWeaveNetSecretKey(event.key)) {
-          void this.handleSecretChange(event.key);
+          void this.runtimeManager.handleSecretChange(event.key);
         }
       }),
     );
@@ -163,113 +124,24 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   async clearConnectionDiagnostics(profile: ConnectionProfile): Promise<void> {
-    await this.diagnosticsStore.delete(profile, diagnosticsOptions());
+    await this.connectionTest.clearDiagnostics(profile);
   }
 
   async clearAllConnectionDiagnostics(): Promise<void> {
-    await this.diagnosticsStore.clear();
+    await this.connectionTest.clearAllDiagnostics();
   }
 
-  async testConnection(profile: ConnectionProfile): Promise<ConnectionTestResult> {
-    const fingerprint = fingerprintConnection(profile, diagnosticsOptions());
-    const existing = this.connectionTestTasks.get(fingerprint);
-    if (existing) return existing;
-    const task = this.runConnectionTest(profile, fingerprint).finally(() => {
-      if (this.connectionTestTasks.get(fingerprint) === task) this.connectionTestTasks.delete(fingerprint);
-    });
-    this.connectionTestTasks.set(fingerprint, task);
-    return task;
-  }
-
-  private async runConnectionTest(profile: ConnectionProfile, fingerprint: string): Promise<ConnectionTestResult> {
-    const host = safeHost(profile.baseUrl) ?? 'unknown host';
-    if (!safeHost(profile.baseUrl)) {
-      throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must be a valid http(s) URL.' });
-    }
-    const apiKey = await this.auth.getApiKey(profile);
-    if (!apiKey) {
-      this.setTestConnectionStatus(profile.id, fingerprint, { phase: 'keyMissing', message: 'API key is required.' });
-      throw new ConnectionTestError({ category: 'authentication', message: 'API key is required for this connection.' });
-    }
-    const testedAt = Date.now();
-    try {
-      const config = getConfig(profile);
-      const client = new RelayClient({
-        baseUrl: profile.baseUrl,
-        apiKey,
-        requestHeaders: profile.requestHeaders ?? {},
-        anthropicVersion: config.anthropicVersion,
-        requestTimeoutMs: config.requestTimeoutMs,
-        streamIdleTimeoutMs: config.streamIdleTimeoutMs,
-      });
-      const modelsStartedAt = Date.now();
-      const { models, diagnostic } = await client.testModels();
-      const modelCount = Array.isArray(models.data) ? models.data.length : 0;
-      const probes: ConnectionProbeResult[] = [successfulProbe('models', modelsStartedAt, diagnostic)];
-      const candidates = selectProbeCandidates(profile.models ?? [], models);
-      if (candidates.openai) {
-        const model = candidates.openai;
-        probes.push(await runProtocolProbe('openai.nonStreaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, false)));
-        probes.push(await runProtocolProbe('openai.streaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, true)));
-        // A free GET reports whether the relay exposes /responses at all. It is
-        // informational only and never downgrades overall health on its own.
-        probes.push(await runOpenAIResponsesProbe(client));
-      } else {
-        probes.push(skippedProbe('openai.nonStreaming', '/chat/completions', 'noOpenAIModel'));
-        probes.push(skippedProbe('openai.streaming', '/chat/completions', 'noOpenAIModel'));
-        probes.push(skippedProbe('openai.responses', '/responses', 'noOpenAIModel'));
-      }
-      if (candidates.claude) {
-        const model = candidates.claude;
-        probes.push(await runProtocolProbe('claude.nonStreaming', '/messages', model, () => client.testClaudeMessages(model, false)));
-        probes.push(await runProtocolProbe('claude.streaming', '/messages', model, () => client.testClaudeMessages(model, true)));
-      } else {
-        probes.push(skippedProbe('claude.nonStreaming', '/messages', 'noClaudeModel'));
-        probes.push(skippedProbe('claude.streaming', '/messages', 'noClaudeModel'));
-      }
-      const completedAt = Date.now();
-      const result: ConnectionDiagnosticsSnapshot = {
-        schemaVersion: 2,
-        profileId: profile.id,
-        fingerprint,
-        connectionName: profile.name,
-        host,
-        testedAt,
-        completedAt,
-        elapsedMs: completedAt - testedAt,
-        overall: deriveDiagnosticsOverall(probes),
-        modelCount,
-        capabilities: deriveConnectionCapabilities(probes),
-        probes,
-      };
-      if (currentProfileFingerprint(profile.id) === fingerprint) {
-        await this.diagnosticsStore.update(result);
-        this.setTestConnectionStatus(profile.id, fingerprint, {
-          phase: result.overall === 'success' ? 'ready' : 'degraded',
-          lastDiagnostics: result,
-          message: result.overall === 'degraded' ? 'Connection capabilities are partially available or unknown.' : undefined,
-        });
-      }
-      return result;
-    } catch (error) {
-      const failure = describeConnectionTestError(error);
-      this.setTestConnectionStatus(profile.id, fingerprint, { phase: 'error', message: failure.message });
-      throw new ConnectionTestError(failure);
-    }
+  testConnection(profile: ConnectionProfile): Promise<ConnectionTestResult> {
+    return this.connectionTest.test(profile);
   }
 
   async refreshModels(intent: ModelRefreshIntent = 'passive', notifySuccess = false, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
-    const runtimes = this.syncProfiles();
-    await mapWithConcurrency(runtimes, 3, async (runtime) => {
-      await this.requestConnectionRefresh(runtime, intent === 'invalidate', token, forceProbe);
-    });
+    await this.runtimeManager.refreshAll(intent === 'invalidate', token, forceProbe);
     if (notifySuccess) this.showRefreshSummary();
   }
 
   async refreshConnection(profileId: string, force = true): Promise<void> {
-    this.syncProfiles();
-    const runtime = this.runtimes.get(profileId);
-    if (runtime) await this.requestConnectionRefresh(runtime, force);
+    await this.runtimeManager.refreshConnection(profileId, force);
   }
 
   async provideLanguageModelChatInformation(
@@ -283,10 +155,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
       }
     }
-    const entries = [...this.modelBindings.values()];
+    const entries = this.bindingRegistry.all();
     const keyStates = new Map<string, boolean>();
     await Promise.all([...new Set(entries.map(({ profileId }) => profileId))].map(async (profileId) => {
-      const runtime = this.runtimes.get(profileId);
+      const runtime = this.runtimeManager.getRuntime(profileId);
       if (!runtime) return;
       try {
         keyStates.set(profileId, await this.auth.hasApiKey(runtime.profile));
@@ -296,7 +168,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       }
     }));
     return entries.flatMap(({ profileId, model }) => {
-      const runtime = this.runtimes.get(profileId);
+      const runtime = this.runtimeManager.getRuntime(profileId);
       if (!runtime) return [];
       const hasApiKey = keyStates.get(profileId) === true;
       const info = toChatInformation(model, getConfig(runtime.profile), hasApiKey, {
@@ -314,11 +186,11 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
-    const binding = this.modelBindings.get(model.id);
+    const binding = this.bindingRegistry.get(model.id);
     if (!binding) {
       throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
     }
-    const runtime = this.runtimes.get(binding.profileId);
+    const runtime = this.runtimeManager.getRuntime(binding.profileId);
     if (!runtime || runtime.revision !== binding.revision) {
       throw vscode.LanguageModelError.NotFound('This model connection changed. Refresh models and select it again.');
     }
@@ -344,7 +216,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       debug: this.debug.bind(this),
     };
     if (routedModel.protocol === 'claude') await provideClaudeResponse(context);
-    else if (routedModel.openaiApi === 'responses') await provideResponsesResponse(context);
+    else if (resolveOpenAIApiVariant(routedModel) === 'responses') await provideResponsesResponse(context);
     else await provideOpenAIResponse(context);
   }
 
@@ -370,10 +242,6 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
-  private reportRouteRefreshFailure(config: ReturnType<typeof getConfig>, route: RoutedModel['route'], error: unknown): void {
-    this.debug(config, `[models] ${route} route unavailable; continuing with successful routes: ${formatLogError(error)}`);
-  }
-
   async provideTokenCount(
     _model: vscode.LanguageModelChatInformation,
     text: string | vscode.LanguageModelChatRequestMessage,
@@ -394,228 +262,6 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     return tokens;
   }
 
-  private syncProfiles(): ConnectionRuntime[] {
-    const profiles = getProfileConfiguration().profiles;
-    const ids = new Set(profiles.map((profile) => profile.id));
-    let changed = false;
-    for (const [id, runtime] of this.runtimes) {
-      if (ids.has(id)) continue;
-      responsesProbeCache.clearProfile(id);
-      void this.snapshotStore.deleteProfile(id);
-      runtime.generation++;
-      this.runtimes.delete(id);
-      changed = true;
-    }
-    for (const profile of profiles) {
-      const revision = catalogRevision(profile);
-      const existing = this.runtimes.get(profile.id);
-      if (!existing) {
-        // Restore the last successful model catalog so the picker stays
-        // populated even if the relay is unreachable right after a restart.
-        const restored = this.snapshotStore.get(profile.id);
-        this.runtimes.set(profile.id, {
-          profile, revision,
-          models: restored?.models ?? [],
-          snapshots: restored ? snapshotMap(restored) : new Map(),
-          generation: 0, resolved: false, phase: 'refreshing',
-          lastDiagnostics: this.diagnosticsStore.get(profile, diagnosticsOptions()),
-        });
-        changed = true;
-      } else if (existing.revision !== revision) {
-        // baseUrl, headers or fixed models changed: prior probe verdicts and
-        // model snapshots no longer apply to this profile.
-        responsesProbeCache.clearProfile(profile.id);
-        void this.snapshotStore.deleteProfile(profile.id);
-        existing.generation++;
-        existing.profile = profile;
-        existing.revision = revision;
-        existing.models = [];
-        existing.snapshots.clear();
-        existing.resolved = false;
-        existing.phase = 'refreshing';
-        existing.message = undefined;
-        existing.lastDiagnostics = this.diagnosticsStore.get(profile, diagnosticsOptions());
-        changed = true;
-      } else if (existing.profile.name !== profile.name) {
-        // `catalogRevision` already covers baseUrl, requestHeaders, include/
-        // excludeModels and models; name is the only remaining user-visible
-        // field, so compare it explicitly instead of deep-serializing the
-        // whole profile (which is order-sensitive and slower).
-        existing.profile = profile;
-        changed = true;
-      }
-    }
-    if (changed) this.rebuildAggregates();
-    return profiles.map((profile) => this.runtimes.get(profile.id)).filter((runtime): runtime is ConnectionRuntime => Boolean(runtime));
-  }
-
-  private async reconcileConfiguration(): Promise<void> {
-    const runtimes = this.syncProfiles().filter((runtime) => !runtime.resolved);
-    if (runtimes.length) await mapWithConcurrency(runtimes, 3, (runtime) => this.requestConnectionRefresh(runtime, false));
-    else this.changeEmitter.fire();
-  }
-
-  private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
-    if (force) {
-      if (runtime.resolved || runtime.refreshTask) runtime.generation++;
-      runtime.resolved = false;
-    }
-    if (runtime.resolved && !force) return Promise.resolve();
-    if (runtime.refreshTask) {
-      // A cancelled picker call stops waiting immediately; the shared refresh
-      // continues for whoever started it.
-      return token ? Promise.race([runtime.refreshTask, cancelledPromise(token)]) : runtime.refreshTask;
-    }
-    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime, token, forceProbe));
-    const sharedTask = task.finally(() => {
-      if (runtime.refreshTask === sharedTask) runtime.refreshTask = undefined;
-    });
-    runtime.refreshTask = sharedTask;
-    return sharedTask;
-  }
-
-  private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
-    while (this.runtimes.get(runtime.profile.id) === runtime) {
-      const generation = runtime.generation;
-      await this.refreshRuntimeOnce(runtime, generation, token, forceProbe);
-      if (runtime.generation === generation) return;
-    }
-  }
-
-  private async refreshRuntimeOnce(runtime: ConnectionRuntime, generation: number, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
-    const profile = runtime.profile;
-    const revision = runtime.revision;
-    let apiKey: string | undefined;
-    try {
-      apiKey = await this.auth.getApiKey(profile);
-    } catch (error) {
-      if (!this.isCurrentRuntime(runtime, generation, revision)) return;
-      runtime.resolved = true;
-      runtime.phase = runtime.models.length ? 'degraded' : 'error';
-      runtime.message = `Could not read the API key: ${connectionErrorMessage(error)}`;
-      runtime.refreshedAt = Date.now();
-      this.debug(getConfig(profile), `[models] connection=${profile.name}, API key read failed: ${formatLogError(error)}`);
-      this.rebuildAggregates();
-      return;
-    }
-    if (!this.isCurrentRuntime(runtime, generation, revision)) return;
-    if (!apiKey) {
-      runtime.models = [];
-      runtime.snapshots.clear();
-      await this.clearSnapshot(profile);
-      runtime.resolved = true;
-      runtime.phase = 'keyMissing';
-      runtime.message = 'API key required.';
-      runtime.refreshedAt = Date.now();
-      this.rebuildAggregates();
-      return;
-    }
-    runtime.phase = 'refreshing';
-    runtime.message = undefined;
-    this.rebuildStatus();
-    const config = getConfig(profile);
-    try {
-      const result = await loadAllModels(config, apiKey, this.debug.bind(this), new Map(runtime.snapshots), token, forceProbe);
-      if (!this.isCurrentRuntime(runtime, generation, revision)) return;
-      runtime.models = result.models;
-      runtime.snapshots = new Map(result.snapshots);
-      runtime.resolved = true;
-      runtime.phase = result.partial ? 'degraded' : 'ready';
-      runtime.message = result.partial ? 'Some Relay model routes could not be refreshed.' : undefined;
-      runtime.refreshedAt = Date.now();
-      for (const failure of result.failedRoutes) this.reportRouteRefreshFailure(config, failure.route, failure.error);
-      await this.updateSnapshot(profile.id, runtime.snapshots, result.models);
-    } catch (error) {
-      if (!this.isCurrentRuntime(runtime, generation, revision)) return;
-      if (isCancellationError(error)) return;
-      runtime.resolved = true;
-      runtime.phase = runtime.models.length ? 'degraded' : 'error';
-      runtime.message = connectionErrorMessage(error);
-      runtime.refreshedAt = Date.now();
-      this.debug(config, `[models] connection=${profile.name}, refresh failed: ${formatLogError(error)}`);
-    }
-    this.rebuildAggregates();
-  }
-
-  private isCurrentRuntime(runtime: ConnectionRuntime, generation: number, revision: string): boolean {
-    return this.runtimes.get(runtime.profile.id) === runtime && runtime.generation === generation && runtime.revision === revision;
-  }
-
-  private rebuildAggregates(): void {
-    this.modelBindings.clear();
-    for (const runtime of this.runtimes.values()) {
-      for (const original of runtime.models) {
-        const model = { ...original, pickerId: namespacedPickerId(runtime.profile.id, original.pickerId) };
-        this.modelBindings.set(model.pickerId, { profileId: runtime.profile.id, revision: runtime.revision, model });
-      }
-    }
-    this.rebuildStatus();
-    this.changeEmitter.fire();
-  }
-
-  private rebuildStatus(): void {
-    const connections: ConnectionStatusEntry[] = [...this.runtimes.values()].map((runtime) => ({
-      profileId: runtime.profile.id,
-      connectionName: runtime.profile.name,
-      host: safeHost(runtime.profile.baseUrl),
-      phase: runtime.phase,
-      modelCount: runtime.models.length,
-      modelRefreshedAt: runtime.refreshedAt,
-      lastDiagnostics: runtime.lastDiagnostics,
-      message: runtime.message,
-    }));
-    const modelCount = connections.reduce((total, connection) => total + connection.modelCount, 0);
-    const refreshingCount = connections.filter((connection) => connection.phase === 'refreshing').length;
-    const warningCount = connections.filter((connection) => connection.phase === 'keyMissing' || connection.phase === 'degraded' || connection.phase === 'error').length;
-    let phase: ConnectionStatus['phase'];
-    if (!connections.length) phase = 'unconfigured';
-    else if (refreshingCount) phase = 'refreshing';
-    else if (warningCount) phase = modelCount ? 'degraded' : connections.every((entry) => entry.phase === 'keyMissing') ? 'keyMissing' : 'error';
-    else phase = 'ready';
-    this.connectionStatus = { phase, connectionCount: connections.length, modelCount, warningCount, refreshingCount, connections };
-    this.connectionStatusEmitter.fire(this.connectionStatus);
-  }
-
-  private setTestConnectionStatus(
-    profileId: string,
-    fingerprint: string,
-    status: Pick<ConnectionRuntime, 'phase' | 'message' | 'lastDiagnostics'>,
-  ): void {
-    if (currentProfileFingerprint(profileId) !== fingerprint) return;
-    const runtime = this.runtimes.get(profileId);
-    if (!runtime) return;
-    runtime.phase = status.phase;
-    runtime.message = status.message;
-    if (status.lastDiagnostics !== undefined) runtime.lastDiagnostics = status.lastDiagnostics;
-    this.rebuildStatus();
-  }
-
-  private async handleSecretChange(secretKey: string): Promise<void> {
-    this.syncProfiles();
-    const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
-    if (!profileId) {
-      await this.diagnosticsStore.clear();
-      await this.snapshotStore.clear();
-      responsesProbeCache.clear();
-      for (const runtime of this.runtimes.values()) {
-        runtime.lastDiagnostics = undefined;
-        runtime.generation++;
-        runtime.resolved = false;
-      }
-      await this.refreshModels();
-      return;
-    }
-    await this.diagnosticsStore.deleteProfile(profileId);
-    await this.snapshotStore.deleteProfile(profileId);
-    responsesProbeCache.clearProfile(profileId);
-    const runtime = this.runtimes.get(profileId);
-    if (!runtime) return;
-    runtime.lastDiagnostics = undefined;
-    runtime.generation++;
-    runtime.resolved = false;
-    await this.requestConnectionRefresh(runtime, false);
-  }
-
   private showRefreshSummary(): void {
     const total = this.connectionStatus.connectionCount;
     const warnings = this.connectionStatus.warningCount;
@@ -624,219 +270,4 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       `WeaveNet loaded ${this.connectionStatus.modelCount} model(s) from ${healthy}/${total} connection(s)${warnings ? `; ${warnings} warning(s)` : ''}.`,
     );
   }
-
-  /** Persists the successful catalog; storage failures never affect refresh. */
-  private async updateSnapshot(
-    profileId: string,
-    snapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]>,
-    models: readonly RoutedModel[],
-  ): Promise<void> {
-    try {
-      await this.snapshotStore.update(profileId, snapshots, models);
-    } catch (error) {
-      this.debug(getConfig(), `[models] connection=${profileId}, snapshot persist failed: ${formatLogError(error)}`);
-    }
-  }
-
-  private async clearSnapshot(profile: ConnectionProfile): Promise<void> {
-    try {
-      await this.snapshotStore.deleteProfile(profile.id);
-    } catch (error) {
-      this.debug(getConfig(profile), `[models] connection=${profile.name}, snapshot clear failed: ${formatLogError(error)}`);
-    }
-  }
 }
-
-function catalogRevision(profile: ConnectionProfile): string {
-  const config = getConfig(profile);
-  return JSON.stringify({
-    baseUrl: config.baseUrl,
-    requestHeaders: config.requestHeaders,
-    includeModels: config.includeModels.map((entry) => entry.source),
-    excludeModels: config.excludeModels.map((entry) => entry.source),
-    models: config.models,
-  });
-}
-
-function namespacedPickerId(profileId: string, localPickerId: string): string {
-  return `weavenet::${profileId}::${encodeURIComponent(localPickerId)}`;
-}
-
-function snapshotMap(record: ModelSnapshotRecord): Map<RoutedModel['route'], RoutedModel[]> {
-  const map = new Map<RoutedModel['route'], RoutedModel[]>();
-  for (const route of ['openai', 'chatgpt', 'claude'] as const) {
-    if (record.snapshots[route].length > 0) map.set(route, record.snapshots[route]);
-  }
-  return map;
-}
-
-async function mapWithConcurrency<T>(
-  values: readonly T[],
-  concurrency: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (next < values.length) {
-      const value = values[next++];
-      await operation(value);
-    }
-  });
-  await Promise.all(workers);
-}
-
-function isClaudeModel(modelId: string): boolean {
-  return modelId.toLowerCase().startsWith('claude-');
-}
-
-function isCancellationError(error: unknown): boolean {
-  return error instanceof vscode.CancellationError
-    || (error instanceof Error && (error.name === 'CancellationError' || error.name === 'AbortError'));
-}
-
-function cancelledPromise(token: vscode.CancellationToken): Promise<never> {
-  return new Promise((_, reject) => {
-    if (token.isCancellationRequested) {
-      reject(new vscode.CancellationError());
-      return;
-    }
-    const onCancel = token.onCancellationRequested as unknown;
-    if (typeof onCancel === 'function') {
-      (onCancel as (listener: () => void) => void)(() => reject(new vscode.CancellationError()));
-    }
-  });
-}
-
-function diagnosticsOptions(): { anthropicVersion: string } {
-  return { anthropicVersion: getConfig().anthropicVersion };
-}
-
-function currentProfileFingerprint(profileId: string): string | undefined {
-  const profile = getProfileConfiguration().profiles.find((entry) => entry.id === profileId);
-  return profile ? fingerprintConnection(profile, diagnosticsOptions()) : undefined;
-}
-
-function selectProbeCandidates(
-  configured: readonly ConfiguredModel[],
-  models: ModelsResponse,
-): { openai?: string; claude?: string } {
-  const explicitOpenAI = configured.find((model) => model.route === 'openai' || model.route === 'chatgpt')?.id;
-  const explicitClaude = configured.find((model) => model.route === 'claude')?.id;
-  const catalog = models.data ?? [];
-  const claude = explicitClaude ?? catalog.find((model) => isClaudeModel(model.id))?.id;
-  const openai = explicitOpenAI ?? catalog.find((model) => model.id !== claude && !isClaudeModel(model.id))?.id;
-  return { openai, claude };
-}
-
-function successfulProbe(
-  probe: ConnectionProbeId,
-  startedAt: number,
-  diagnostic: RelayEndpointTestResult,
-  evidenceModelId?: string,
-): ConnectionProbeResult {
-  return {
-    probe,
-    verdict: 'supported',
-    endpointPath: diagnostic.endpoint,
-    startedAt,
-    elapsedMs: Math.max(0, Date.now() - startedAt),
-    status: diagnostic.status,
-    responseType: diagnostic.responseType,
-    requestId: diagnostic.requestId,
-    evidenceModelId,
-    termination: diagnostic.termination,
-  };
-}
-
-async function runProtocolProbe(
-  probe: ConnectionProbeId,
-  endpointPath: RelayEndpointTestResult['endpoint'],
-  evidenceModelId: string,
-  operation: () => Promise<RelayEndpointTestResult>,
-): Promise<ConnectionProbeResult> {
-  const startedAt = Date.now();
-  try {
-    return successfulProbe(probe, startedAt, await operation(), evidenceModelId);
-  } catch (error) {
-    const failure = describeConnectionTestError(error);
-    return {
-      probe,
-      verdict: probeVerdictForFailure(failure),
-      endpointPath,
-      startedAt,
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-      status: failure.status,
-      responseType: failure.responseType,
-      requestId: failure.requestId,
-      evidenceModelId,
-      failure,
-    };
-  }
-}
-
-function probeVerdictForFailure(failure: ConnectionTestFailure): ConnectionProbeVerdict {
-  return failure.category === 'notFound' ? 'unsupported' : 'indeterminate';
-}
-
-async function runOpenAIResponsesProbe(client: RelayClient): Promise<ConnectionProbeResult> {
-  const startedAt = Date.now();
-  try {
-    // probeResponsesEndpoint is a free GET and never throws; it maps network
-    // failures to 'unknown', which we surface as 'indeterminate'.
-    const availability = await client.probeResponsesEndpoint();
-    return {
-      probe: 'openai.responses',
-      verdict: availability === 'supported' ? 'supported' : availability === 'unsupported' ? 'unsupported' : 'indeterminate',
-      endpointPath: '/responses',
-      startedAt,
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-    };
-  } catch (error) {
-    const failure = describeConnectionTestError(error);
-    return {
-      probe: 'openai.responses',
-      verdict: 'indeterminate',
-      endpointPath: '/responses',
-      startedAt,
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-      status: failure.status,
-      responseType: failure.responseType,
-      requestId: failure.requestId,
-      failure,
-    };
-  }
-}
-
-function skippedProbe(
-  probe: ConnectionProbeId,
-  endpointPath: '/chat/completions' | '/responses' | '/messages',
-  skippedReason: 'noOpenAIModel' | 'noClaudeModel',
-): ConnectionProbeResult {
-  return { probe, verdict: 'skipped', endpointPath, startedAt: Date.now(), elapsedMs: 0, skippedReason };
-}
-
-function profileIdFromSecretKey(key: string): string | undefined {
-  const prefix = `${RELAY_API_KEY_SECRET}.profileId.`;
-  return key.startsWith(prefix) ? key.slice(prefix.length) : undefined;
-}
-
-function profileIdFromLegacySecretKey(key: string): string | undefined {
-  const prefix = `${RELAY_API_KEY_SECRET}.profile.`;
-  if (!key.startsWith(prefix)) return undefined;
-  try {
-    const name = decodeURIComponent(key.slice(prefix.length));
-    return getProfileConfiguration().profiles.find((profile) => profile.name === name)?.id;
-  }
-  catch { return undefined; }
-}
-
-function isWeaveNetSecretKey(key: string): boolean {
-  return key === RELAY_API_KEY_SECRET || key.startsWith(`${RELAY_API_KEY_SECRET}.profile.`) ||
-    key.startsWith(`${RELAY_API_KEY_SECRET}.profileId.`) || key === LEGACY_API_KEY_SECRET || [
-    OPENAI_API_KEY_SECRET,
-    CHATGPT_API_KEY_SECRET,
-    CLAUDE_API_KEY_SECRET,
-  ].some((secretKey) => key === secretKey);
-}
-
-// Protocol request handling lives in openaiResponse.ts and claudeResponse.ts.

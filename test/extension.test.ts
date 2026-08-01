@@ -8,15 +8,14 @@ import {
   copyConnection,
   deleteConnection,
   editConnection,
-  errorMessage,
   formatConnectionFailure,
-  queueConnectionMutation,
-  renderStatus,
-  saveProfiles,
+  registerConnectionCommands,
   setDefaultConnection,
   testConnection,
   validateProfileName,
-} from '../src/extension';
+} from '../src/commands/connectionCommands';
+import { errorMessage, queueConnectionMutation, saveProfiles } from '../src/config/connectionMutations';
+import { createStatusBarItem, renderStatus } from '../src/ui/statusBarPresenter';
 import type { ConnectionProfile } from '../src/config/config';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
@@ -380,5 +379,63 @@ describe('connection mutation queue', () => {
     expect(config.profiles).toEqual([WORK_PROFILE]);
     expect(config.update).toHaveBeenCalledOnce();
     expect(config.update).toHaveBeenCalledWith('profiles', [WORK_PROFILE], vscode.ConfigurationTarget.Global);
+  });
+});
+
+describe('status bar presenter', () => {
+  it('creates a status bar item wired to provider status changes', () => {
+    const show = vi.fn();
+    const item = { text: '', tooltip: undefined, command: undefined, show } as unknown as vscode.StatusBarItem;
+    const create = vi.spyOn(vscode.window, 'createStatusBarItem').mockReturnValue(item);
+    const emitter = new vscode.EventEmitter<ConnectionStatus>();
+    const provider = {
+      onDidChangeConnectionStatus: emitter.event,
+      getConnectionStatus: () => ({ phase: 'ready' as const, connectionCount: 1, modelCount: 2, warningCount: 0, refreshingCount: 0, connections: [] }),
+    } as never;
+    const subscriptions: { dispose(): void }[] = [];
+    createStatusBarItem({ subscriptions } as never, provider);
+
+    expect(create).toHaveBeenCalledWith(vscode.StatusBarAlignment.Left, 100);
+    expect(item.command).toBe('weavenet-copilot.manageConnections');
+    expect(show).toHaveBeenCalledOnce();
+    expect(item.text).toContain('2 models');
+    expect(subscriptions).toHaveLength(2);
+
+    emitter.fire({ phase: 'refreshing', connectionCount: 2, modelCount: 1, warningCount: 0, refreshingCount: 2, connections: [] });
+    expect(item.text).toContain('refreshing');
+  });
+});
+
+describe('command registration', () => {
+  it('registers every connection management command against the shared provider', () => {
+    const registered: string[] = [];
+    const register = vi.spyOn(vscode.commands, 'registerCommand').mockImplementation((_id: string, _handler: unknown) => {
+      registered.push(_id);
+      return new vscode.Disposable();
+    });
+    const provider = providerFixture();
+
+    const disposable = registerConnectionCommands({ subscriptions: [] } as never, provider);
+
+    expect(register).toHaveBeenCalledTimes(16);
+    expect(registered).toEqual([
+      'weavenet-copilot.setRelayKey',
+      'weavenet-copilot.clearRelayKey',
+      'weavenet-copilot.switchProfile',
+      'weavenet-copilot.createProfile',
+      'weavenet-copilot.addConnection',
+      'weavenet-copilot.editConnection',
+      'weavenet-copilot.copyConnection',
+      'weavenet-copilot.deleteConnection',
+      'weavenet-copilot.clearAllConnections',
+      'weavenet-copilot.testConnection',
+      'weavenet-copilot.setDefaultConnection',
+      'weavenet-copilot.manageConnections',
+      'weavenet-copilot.refreshModels',
+      'weavenet-copilot.refreshModelMetadata',
+      'weavenet-copilot.showDebugLog',
+      'weavenet-copilot.openSettings',
+    ]);
+    expect(disposable).toBeInstanceOf(vscode.Disposable);
   });
 });

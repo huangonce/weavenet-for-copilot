@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignUniquePickerIds, filterModels, fromConfiguredModel, supportsImageInputForModel, toChatInformation, toRoutedModel } from '../../src/relay/models';
+import { assignUniquePickerIds, filterModels, fromConfiguredModel, isClaudeModelId, resolveOpenAIApiVariant, supportsImageInputForModel, toChatInformation, toRoutedModel } from '../../src/relay/models';
 
 describe('model routing', () => {
   it('creates unique picker IDs only for colliding upstream IDs', () => {
@@ -127,5 +127,31 @@ describe('model routing', () => {
     expect(toChatInformation(models[1], config, false)).toMatchObject({
       detail: 'API key required',
     });
+  });
+});
+
+describe('catalog source and protocol helpers', () => {
+  it('tags discovery models with catalogSource discovery', () => {
+    expect(toRoutedModel({ id: 'gpt-5.4' }, 'openai', 'openai').catalogSource).toBe('discovery');
+    expect(toRoutedModel({ id: 'claude-sonnet-4' }, 'claude', 'claude').catalogSource).toBe('discovery');
+  });
+
+  it('tags configured models with catalogSource configured', () => {
+    expect(fromConfiguredModel({ id: 'private-model', name: 'Private Model', route: 'claude' }).catalogSource).toBe('configured');
+    expect(fromConfiguredModel({ id: 'private-gpt', name: 'Private GPT', route: 'openai' }).catalogSource).toBe('configured');
+  });
+
+  it('resolves undefined openaiApi to chat', () => {
+    expect(resolveOpenAIApiVariant({})).toBe('chat');
+    expect(resolveOpenAIApiVariant({ openaiApi: undefined })).toBe('chat');
+    expect(resolveOpenAIApiVariant({ openaiApi: 'chat' })).toBe('chat');
+    expect(resolveOpenAIApiVariant({ openaiApi: 'responses' })).toBe('responses');
+  });
+
+  it('recognizes claude model ids by prefix case-insensitively', () => {
+    expect(isClaudeModelId('claude-sonnet-4')).toBe(true);
+    expect(isClaudeModelId('CLAUDE-OPUS-4')).toBe(true);
+    expect(isClaudeModelId('gpt-5.4')).toBe(false);
+    expect(isClaudeModelId('claude')).toBe(false);
   });
 });

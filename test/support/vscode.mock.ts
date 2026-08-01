@@ -84,11 +84,33 @@ export const window = {
   showQuickPick: async <T>(_items: readonly T[], _options?: unknown): Promise<T | undefined> => undefined,
   withProgress: async <T>(_options: unknown, task: () => Promise<T>): Promise<T> => task(),
   createOutputChannel: (_name: string) => ({ appendLine(_value: string) {}, show(_preserveFocus?: boolean) {}, dispose() {} }),
+  createStatusBarItem: (_alignment: number, _priority: number) => new StatusBarItem(),
 };
 
 export class StatusBarItem {
   text = '';
   tooltip: string | undefined;
+  command: string | undefined;
+  show(): void {}
+  dispose(): void {}
+}
+
+export class Disposable {
+  static from(..._disposables: Disposable[]): Disposable {
+    return new Disposable();
+  }
+
+  dispose(): void {}
+}
+
+export const commands = {
+  registerCommand: (_id: string, _handler: unknown) => new Disposable(),
+  executeCommand: async (_id: string, ..._args: unknown[]): Promise<unknown> => undefined,
+};
+
+export enum StatusBarAlignment {
+  Left = 1,
+  Right = 2,
 }
 
 export const workspace = {

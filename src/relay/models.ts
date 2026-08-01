@@ -1,7 +1,15 @@
 import type * as vscode from 'vscode';
 import type { ConfiguredModel, ExtensionConfig } from '../config/config';
 import { normalizeOpenAIRequestCapabilities } from './openaiCapabilities';
-import type { ModelMetadataSources, ModelProtocol, ReasoningEffort, RelayModel, RoutedModel } from './types';
+import type {
+  ModelMetadataSources,
+  ModelProtocol,
+  OpenAIApiVariant,
+  ReasoningEffort,
+  RelayModel,
+  RouteKey,
+  RoutedModel,
+} from './types';
 
 export type PickerModelInformation = vscode.LanguageModelChatInformation & {
   readonly isBYOK: true;
@@ -164,10 +172,23 @@ export function supportsToolCallingForModel(model: RoutedModel, config: Extensio
   return config.supportsToolCalling && model.toolCalling === true;
 }
 
+/** Claude 原生模型识别：模型 id 以 `claude-` 开头（大小写不敏感）。 */
+export function isClaudeModelId(modelId: string): boolean {
+  return modelId.toLowerCase().startsWith('claude-');
+}
+
+/**
+ * 解析 OpenAI API variant：`undefined`（未探测/未声明）等价 `'chat'`（Chat Completions）。
+ * 分派与展示逻辑都应通过本函数读取 variant，避免把 `undefined` 的"未探测"语义散落各处。
+ */
+export function resolveOpenAIApiVariant(model: { readonly openaiApi?: OpenAIApiVariant }): OpenAIApiVariant {
+  return model.openaiApi ?? 'chat';
+}
+
 export function toRoutedModel(
   model: RelayModel,
   protocol: ModelProtocol,
-  route: RoutedModel['route'] = protocol === 'claude' ? 'claude' : 'openai',
+  route: RouteKey = protocol === 'claude' ? 'claude' : 'openai',
 ): RoutedModel {
   const record = model as unknown as Record<string, unknown>;
   const capabilities = objectFrom(model.capabilities);
@@ -206,6 +227,7 @@ export function toRoutedModel(
     upstreamId: model.id,
     protocol,
     route,
+    catalogSource: 'discovery',
     maxInputTokens,
     maxOutputTokens,
     imageInput,
@@ -216,6 +238,7 @@ export function toRoutedModel(
   };
 }
 
+/** 固定配置模型 → 运行时模型。`route === 'claude'` 显式选择 Claude 协议；否则走 OpenAI 兼容协议。 */
 export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
   const protocol: ModelProtocol = model.route === 'claude' ? 'claude' : 'openai';
   return {
@@ -225,6 +248,7 @@ export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
     name: model.name,
     protocol,
     route: model.route,
+    catalogSource: 'configured',
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
     toolCalling: model.toolCalling,

@@ -11,17 +11,34 @@ export interface RelayModel {
   capabilities?: Record<string, unknown>;
 }
 
+/** Wire protocol：上游请求使用的协议族。 */
 export type ModelProtocol = 'openai' | 'claude';
+
+/** 目录来源：模型来自 Relay 自动发现（`discovery`）还是用户固定配置（`configured`）。 */
+export type CatalogSource = 'discovery' | 'configured';
+
+/**
+ * 目录分组 key：去重与快照按此维度隔离（同一 `upstreamId` 可在不同 route 共存）。
+ * `chatgpt` 是历史遗留值，语义等价 `openai`。
+ */
+export type RouteKey = 'openai' | 'chatgpt' | 'claude';
+
+/** OpenAI 协议族内部 API variant（仅当 `protocol === 'openai'` 时生效；`undefined` 等价 `'chat'`）。 */
+export type OpenAIApiVariant = 'chat' | 'responses';
 
 export interface RoutedModel extends RelayModel {
   /** Unique id exposed to VS Code. */
   pickerId: string;
   /** Model id sent unchanged to the relay. */
   upstreamId: string;
+  /** Wire protocol：决定请求构造（Claude Messages / OpenAI 兼容）。 */
   protocol: ModelProtocol;
-  route: 'openai' | 'chatgpt' | 'claude';
+  /** 目录分组 key：去重与快照分组的维度，与 wire protocol 无关。 */
+  route: RouteKey;
+  /** 目录来源：discovery（Relay 自动发现）或 configured（用户固定配置）。 */
+  catalogSource: CatalogSource;
   /** Probing result: Responses API support for OpenAI-compatible models. `undefined` means Chat Completions. */
-  openaiApi?: 'chat' | 'responses';
+  openaiApi?: OpenAIApiVariant;
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;

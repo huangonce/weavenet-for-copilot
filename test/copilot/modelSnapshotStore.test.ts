@@ -13,6 +13,7 @@ function routedModel(overrides: Partial<RoutedModel> = {}): RoutedModel {
     upstreamId: 'gpt-test',
     protocol: 'openai',
     route: 'openai',
+    catalogSource: 'discovery',
     ...overrides,
   };
 }
@@ -97,5 +98,30 @@ describe('parseModelSnapshot', () => {
     expect(parsed?.snapshots.chatgpt).toEqual([]);
     expect(parsed?.snapshots.claude).toEqual([]);
     expect(parsed?.models[0].id).toBe('gpt-test');
+  });
+
+  it('backfills catalogSource discovery for legacy snapshots without it', () => {
+    const legacy = { id: 'gpt-test', pickerId: 'gpt-test', upstreamId: 'gpt-test', protocol: 'openai', route: 'openai' };
+    const parsed = parseModelSnapshot({
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      savedAt: Date.now(),
+      snapshots: { openai: [legacy] },
+      models: [legacy],
+    });
+    expect(parsed?.snapshots.openai[0].catalogSource).toBe('discovery');
+    expect(parsed?.models[0].catalogSource).toBe('discovery');
+  });
+
+  it('falls back to discovery for unknown catalogSource values', () => {
+    const bogus = { id: 'gpt-test', pickerId: 'gpt-test', upstreamId: 'gpt-test', protocol: 'openai', route: 'openai', catalogSource: 'bogus' };
+    const parsed = parseModelSnapshot({
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      savedAt: Date.now(),
+      snapshots: {},
+      models: [bogus],
+    });
+    expect(parsed?.models[0].catalogSource).toBe('discovery');
   });
 });

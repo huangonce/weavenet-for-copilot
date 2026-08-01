@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.6.0 - 2026-08-01
+
+- 拆分 `extension.ts` 以消除 UI 与事务逻辑的混杂（架构风险 #7）：命令控制器（`src/commands/connectionCommands.ts`）、连接变更服务（`src/config/connectionMutations.ts`）与状态栏 presenter（`src/ui/statusBarPresenter.ts`）各自独立成模块，`extension.ts` 只保留激活编排。命令 ID、配置读写、globalState 提示语义与状态栏行为均保持不变，无用户可见变化。
+- 澄清模型路由字段的语义（架构风险 #4）：`route` 收窄为目录分组 key（`RouteKey`，`chatgpt` 为历史遗留别名），新增 `catalogSource` 区分模型来自 Relay 自动发现（`discovery`）还是用户固定配置（`configured`）；`protocol` 明确为 wire protocol（Claude Messages / OpenAI 兼容）；`openaiApi` 明确为 OpenAI 协议族内部 variant，`undefined` 等价 `chat`，统一经 `resolveOpenAIApiVariant` 解析。`claude-` 前缀识别收敛为单一 `isClaudeModelId` helper。去重与快照恢复按目录分组隔离，旧快照自动回填 `catalogSource`。行为不变，无用户可见变化。
+- 拆分 `provider.ts`（架构风险 #3）：连接池与状态机（`src/copilot/connectionRuntimeManager.ts`，含 profile 同步、代际/修订号守卫的刷新、快照恢复与密钥失效）、模型目录加载与快照持久化（`src/copilot/modelCatalogService.ts`）、picker 模型绑定（`src/copilot/modelBindingRegistry.ts`）、连接诊断探测（`src/copilot/connectionTestService.ts`）各自独立成模块，`provider.ts` 只保留 Provider API 与编排。公共导出与 re-exports 保持不变，行为不变，无用户可见变化。
+
 ## 0.5.9 - 2026-08-01
 
 - 持久化 Responses 能力探测结论：探测 verdict 写入 `globalState`，扩展重启后不会立刻对所有模型重新发起付费 `POST /responses` 探测；TTL（与 `metadataRefreshHours` 对齐）与手动刷新清理语义不变。连接删除、配置修订或密钥变更时同步清除对应持久化条目。

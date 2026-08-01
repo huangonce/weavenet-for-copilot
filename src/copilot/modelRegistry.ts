@@ -7,6 +7,7 @@ import {
   assignUniquePickerIds,
   filterModels,
   fromConfiguredModel,
+  isClaudeModelId,
   toRoutedModel,
 } from '../relay/models';
 import { responsesProbeCache } from '../relay/responsesProbeCache';
@@ -93,7 +94,7 @@ async function loadModelsForProtocol(
   });
   const response = await client.listModels(token);
   const routed = (response.data ?? []).map((model: RelayModel) =>
-    toRoutedModel(model, isClaudeModel(model.id) ? 'claude' : 'openai', route));
+    toRoutedModel(model, isClaudeModelId(model.id) ? 'claude' : 'openai', route));
   // A shared /models catalog may advertise both OpenAI-compatible and native
   // Claude models. Route selection happens per model ID above.
   const filtered = filterModels(enrichModelsWithOpenRouter(routed), config);
@@ -121,7 +122,7 @@ async function applyResponsesProtocolProbes(
   token?: vscode.CancellationToken,
   forceProbe = false,
 ): Promise<RoutedModel[]> {
-  const openaiModels = models.filter((model) => model.route !== 'claude' && !isClaudeModel(model.upstreamId));
+  const openaiModels = models.filter((model) => model.route !== 'claude' && !isClaudeModelId(model.upstreamId));
   if (openaiModels.length === 0) return models;
 
   const ttlMs = config.metadataRefreshHours * 3_600_000;
@@ -200,10 +201,12 @@ async function mapWithConcurrency<T>(
   await Promise.all(workers);
 }
 
-function isClaudeModel(modelId: string): boolean {
-  return modelId.toLowerCase().startsWith('claude-');
-}
-
+/**
+ * 去重只按目录分组（`route`）与 `upstreamId` 隔离——同一模型 id 可以同时以
+ * OpenAI 兼容和 Claude 原生两种身份存在。请求分派维度（`protocol` +
+ * `openaiApi`）不参与去重：合并时后出现的模型覆盖能力元数据，`openaiApi`
+ * 取显式声明优先、否则保留探测结论。
+ */
 function dedupeModels(models: RoutedModel[]): RoutedModel[] {
   const byKey = new Map<string, RoutedModel>();
   for (const model of models) {

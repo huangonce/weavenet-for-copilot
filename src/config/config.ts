@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { CONFIG_SECTION } from '../constants';
 import { isReservedRelayHeader } from '../relay/headers';
 import { normalizeOpenAIRequestCapabilities } from '../relay/openaiCapabilities';
-import type { OpenAIRequestCapabilities } from '../relay/types';
+import type { OpenAIRequestCapabilities, RouteKey } from '../relay/types';
 import { normalizeRelayBaseUrl } from '../relay/url';
 
 const MAX_PROFILE_NAME_LENGTH = 100;
@@ -11,7 +11,8 @@ const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 export interface ConfiguredModel {
   id: string;
   name?: string;
-  route: 'openai' | 'chatgpt' | 'claude';
+  /** 目录分组声明：`claude` 选择 Claude 协议，`openai`/`chatgpt` 走 OpenAI 兼容协议（`chatgpt` 为历史遗留值）。 */
+  route: RouteKey;
   openaiApi?: 'chat' | 'responses';
   maxInputTokens?: number;
   maxOutputTokens?: number;
