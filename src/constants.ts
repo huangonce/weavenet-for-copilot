@@ -6,4 +6,7 @@ export const CLAUDE_API_KEY_SECRET = 'weavenet-copilot.claudeApiKey';
 export const LEGACY_API_KEY_SECRET = 'weavenet-copilot.apiKey';
 export const CONNECTION_DIAGNOSTICS_KEY_PREFIX = 'weavenet-copilot.connectionDiagnostics.v2.';
 export const CONNECTION_DIAGNOSTICS_SCHEMA_VERSION = 2;
+export const RESPONSES_PROBE_KEY_PREFIX = 'weavenet-copilot.responsesProbe.v1.';
+export const MODEL_SNAPSHOT_KEY_PREFIX = 'weavenet-copilot.modelSnapshots.v1.';
+export const MODEL_SNAPSHOT_SCHEMA_VERSION = 1;
 export const VENDOR = 'weavenet';

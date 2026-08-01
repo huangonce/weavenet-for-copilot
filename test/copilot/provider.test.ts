@@ -14,6 +14,7 @@ import {
   WeaveNetChatProvider,
 } from '../../src/copilot/provider';
 import { RELAY_API_KEY_SECRET } from '../../src/constants';
+import { MODEL_SNAPSHOT_KEY_PREFIX } from '../../src/constants';
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
@@ -56,6 +57,7 @@ function providerFixture(options: {
   configValues?: Record<string, unknown>;
   secrets?: InMemorySecrets;
   keys?: Record<string, string>;
+  globalState?: InMemoryMemento;
 } = {}): {
   provider: WeaveNetChatProvider;
   secrets: InMemorySecrets;
@@ -72,7 +74,11 @@ function providerFixture(options: {
   const secrets = options.secrets ?? new InMemorySecrets();
   for (const [profileId, value] of Object.entries(options.keys ?? {})) secrets.values.set(keyFor(profileId), value);
   secrets.notificationsEnabled = false;
-  const provider = new WeaveNetChatProvider({ secrets, globalState: new InMemoryMemento(), subscriptions: [] } as never);
+  const provider = new WeaveNetChatProvider({
+    secrets,
+    globalState: options.globalState ?? new InMemoryMemento(),
+    subscriptions: [],
+  } as never);
   secrets.notificationsEnabled = true;
   return { provider, secrets, setProfiles: (value) => { profiles = value ?? []; } };
 }
@@ -245,6 +251,73 @@ describe('connection pool model refresh', () => {
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
   });
 
+  it('persists the last successful model snapshot into global state', async () => {
+    const globalState = new InMemoryMemento();
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    await provider.refreshModels();
+
+    const stored = globalState.get(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`);
+    expect(stored).toBeDefined();
+    expect(stored).toMatchObject({
+      schemaVersion: 1,
+      profileId: WORK_ID,
+      snapshots: { openai: [expect.objectContaining({ id: 'gpt-work' })] },
+    });
+    // The snapshot is JSON-safe: no functions or class instances.
+    expect(JSON.parse(JSON.stringify(stored))).toEqual(stored);
+  });
+
+  it('restores a persisted snapshot so the picker stays populated while the relay is offline', async () => {
+    const globalState = new InMemoryMemento();
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`, {
+      schemaVersion: 1,
+      profileId: WORK_ID,
+      savedAt: Date.now(),
+      snapshots: {
+        openai: [{
+          id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot',
+          protocol: 'openai', route: 'openai', toolCalling: true,
+        }],
+        chatgpt: [],
+        claude: [],
+      },
+      models: [{
+        id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot',
+        protocol: 'openai', route: 'openai', toolCalling: true,
+      }],
+    });
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    // The relay is completely unreachable on startup.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(information).toHaveLength(1);
+    expect(information[0].id).toBe(`weavenet::${WORK_ID}::gpt-snapshot`);
+    expect(information[0].capabilities).toMatchObject({ toolCalling: true });
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
+  });
+
+  it('clears persisted model snapshots when the API key is removed', async () => {
+    const globalState = new InMemoryMemento();
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`, {
+      schemaVersion: 1,
+      profileId: WORK_ID,
+      savedAt: Date.now(),
+      snapshots: { openai: [], chatgpt: [], claude: [] },
+      models: [{ id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot', protocol: 'openai', route: 'openai' }],
+    });
+    const { provider, secrets } = providerFixture({ globalState, secrets: new InMemorySecrets() });
+    secrets.values.delete(keyFor(WORK_ID));
+    await provider.refreshModels();
+
+    expect(globalState.get(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`)).toBeUndefined();
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', modelCount: 0 });
+  });
   it('limits aggregate model refreshes to three concurrent connections', async () => {
     const profiles = Array.from({ length: 5 }, (_, index) => ({
       id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,

@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.5.9 - 2026-08-01
+
+- 持久化 Responses 能力探测结论：探测 verdict 写入 `globalState`，扩展重启后不会立刻对所有模型重新发起付费 `POST /responses` 探测；TTL（与 `metadataRefreshHours` 对齐）与手动刷新清理语义不变。连接删除、配置修订或密钥变更时同步清除对应持久化条目。
+- 持久化每个连接最近一次成功的模型目录：Relay 在扩展重启后不可用时，模型选择器仍能恢复上次成功加载的模型列表（按路由分组保留），连接状态显示为降级而非无模型可用。配置修订或 API 密钥移除时同步清除对应快照，避免展示过期模型。
+
 ## 0.5.8 - 2026-08-01
 
 - 修复切换到 Responses API 后提示词缓存命中率骤降的问题：Responses 请求此前未发送 `prompt_cache_key`，上游失去缓存亲和路由，多轮请求被分散到不同实例导致前缀缓存大量失效。现在 Responses 请求与 Chat Completions 一致：`openaiPromptCaching` 开启且模型支持时发送相同的 `prompt_cache_key`（含图像的请求仍省略该提示字段）。

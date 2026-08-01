@@ -8,6 +8,7 @@ import type { ConnectionProfile } from './config/config';
 import { getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from './config/config';
 import { initMetadataCache, onMetadataChanged } from './metadata/metadataCache';
 import { scheduleOpenRouterRefresh } from './metadata/openrouterFallback';
+import { initResponsesProbeCache } from './relay/responsesProbeCache';
 import { resetLegacyInstallation } from './migration/legacyReset';
 import { migrateProfilePoolConfiguration } from './migration/profilePool';
 import { normalizeRelayBaseUrl } from './relay/url';
@@ -35,6 +36,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   } catch (error) {
     void vscode.window.showErrorMessage(`WeaveNet could not upgrade Relay connections to the connection pool format: ${errorMessage(error)}`);
   }
+  initResponsesProbeCache(context);
   const provider = new WeaveNetChatProvider(context);
   try {
     await provider.migrateRelayKeys(getProfileConfiguration().profiles);

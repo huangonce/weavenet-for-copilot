@@ -43,7 +43,7 @@ src/
 - `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
 - `WeaveNet: Set Relay API Key`：单连接时直接设置；多连接时先选择连接。
 - `WeaveNet: Clear Relay API Key`：单连接时直接删除；多连接时先选择连接。
-- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。新发现的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours`；明确被拒绝（HTTP 400/404）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测。
+- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。新发现的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours` 并持久化到 VS Code `globalState`（重启后无需重新探测）；明确被拒绝（HTTP 400/404）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测。
 - `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
 - `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
 - `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
@@ -134,7 +134,7 @@ API Key 会存储在 VS Code SecretStorage 中。
 
 请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；命令会同时清除对应 API Key，避免产生无法归属的 Secret。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
 
-连接测试结果会按稳定连接 UUID 与配置 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时只会使对应连接诊断失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。
+连接测试结果会按稳定连接 UUID 与配置 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时只会使对应连接诊断失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。每个连接最近一次成功的模型目录也会按连接 UUID 持久化到 `globalState`：扩展重启后若 Relay 暂时不可用，模型选择器仍会恢复上次成功加载的模型（状态显示为降级），配置修订或 API Key 移除时该快照会被清除。
 
 从 `0.3.x` 升级时，扩展会为连接自动生成稳定 UUID，将旧默认连接排到首位，并只把旧顶层模型规则、固定模型和请求头物化到该旧默认连接。名称型 Secret 会在验证新 UUID Secret 写入成功后再删除；迁移可重复运行且不会覆盖已有 UUID Secret。
 

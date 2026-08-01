@@ -36,6 +36,8 @@ import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
 import { provideClaudeResponse } from './claudeResponse';
 import { loadAllModels } from './modelRegistry';
+import { ModelSnapshotStore } from './modelSnapshotStore';
+import type { ModelSnapshotRecord } from './modelSnapshotStore';
 import { responsesProbeCache } from '../relay/responsesProbeCache';
 import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
 import { formatLogError } from './requestDiagnostics';
@@ -112,6 +114,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
   };
   private readonly diagnosticsStore: ConnectionDiagnosticsStore;
+  private readonly snapshotStore: ModelSnapshotStore;
   private readonly connectionTestTasks = new Map<string, Promise<ConnectionTestResult>>();
 
   readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
@@ -120,6 +123,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   constructor(context: vscode.ExtensionContext) {
     this.auth = new AuthManager(context.secrets);
     this.diagnosticsStore = new ConnectionDiagnosticsStore(context.globalState);
+    this.snapshotStore = new ModelSnapshotStore(context.globalState);
     this.syncProfiles();
     context.subscriptions.push(
       this.changeEmitter,
@@ -397,6 +401,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     for (const [id, runtime] of this.runtimes) {
       if (ids.has(id)) continue;
       responsesProbeCache.clearProfile(id);
+      void this.snapshotStore.deleteProfile(id);
       runtime.generation++;
       this.runtimes.delete(id);
       changed = true;
@@ -405,15 +410,22 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       const revision = catalogRevision(profile);
       const existing = this.runtimes.get(profile.id);
       if (!existing) {
+        // Restore the last successful model catalog so the picker stays
+        // populated even if the relay is unreachable right after a restart.
+        const restored = this.snapshotStore.get(profile.id);
         this.runtimes.set(profile.id, {
-          profile, revision, models: [], snapshots: new Map(), generation: 0, resolved: false, phase: 'refreshing',
+          profile, revision,
+          models: restored?.models ?? [],
+          snapshots: restored ? snapshotMap(restored) : new Map(),
+          generation: 0, resolved: false, phase: 'refreshing',
           lastDiagnostics: this.diagnosticsStore.get(profile, diagnosticsOptions()),
         });
         changed = true;
       } else if (existing.revision !== revision) {
-        // baseUrl, headers or fixed models changed: prior probe verdicts no
-        // longer apply to this profile.
+        // baseUrl, headers or fixed models changed: prior probe verdicts and
+        // model snapshots no longer apply to this profile.
         responsesProbeCache.clearProfile(profile.id);
+        void this.snapshotStore.deleteProfile(profile.id);
         existing.generation++;
         existing.profile = profile;
         existing.revision = revision;
@@ -490,6 +502,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!apiKey) {
       runtime.models = [];
       runtime.snapshots.clear();
+      await this.clearSnapshot(profile);
       runtime.resolved = true;
       runtime.phase = 'keyMissing';
       runtime.message = 'API key required.';
@@ -511,6 +524,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       runtime.message = result.partial ? 'Some Relay model routes could not be refreshed.' : undefined;
       runtime.refreshedAt = Date.now();
       for (const failure of result.failedRoutes) this.reportRouteRefreshFailure(config, failure.route, failure.error);
+      await this.updateSnapshot(profile.id, runtime.snapshots, result.models);
     } catch (error) {
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       if (isCancellationError(error)) return;
@@ -581,6 +595,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
     if (!profileId) {
       await this.diagnosticsStore.clear();
+      await this.snapshotStore.clear();
       responsesProbeCache.clear();
       for (const runtime of this.runtimes.values()) {
         runtime.lastDiagnostics = undefined;
@@ -591,6 +606,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       return;
     }
     await this.diagnosticsStore.deleteProfile(profileId);
+    await this.snapshotStore.deleteProfile(profileId);
     responsesProbeCache.clearProfile(profileId);
     const runtime = this.runtimes.get(profileId);
     if (!runtime) return;
@@ -608,6 +624,27 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       `WeaveNet loaded ${this.connectionStatus.modelCount} model(s) from ${healthy}/${total} connection(s)${warnings ? `; ${warnings} warning(s)` : ''}.`,
     );
   }
+
+  /** Persists the successful catalog; storage failures never affect refresh. */
+  private async updateSnapshot(
+    profileId: string,
+    snapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]>,
+    models: readonly RoutedModel[],
+  ): Promise<void> {
+    try {
+      await this.snapshotStore.update(profileId, snapshots, models);
+    } catch (error) {
+      this.debug(getConfig(), `[models] connection=${profileId}, snapshot persist failed: ${formatLogError(error)}`);
+    }
+  }
+
+  private async clearSnapshot(profile: ConnectionProfile): Promise<void> {
+    try {
+      await this.snapshotStore.deleteProfile(profile.id);
+    } catch (error) {
+      this.debug(getConfig(profile), `[models] connection=${profile.name}, snapshot clear failed: ${formatLogError(error)}`);
+    }
+  }
 }
 
 function catalogRevision(profile: ConnectionProfile): string {
@@ -623,6 +660,14 @@ function catalogRevision(profile: ConnectionProfile): string {
 
 function namespacedPickerId(profileId: string, localPickerId: string): string {
   return `weavenet::${profileId}::${encodeURIComponent(localPickerId)}`;
+}
+
+function snapshotMap(record: ModelSnapshotRecord): Map<RoutedModel['route'], RoutedModel[]> {
+  const map = new Map<RoutedModel['route'], RoutedModel[]>();
+  for (const route of ['openai', 'chatgpt', 'claude'] as const) {
+    if (record.snapshots[route].length > 0) map.set(route, record.snapshots[route]);
+  }
+  return map;
 }
 
 async function mapWithConcurrency<T>(
