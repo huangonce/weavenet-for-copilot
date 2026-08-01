@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -292,6 +292,22 @@
               }
             }
           }
+        },
+        "weavenet-copilot.openaiApiStrategy": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "chat",
+            "responses"
+          ],
+          "enumDescriptions": [
+            "%configuration.openaiApiStrategy.auto%",
+            "%configuration.openaiApiStrategy.chat%",
+            "%configuration.openaiApiStrategy.responses%"
+          ],
+          "default": "auto",
+          "scope": "application",
+          "description": "%configuration.openaiApiStrategy.description%"
         },
         "weavenet-copilot.anthropicVersion": {
           "type": "string",

@@ -161,13 +161,17 @@ describe('connectionRuntimeManager helpers', () => {
   });
 
   it('computes a stable catalog revision from profile settings', () => {
+    const values: Record<string, unknown> = {};
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-      get: <T>(_key: string) => undefined as T,
+      get: <T>(key: string) => values[key] as T | undefined,
     } as never);
     const first = catalogRevision(WORK_PROFILE);
     const second = catalogRevision(WORK_PROFILE);
     expect(first).toBe(second);
     expect(catalogRevision({ ...WORK_PROFILE, baseUrl: 'https://other.example.test/v1' })).not.toBe(first);
+
+    values.openaiApiStrategy = 'chat';
+    expect(catalogRevision(WORK_PROFILE)).not.toBe(first);
   });
 
   it('detects cancellation errors by instance and by name', () => {

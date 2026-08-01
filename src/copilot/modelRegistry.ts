@@ -1,5 +1,5 @@
 import type * as vscode from 'vscode';
-import type { ExtensionConfig } from '../config/config';
+import type { ConfiguredModel, ExtensionConfig, OpenAIApiStrategy } from '../config/config';
 import { enrichModelsWithOpenRouter, scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
 import { RelayClient } from '../relay/client';
 import { RelayRequestError } from '../relay/errors';
@@ -12,7 +12,7 @@ import {
 } from '../relay/models';
 import { responsesProbeCache } from '../relay/responsesProbeCache';
 import type { ResponsesEndpointAvailability } from '../relay/probes';
-import type { ModelProtocol, RelayModel, RoutedModel } from '../relay/types';
+import type { ModelProtocol, OpenAIApiVariant, RelayModel, RoutedModel } from '../relay/types';
 import { formatLogError, type DebugLogger } from './requestDiagnostics';
 
 const RESPONSES_PROBE_CONCURRENCY = 4;
@@ -33,12 +33,15 @@ export async function loadAllModels(
   forceProbe = false,
 ): Promise<ModelLoadResult> {
   void scheduleOpenRouterRefresh(config.metadataRefreshHours * 3_600_000);
+  const configuredOpenAIApis = collectConfiguredOpenAIApis(config.models);
 
   const routes: Array<{ readonly name: RoutedModel['route']; readonly task: Promise<RoutedModel[]> }> = [];
   if (apiKey) {
     routes.push({
       name: 'openai',
-      task: loadModelsForProtocol('openai', 'openai', apiKey, config, debug, token, forceProbe),
+      task: loadModelsForProtocol(
+        'openai', 'openai', apiKey, config, configuredOpenAIApis, debug, token, forceProbe,
+      ),
     });
   }
 
@@ -66,7 +69,9 @@ export async function loadAllModels(
   }
 
   return {
-    models: assignUniquePickerIds(dedupeModels(loaded)),
+    models: assignUniquePickerIds(applyConfiguredOpenAIApiStrategy(
+      dedupeModels(loaded), config.openaiApiStrategy, configuredOpenAIApis,
+    )),
     snapshots,
     partial: failedRouteCount > 0,
     failedRoutes,
@@ -78,6 +83,7 @@ async function loadModelsForProtocol(
   route: RoutedModel['route'],
   apiKey: string,
   config: ExtensionConfig,
+  configuredOpenAIApis: ReadonlyMap<string, OpenAIApiVariant>,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
   forceProbe = false,
@@ -98,7 +104,9 @@ async function loadModelsForProtocol(
   // A shared /models catalog may advertise both OpenAI-compatible and native
   // Claude models. Route selection happens per model ID above.
   const filtered = filterModels(enrichModelsWithOpenRouter(routed), config);
-  const withResponsesProbe = await applyResponsesProtocolProbes(client, filtered, config, debug, token, forceProbe);
+  const withResponsesProbe = await applyResponsesProtocolProbes(
+    client, filtered, config, configuredOpenAIApis, debug, token, forceProbe,
+  );
   debug(config, `[models] loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
   return withResponsesProbe;
 }
@@ -112,21 +120,35 @@ async function loadModelsForProtocol(
  * `metadataRefreshHours`. Only definitive rejections (HTTP 400/404/426) are
  * cached as unsupported; transient failures stay uncached so the next refresh
  * retries. `forceProbe` (user-invoked refresh) drops the profile's cached
- * verdicts first. Claude models are never probed.
+ * verdicts first. Explicit protocol selections bypass both probe layers. A
+ * `chat` selection at either global or model scope vetoes `responses`; Claude
+ * models are never probed.
  */
 async function applyResponsesProtocolProbes(
   client: RelayClient,
   models: RoutedModel[],
   config: ExtensionConfig,
+  configuredOpenAIApis: ReadonlyMap<string, OpenAIApiVariant>,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
   forceProbe = false,
 ): Promise<RoutedModel[]> {
-  const openaiModels = models.filter((model) => model.route !== 'claude' && !isClaudeModelId(model.upstreamId));
+  if (forceProbe) responsesProbeCache.clearProfile(config.profileId);
+
+  const openaiModels = models.filter((model) => model.protocol === 'openai');
   if (openaiModels.length === 0) return models;
 
+  const probeCandidates = openaiModels.filter((model) =>
+    resolveOpenAIApiSelection(
+      config.openaiApiStrategy,
+      configuredOpenAIApis.get(modelCatalogKey(model)),
+    ) === 'auto');
+  if (probeCandidates.length === 0) {
+    debug(config, `[models] /responses probing skipped: strategy=${config.openaiApiStrategy}`);
+    return applyConfiguredOpenAIApiStrategy(models, config.openaiApiStrategy, configuredOpenAIApis);
+  }
+
   const ttlMs = config.metadataRefreshHours * 3_600_000;
-  if (forceProbe) responsesProbeCache.clearProfile(config.profileId);
 
   let endpointAvailable: ResponsesEndpointAvailability;
   try {
@@ -137,12 +159,12 @@ async function applyResponsesProtocolProbes(
   }
   if (endpointAvailable === 'unsupported') {
     debug(config, '[models] /responses endpoint unsupported; OpenAI models keep chat completions');
-    return models;
+    return applyConfiguredOpenAIApiStrategy(models, config.openaiApiStrategy, configuredOpenAIApis);
   }
 
   // The catalog may list the same model id more than once; probe each unique
   // id so one model never pays for parallel duplicate POSTs.
-  const uniqueModels = [...new Map(openaiModels.map((model) => [model.upstreamId, model])).values()];
+  const uniqueModels = [...new Map(probeCandidates.map((model) => [model.upstreamId, model])).values()];
   const uncached = uniqueModels.filter(
     (model) => responsesProbeCache.get(config.profileId, model.upstreamId) === undefined,
   );
@@ -165,19 +187,74 @@ async function applyResponsesProtocolProbes(
     }
   });
 
-  const openaiById = new Set(openaiModels.map((model) => model.upstreamId));
+  const probeKeys = new Set(probeCandidates.map(modelCatalogKey));
   let responsesCount = 0;
   const withApi = models.map((model) => {
-    if (!openaiById.has(model.upstreamId)) return model;
+    const selection = resolveOpenAIApiSelection(
+      config.openaiApiStrategy,
+      configuredOpenAIApis.get(modelCatalogKey(model)),
+    );
+    if (selection !== 'auto') return withOpenAIApi(model, selection);
+    if (!probeKeys.has(modelCatalogKey(model))) return model;
     const verdict = responsesProbeCache.get(config.profileId, model.upstreamId) ?? probed.get(model.upstreamId) ?? 'chat';
     if (verdict !== 'responses') return model;
     responsesCount++;
     return { ...model, openaiApi: 'responses' as const };
   });
   if (responsesCount > 0) {
-    debug(config, `[models] ${responsesCount}/${openaiModels.length} OpenAI models support /responses`);
+    debug(config, `[models] ${responsesCount}/${probeCandidates.length} auto-selected OpenAI models support /responses`);
   }
   return withApi;
+}
+
+/**
+ * Resolves the global setting and a fixed-model declaration as a safety
+ * lattice: any explicit `chat` wins, then `responses`, otherwise probe.
+ */
+function resolveOpenAIApiSelection(
+  globalStrategy: OpenAIApiStrategy,
+  modelVariant: OpenAIApiVariant | undefined,
+): OpenAIApiStrategy {
+  if (globalStrategy === 'chat' || modelVariant === 'chat') return 'chat';
+  if (globalStrategy === 'responses' || modelVariant === 'responses') return 'responses';
+  return 'auto';
+}
+
+function collectConfiguredOpenAIApis(
+  models: readonly ConfiguredModel[],
+): Map<string, OpenAIApiVariant> {
+  const variants = new Map<string, OpenAIApiVariant>();
+  for (const model of models) {
+    if (model.route === 'claude' || model.openaiApi === undefined) continue;
+    const key = `${model.route}:${model.id}`;
+    // Duplicate fixed definitions are unusual, but the safety veto remains
+    // deterministic even then: one explicit chat declaration is sufficient.
+    if (variants.get(key) !== 'chat') variants.set(key, model.openaiApi);
+  }
+  return variants;
+}
+
+function applyConfiguredOpenAIApiStrategy(
+  models: RoutedModel[],
+  globalStrategy: OpenAIApiStrategy,
+  configuredOpenAIApis: ReadonlyMap<string, OpenAIApiVariant>,
+): RoutedModel[] {
+  return models.map((model) => {
+    if (model.protocol !== 'openai') return model;
+    const selection = resolveOpenAIApiSelection(
+      globalStrategy,
+      configuredOpenAIApis.get(modelCatalogKey(model)),
+    );
+    return selection === 'auto' ? model : withOpenAIApi(model, selection);
+  });
+}
+
+function withOpenAIApi(model: RoutedModel, variant: OpenAIApiVariant): RoutedModel {
+  return model.openaiApi === variant ? model : { ...model, openaiApi: variant };
+}
+
+function modelCatalogKey(model: Pick<RoutedModel, 'route' | 'upstreamId'>): string {
+  return `${model.route}:${model.upstreamId}`;
 }
 
 /** Only explicit HTTP rejections settle the verdict; transient errors do not. */

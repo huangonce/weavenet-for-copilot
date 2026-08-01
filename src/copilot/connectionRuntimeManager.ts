@@ -322,6 +322,7 @@ export function catalogRevision(profile: ConnectionProfile): string {
   const config = getConfig(profile);
   return JSON.stringify({
     baseUrl: config.baseUrl,
+    openaiApiStrategy: config.openaiApiStrategy,
     requestHeaders: config.requestHeaders,
     includeModels: config.includeModels.map((entry) => entry.source),
     excludeModels: config.excludeModels.map((entry) => entry.source),

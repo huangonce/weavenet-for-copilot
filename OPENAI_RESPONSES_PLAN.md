@@ -1,5 +1,7 @@
 # OpenAI Responses API 增量演进计划
 
+> **0.6.1 策略补充**：新增应用级 `weavenet-copilot.openaiApiStrategy`（`auto` / `chat` / `responses`）。协议选择采用安全否决顺序：全局设置或固定模型任一处显式 `chat`，即强制 Chat Completions；没有 `chat` 时，任一处显式 `responses` 即强制 Responses；两处均未指定时才执行自动能力探测。强制策略与模型级显式声明都会跳过对应模型的 GET/POST Responses 探测；设置变化会失效旧模型快照与探测缓存并刷新目录。Claude 模型不受此策略影响。
+
 > **0.5.6 偏离记录**：本计划最初要求“后台模型发现不得执行付费 POST，只有显式配置才启用 Responses”。经复审与产品决策（见 CHANGELOG 0.5.6），保留自动能力探测：新发现的 OpenAI 兼容模型各执行一次最小 `POST /responses` 探测（`max_output_tokens: 1`、`store: false`），免费 `GET /responses` 可用性检查短路不支持的 Relay。探测结果按连接 UUID 缓存 `metadataRefreshHours`；明确拒绝（HTTP 400/404/426）与成功才缓存，临时失败（超时、限流、5xx、网络）不缓存并在下次刷新重试。固定模型可用 `openaiApi: "responses" | "chat"` 显式覆盖，该声明优先于探测结果；手动 `Refresh Models` 会先清除能力缓存再重新探测。以下“不得执行付费 POST”“只有显式声明才启用”等约束句均已被本段覆盖。
 
 ## 目标

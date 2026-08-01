@@ -8,6 +8,8 @@ import { normalizeRelayBaseUrl } from '../relay/url';
 const MAX_PROFILE_NAME_LENGTH = 100;
 const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 
+export type OpenAIApiStrategy = 'auto' | 'chat' | 'responses';
+
 export interface ConfiguredModel {
   id: string;
   name?: string;
@@ -38,6 +40,7 @@ export interface ExtensionConfig {
   profileName?: string;
   baseUrl: string;
   anthropicVersion: string;
+  openaiApiStrategy: OpenAIApiStrategy;
   openaiPromptCaching: boolean;
   openaiPromptCacheKey: string;
   claudePromptCaching: 'automatic' | 'disabled';
@@ -74,6 +77,7 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     profileName: profile?.name,
     baseUrl: profile?.baseUrl ?? '',
     anthropicVersion: (config.get<string>('anthropicVersion') ?? '2023-06-01').trim() || '2023-06-01',
+    openaiApiStrategy: normalizeOpenAIApiStrategy(config.get<unknown>('openaiApiStrategy')),
     openaiPromptCaching: config.get<boolean>('openaiPromptCaching') ?? true,
     openaiPromptCacheKey: (config.get<string>('openaiPromptCacheKey') ?? '').trim(),
     claudePromptCaching: config.get<'automatic' | 'disabled'>('claudePromptCaching') ?? 'automatic',
@@ -97,6 +101,10 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     requestHeaders: profile?.requestHeaders ?? {},
     models: profile?.models ?? [],
   };
+}
+
+function normalizeOpenAIApiStrategy(value: unknown): OpenAIApiStrategy {
+  return value === 'chat' || value === 'responses' ? value : 'auto';
 }
 
 export function getProfileConfiguration(): ProfileConfiguration {

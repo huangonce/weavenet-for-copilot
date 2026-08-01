@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.6.1 - 2026-08-01
+
+- 新增应用级 `weavenet-copilot.openaiApiStrategy` 设置（`auto` / `chat` / `responses`）。协议决策采用安全否决优先级：全局或固定模型任一处显式 `chat` 都强制 Chat Completions；没有 `chat` 时显式 `responses` 强制 Responses；均未指定时才执行现有能力探测。强制策略和模型级声明会跳过无意义的 Responses 探测，设置变化会自动失效旧目录快照并刷新模型。
+
 ## 0.6.0 - 2026-08-01
 
 - 拆分 `extension.ts` 以消除 UI 与事务逻辑的混杂（架构风险 #7）：命令控制器（`src/commands/connectionCommands.ts`）、连接变更服务（`src/config/connectionMutations.ts`）与状态栏 presenter（`src/ui/statusBarPresenter.ts`）各自独立成模块，`extension.ts` 只保留激活编排。命令 ID、配置读写、globalState 提示语义与状态栏行为均保持不变，无用户可见变化。

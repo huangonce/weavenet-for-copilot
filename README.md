@@ -43,7 +43,7 @@ src/
 - `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
 - `WeaveNet: Set Relay API Key`：单连接时直接设置；多连接时先选择连接。
 - `WeaveNet: Clear Relay API Key`：单连接时直接删除；多连接时先选择连接。
-- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。新发现的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours` 并持久化到 VS Code `globalState`（重启后无需重新探测）；明确被拒绝（HTTP 400/404）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测。
+- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。`openaiApiStrategy` 为 `auto` 时，新发现且未显式指定协议的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours` 并持久化到 VS Code `globalState`（重启后无需重新探测）；明确被拒绝（HTTP 400/404/426）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测；强制 `chat` 或 `responses` 时不执行 Responses 探测。
 - `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
 - `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
 - `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
@@ -52,7 +52,7 @@ src/
 
 插件使用每个 Relay 各自的 API Key 获取模型。每个模型都绑定发现它的连接、配置修订和请求协议，聊天请求始终发送到该来源 Relay：
 
-- OpenAI 兼容模型：走 `POST /chat/completions`，使用 `Authorization: Bearer` 认证。
+- OpenAI 兼容模型：按 `openaiApiStrategy`、固定模型声明和自动探测结果选择 `POST /chat/completions` 或 `POST /responses`，使用 `Authorization: Bearer` 认证。
 - Claude 模型：走 Anthropic-compatible `POST /messages`，使用 `x-api-key` 认证。
 
 同一把密钥只因目标协议不同而采用对应的请求头；这样可避免 Claude 模型被错误地转成 OpenAI 协议，减少缓存或原生能力失效的问题。
@@ -69,6 +69,7 @@ src/
 
 - `weavenet-copilot.activeProfile`：仅为从 `0.3.x` 升级保留的废弃字段；首次迁移排序后自动清空，不再控制路由。
 - `weavenet-copilot.profiles`：全局保存且同时启用的 Relay 连接池。每项包含扩展管理的 `id`、`name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
+- `weavenet-copilot.openaiApiStrategy`：应用级 OpenAI 请求协议策略，默认 `auto`。`chat` 强制全部 OpenAI 兼容模型使用 Chat Completions，可作为紧急兼容性熔断；`responses` 强制未被固定模型显式 `chat` 否决的模型使用 Responses；`auto` 遵循固定模型声明，并只对未声明模型执行能力探测。优先级为：任一处显式 `chat` > 任一处显式 `responses` > 自动探测。修改设置会自动清除旧目录快照并刷新模型；协议切换后建议新开对话，避免不同协议的工具调用或 reasoning 历史不兼容。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
@@ -120,9 +121,9 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 }
 ```
 
-`openaiApi` 可显式声明固定模型使用 `responses`（Responses API）或 `chat`（Chat Completions，默认）。显式声明优先于自动探测结果；未声明时按该连接的自动探测结果路由。`openaiApi` 为 `responses` 时，请确认 Relay 上游确实实现了 `/responses`。
+`openaiApi` 可显式声明固定模型使用 `responses`（Responses API）或 `chat`（Chat Completions）。模型级和全局策略采用安全否决优先级：任一处显式 `chat` 都强制 Chat；没有 `chat` 时，任一处显式 `responses` 都强制 Responses；两处均未指定时才自动探测。`openaiApi` 为 `responses` 时，请确认 Relay 上游确实实现了 `/responses`。
 
-`context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退；Prompt Cache Key 在 Chat Completions 与 Responses 两条路径上以相同规则发送。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。Responses API 采用自动能力探测：免费 `GET /responses` 可用性检查后，新发现的 OpenAI 兼容模型各执行一次最小探测 POST，探测结果按连接缓存，可被手动刷新或 `openaiApi` 显式声明覆盖，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
+`context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退；Prompt Cache Key 在 Chat Completions 与 Responses 两条路径上以相同规则发送。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。`auto` 策略下，Responses API 采用自动能力探测：免费 `GET /responses` 可用性检查后，新发现且未显式指定协议的 OpenAI 兼容模型各执行一次最小探测 POST，探测结果按连接缓存；手动刷新可重新探测。强制策略和模型级显式声明会跳过对应探测，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
 
 `replayReasoningContent` 与 `assistantPhase` 只作用于 Responses 协议，且默认关闭。前者在每组连续 `function_call` 前回传一个合成的 `reasoning` item，仅供 DeepSeek 等要求回传思考内容的 Relay 使用——规范中的 `reasoning` item 需携带上游返回的 `id`，合成项无法提供，因此默认不发送。后者为 assistant 历史消息标注 `phase`（最后一次工具调用之前的文本记为 `commentary`，其后记为 `final_answer`），可改善 Codex 系模型的表现，但旧网关可能拒绝该字段。重放历史始终按原始交错顺序产出 item（思考、文本、工具调用各就各位），不再按类型分组。
 

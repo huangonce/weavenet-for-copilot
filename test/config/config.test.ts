@@ -150,6 +150,19 @@ describe('connection-scoped route settings', () => {
     expect(config.requestHeaders).toEqual({});
     expect(config.models).toEqual([]);
   });
+
+  it.each([
+    [undefined, 'auto'],
+    ['auto', 'auto'],
+    ['chat', 'chat'],
+    ['responses', 'responses'],
+    ['invalid', 'auto'],
+    [42, 'auto'],
+  ])('normalizes the application-wide OpenAI API strategy %j to %s', (value, expected) => {
+    mockConfiguration({ openaiApiStrategy: value });
+
+    expect(getConfig().openaiApiStrategy).toBe(expected);
+  });
 });
 
 describe('invalid model regexes', () => {

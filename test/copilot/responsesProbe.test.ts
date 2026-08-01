@@ -35,6 +35,7 @@ const baseConfig = {
   requestTimeoutMs: 100,
   streamIdleTimeoutMs: 100,
   metadataRefreshHours: 6,
+  openaiApiStrategy: 'auto',
   models: [],
   includeModels: [],
   excludeModels: [],
@@ -76,6 +77,79 @@ beforeEach(() => {
 });
 
 describe('Responses endpoint probing during model load', () => {
+  it('forces chat globally and skips both Responses probes', async () => {
+    config = { ...config, openaiApiStrategy: 'chat' };
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(openaiModels(models).every((model) => model.openaiApi === 'chat')).toBe(true);
+    expect(models.find((model) => model.upstreamId === 'claude-x')?.openaiApi).toBeUndefined();
+    expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+  });
+
+  it('forces responses globally except for a fixed-model chat veto, without probing', async () => {
+    config = {
+      ...config,
+      openaiApiStrategy: 'responses',
+      models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'chat' }],
+    };
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
+    expect(models.find((model) => model.upstreamId === 'claude-x')?.openaiApi).toBeUndefined();
+    expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+  });
+
+  it('lets global chat veto a fixed-model responses declaration', async () => {
+    config = {
+      ...config,
+      openaiApiStrategy: 'chat',
+      models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'responses' }],
+    };
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(openaiModels(models).every((model) => model.openaiApi === 'chat')).toBe(true);
+    expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+  });
+
+  it('skips explicitly selected models and probes only auto models', async () => {
+    config = {
+      ...config,
+      models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'chat' }],
+    };
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
+    expect(clientMocks.probeResponsesEndpoint).toHaveBeenCalledOnce();
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledOnce();
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledWith('gpt-b', false, undefined);
+  });
+
+  it('uses explicit chat and responses without probing when no auto model remains', async () => {
+    config = {
+      ...config,
+      models: [
+        { id: 'gpt-a', route: 'openai', openaiApi: 'chat' },
+        { id: 'gpt-b', route: 'openai', openaiApi: 'responses' },
+      ],
+    };
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
+    expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
+    expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+  });
+
   it('short-circuits with zero POST probes when the endpoint is unsupported', async () => {
     clientMocks.probeResponsesEndpoint.mockResolvedValue('unsupported');
 
@@ -172,6 +246,20 @@ describe('Responses endpoint probing during model load', () => {
 
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
+  });
+
+  it('clears cached verdicts on a forced refresh even while probing is disabled', async () => {
+    await loadAllModels(config, 'secret-key', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+    clientMocks.testOpenAIResponses.mockClear();
+
+    config = { ...config, openaiApiStrategy: 'chat' };
+    await loadAllModels(config, 'secret-key', () => {}, new Map(), undefined, true);
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+
+    config = { ...config, openaiApiStrategy: 'auto' };
+    await loadAllModels(config, 'secret-key', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
   });
 
   it('keeps probe verdicts per profile even when two profiles share a relay URL', async () => {
