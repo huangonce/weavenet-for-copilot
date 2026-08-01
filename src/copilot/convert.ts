@@ -17,6 +17,18 @@ import { sanitizeJsonSchema, toStrictJsonSchema } from '../relay/schema';
 
 const SYSTEM_ROLE = 3;
 const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+/** Thinking models reject empty reasoning_text, so tool calls without recoverable thinking need a stand-in. */
+const REASONING_PLACEHOLDER = '(reasoning omitted)';
+
+/** Thinking parts are not in the stable API surface, so detect them structurally. */
+function isThinkingPart(part: unknown): part is { value: string } {
+  const ThinkingPart = (vscode as unknown as { LanguageModelThinkingPart?: new (value: string) => unknown })
+    .LanguageModelThinkingPart;
+  if (ThinkingPart && part instanceof ThinkingPart) {
+    return typeof (part as { value?: unknown }).value === 'string';
+  }
+  return false;
+}
 
 export function convertMessages(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
@@ -119,7 +131,8 @@ export function convertTools(
  * nested content parts, which only accept input_text/input_image/etc.) so the
  * following `function_call_output` items keep a matching call_id; dropping
  * them would leave the call_id dangling and can make strict relays reject the
- * history with a 400.
+ * history with a 400. Thinking models additionally require a non-empty
+ * `reasoning` item before each batch of tool calls.
  */
 export function convertResponsesInput(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
@@ -131,6 +144,7 @@ export function convertResponsesInput(
     const role = mapResponsesRole(message.role);
     const contentParts: ResponsesInputContentPart[] = [];
     let textContent = '';
+    let thinkingText = '';
     const functionCalls: ResponsesInputItem[] = [];
     const toolResults: ResponsesInputItem[] = [];
 
@@ -151,6 +165,8 @@ export function convertResponsesInput(
           call_id: part.callId,
           output: stringifyToolResult(part.content),
         });
+      } else if (isThinkingPart(part)) {
+        thinkingText += part.value;
       } else if (supportsImageInput) {
         const imagePart = getImageDataPart(part);
         if (!imagePart) {
@@ -168,7 +184,14 @@ export function convertResponsesInput(
       if (textContent) {
         result.push({ role, content: contentParts });
       }
-      result.push(...functionCalls);
+      if (functionCalls.length > 0) {
+        result.push({
+          type: 'reasoning',
+          content: [{ type: 'reasoning_text', text: thinkingText || REASONING_PLACEHOLDER }],
+          summary: [],
+        });
+        result.push(...functionCalls);
+      }
     } else if (contentParts.length > 0) {
       result.push({
         role,

@@ -197,7 +197,8 @@ export interface OpenAIFullResponse extends StreamChunk {
 export type ResponsesInputItem =
   | { role: 'system' | 'user' | 'assistant'; content: string | ResponsesInputContentPart[] }
   | { type: 'function_call_output'; call_id: string; output: string }
-  | { type: 'function_call'; call_id: string; name: string; arguments: string };
+  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'reasoning'; content: { type: 'reasoning_text'; text: string }[]; summary: never[] };
 
 export type ResponsesInputContentPart =
   | { type: 'input_text'; text: string }

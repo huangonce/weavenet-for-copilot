@@ -126,8 +126,24 @@ describe('responses input conversion', () => {
         role: 'assistant',
         content: [{ type: 'input_text', text: 'Calling search.' }],
       },
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
       { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
       { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
+    ]);
+  });
+
+  it('reuses thinking content as the reasoning item preceding tool calls', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('Need to look this up.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false)).toEqual([
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Need to look this up.' }], summary: [] },
+      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
     ]);
   });
 
@@ -158,6 +174,7 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false)).toEqual([
       { role: 'system', content: 'system instruction' },
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
       { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
     ]);
   });
