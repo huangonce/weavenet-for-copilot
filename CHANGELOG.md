@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.5.1 - 2026-08-01
+
+- 修复 Responses 请求中 assistant `function_call` 被错误嵌套进消息 `content` 数组的问题；改为顶层 input item（与 `function_call_output` 同级），避免严格校验的 Relay（如 DeepSeek）对含工具调用历史的请求返回 HTTP 400。
+
 ## 0.5.0 - 2026-08-01
 
 - 新增 OpenAI Responses API 协议层：通过 `/responses` 端点发起无状态请求（`store: false`、无 `previous_response_id`），包含 SSE 流式事件解析、用量映射与独立的协议错误处理。
