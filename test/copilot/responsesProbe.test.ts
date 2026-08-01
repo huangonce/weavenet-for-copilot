@@ -304,3 +304,70 @@ describe('Responses endpoint probing during model load', () => {
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
   });
 });
+
+describe('fixed models merged into the discovered catalog', () => {
+  beforeEach(() => {
+    clientMocks.listModels.mockResolvedValue({
+      data: [{
+        id: 'gpt-a',
+        name: 'Discovered GPT A',
+        context_length: 200_000,
+        max_completion_tokens: 32_768,
+        capabilities: {
+          tool_calling: true,
+          vision: true,
+          openai: { tokenLimitField: 'max_completion_tokens', promptCacheKey: true },
+        },
+      }],
+    });
+  });
+
+  it('keeps discovered metadata that the fixed model does not declare', async () => {
+    config = {
+      ...config,
+      openaiApiStrategy: 'chat',
+      models: [{ id: 'gpt-a', route: 'openai', openai: { encryptedReasoning: true } }],
+    };
+
+    const model = (await loadAllModels(config, 'secret-key', () => {})).models
+      .find((entry) => entry.upstreamId === 'gpt-a');
+
+    expect(model).toMatchObject({
+      name: 'Discovered GPT A',
+      catalogSource: 'configured',
+      toolCalling: true,
+      imageInput: true,
+      maxInputTokens: 200_000,
+      maxOutputTokens: 32_768,
+      metadataSources: { toolCalling: 'api', maxInputTokens: 'api' },
+    });
+    // The declared capability is merged field-wise instead of replacing the object.
+    expect(model?.openai).toMatchObject({
+      encryptedReasoning: true,
+      tokenLimitField: 'max_completion_tokens',
+      promptCacheKey: true,
+    });
+  });
+
+  it('lets the fixed model override the fields it declares and drops their stale source', async () => {
+    config = {
+      ...config,
+      openaiApiStrategy: 'chat',
+      models: [{
+        id: 'gpt-a',
+        route: 'openai',
+        name: 'Pinned GPT A',
+        toolCalling: false,
+        openai: { promptCacheKey: false },
+      }],
+    };
+
+    const model = (await loadAllModels(config, 'secret-key', () => {})).models
+      .find((entry) => entry.upstreamId === 'gpt-a');
+
+    expect(model).toMatchObject({ name: 'Pinned GPT A', toolCalling: false, imageInput: true });
+    expect(model?.metadataSources?.toolCalling).toBeUndefined();
+    expect(model?.metadataSources?.imageInput).toBe('api');
+    expect(model?.openai).toMatchObject({ promptCacheKey: false, tokenLimitField: 'max_completion_tokens' });
+  });
+});

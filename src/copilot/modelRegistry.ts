@@ -12,7 +12,7 @@ import {
 } from '../relay/models';
 import { responsesProbeCache } from '../relay/responsesProbeCache';
 import type { ResponsesEndpointAvailability } from '../relay/probes';
-import type { ModelProtocol, OpenAIApiVariant, RelayModel, RoutedModel } from '../relay/types';
+import type { ModelMetadataSources, ModelProtocol, OpenAIApiVariant, RelayModel, RoutedModel } from '../relay/types';
 import { formatLogError, type DebugLogger } from './requestDiagnostics';
 
 const RESPONSES_PROBE_CONCURRENCY = 4;
@@ -289,21 +289,45 @@ function dedupeModels(models: RoutedModel[]): RoutedModel[] {
   for (const model of models) {
     const key = `${model.route}:${model.upstreamId}`;
     const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, model);
-      continue;
-    }
-    // Explicitly configured models override discovery metadata. A fixed model
-    // that declares `openaiApi` decides its own protocol; otherwise the
-    // discovery probe verdict survives so dispatch keeps using Responses.
-    byKey.set(key, {
-      ...existing,
-      ...model,
-      openaiApi: model.openaiApi ?? existing.openaiApi,
-    });
+    byKey.set(key, existing ? mergeRoutedModels(existing, model) : model);
   }
   return [...byKey.values()].sort((a, b) => {
     if (a.protocol !== b.protocol) return a.protocol === 'openai' ? -1 : 1;
     return a.id.localeCompare(b.id);
   });
+}
+
+/**
+ * 后出现的模型（通常是固定配置）只覆盖它真正声明过的字段。整体展开会把未声明的
+ * `undefined` 一起写入，从而抹掉发现阶段拿到的 `toolCalling` 等能力——只想补一条
+ * `openai` 能力的固定模型会因此丢失工具调用。
+ */
+function mergeRoutedModels(existing: RoutedModel, override: RoutedModel): RoutedModel {
+  const merged: RoutedModel = { ...existing, ...definedEntries(override) };
+  const openai = existing.openai && override.openai
+    ? { ...existing.openai, ...definedEntries(override.openai) }
+    : override.openai ?? existing.openai;
+  if (openai) merged.openai = openai;
+  merged.metadataSources = mergeMetadataSources(existing, override);
+  return merged;
+}
+
+/** 丢弃 `undefined`，让展开只覆盖真正声明过的字段。 */
+function definedEntries<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
+}
+
+const METADATA_SOURCE_KEYS: readonly (keyof ModelMetadataSources)[] = [
+  'maxInputTokens', 'maxOutputTokens', 'toolCalling', 'imageInput', 'thinking', 'contextWindows', 'referencePricing',
+];
+
+/** 只有被覆盖的字段才改用后者的来源标注；其余保留发现阶段的出处。 */
+function mergeMetadataSources(existing: RoutedModel, override: RoutedModel): ModelMetadataSources {
+  const result: ModelMetadataSources = {};
+  for (const key of METADATA_SOURCE_KEYS) {
+    result[key] = override[key] !== undefined
+      ? override.metadataSources?.[key]
+      : existing.metadataSources?.[key];
+  }
+  return result;
 }

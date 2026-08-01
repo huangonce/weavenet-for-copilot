@@ -857,7 +857,7 @@ describe('Provider chat responses', () => {
       responseType: 'application/json',
       termination: 'completed',
     } as never);
-    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({
         model: 'gpt-test',
@@ -902,7 +902,7 @@ describe('Provider chat responses', () => {
     };
     vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('supported');
     vi.spyOn(RelayClient.prototype, 'testOpenAIResponses').mockRejectedValue(new Error('model does not support /responses'));
-    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
     const streamResponses = vi.spyOn(RelayClient.prototype, 'streamResponses').mockResolvedValue(undefined);
     const streamChat = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({ model: 'gpt-test', messages: expect.any(Array) });
@@ -933,7 +933,7 @@ describe('Provider chat responses', () => {
         openai: { encryptedReasoning: true },
       }],
     };
-    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
     let request: ResponsesRequest | undefined;
     vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
       request = sent as ResponsesRequest;
@@ -963,5 +963,41 @@ describe('Provider chat responses', () => {
       id: 'rs_1',
       metadata: { weavenetResponsesReasoning: { encryptedContent: 'enc:abc', summary: [] } },
     }));
+  });
+
+  it('asks for a reasoning summary alongside the effort only when reasoningSummary is enabled', async () => {
+    const withCapability = async (openai: Record<string, unknown>): Promise<ResponsesRequest | undefined> => {
+      const profile = {
+        ...WORK_PROFILE,
+        models: [{
+          id: 'gpt-test',
+          route: 'openai' as const,
+          openaiApi: 'responses' as const,
+          toolCalling: true,
+          thinking: true,
+          openai,
+        }],
+      };
+      const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
+      let request: ResponsesRequest | undefined;
+      vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
+        request = sent as ResponsesRequest;
+        callbacks.onContent('answer');
+      });
+
+      await provider.provideLanguageModelChatResponse(
+        { ...model, maxOutputTokens: 16 } as never,
+        [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
+        { modelOptions: { reasoningEffort: 'low' } } as never,
+        progress() as never,
+        token,
+      );
+      return request;
+    };
+
+    expect(await withCapability({ reasoningSummary: true })).toMatchObject({
+      reasoning: { effort: 'low', summary: 'auto' },
+    });
+    expect((await withCapability({}))?.reasoning).toEqual({ effort: 'low' });
   });
 });

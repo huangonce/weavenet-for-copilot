@@ -170,7 +170,7 @@ describe('connectionRuntimeManager helpers', () => {
     expect(first).toBe(second);
     expect(catalogRevision({ ...WORK_PROFILE, baseUrl: 'https://other.example.test/v1' })).not.toBe(first);
 
-    values.openaiApiStrategy = 'chat';
+    values.openaiApiStrategy = 'responses';
     expect(catalogRevision(WORK_PROFILE)).not.toBe(first);
   });
 

@@ -104,7 +104,7 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
 }
 
 function normalizeOpenAIApiStrategy(value: unknown): OpenAIApiStrategy {
-  return value === 'chat' || value === 'responses' ? value : 'auto';
+  return value === 'auto' || value === 'responses' ? value : 'chat';
 }
 
 export function getProfileConfiguration(): ProfileConfiguration {

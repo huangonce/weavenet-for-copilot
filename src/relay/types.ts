@@ -156,6 +156,12 @@ export interface OpenAIRequestCapabilities {
    * `previous_response_id` is never sent. Requires an endpoint that accepts the `include` field.
    */
   encryptedReasoning?: boolean;
+  /**
+   * Requests `reasoning.summary: "auto"` on the Responses API so the model streams a readable
+   * summary of its thinking. Off by default: endpoints that do not support the field reject the
+   * request, and some require account verification before summaries are returned.
+   */
+  reasoningSummary?: boolean;
   developerRole?: boolean;
   clientRequestId?: boolean;
   reasoningEfforts?: ReasoningEffort[];

@@ -29,6 +29,7 @@ export function normalizeOpenAIRequestCapabilities(value: unknown): OpenAIReques
     replayReasoningContent: optionalBoolean(record.replayReasoningContent),
     assistantPhase: optionalBoolean(record.assistantPhase),
     encryptedReasoning: optionalBoolean(record.encryptedReasoning),
+    reasoningSummary: optionalBoolean(record.reasoningSummary),
     developerRole: optionalBoolean(record.developerRole),
     clientRequestId: optionalBoolean(record.clientRequestId),
     reasoningEfforts: reasoningEfforts?.length ? reasoningEfforts : undefined,

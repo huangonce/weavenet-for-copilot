@@ -152,12 +152,12 @@ describe('connection-scoped route settings', () => {
   });
 
   it.each([
-    [undefined, 'auto'],
+    [undefined, 'chat'],
     ['auto', 'auto'],
     ['chat', 'chat'],
     ['responses', 'responses'],
-    ['invalid', 'auto'],
-    [42, 'auto'],
+    ['invalid', 'chat'],
+    [42, 'chat'],
   ])('normalizes the application-wide OpenAI API strategy %j to %s', (value, expected) => {
     mockConfiguration({ openaiApiStrategy: value });
 

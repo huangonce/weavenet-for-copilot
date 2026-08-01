@@ -5,7 +5,7 @@ import {
   supportsImageInputForRoutedModel,
   supportsToolCallingForModel,
 } from '../relay/models';
-import type { ChatRequest, OpenAIUsage, ResponsesRequest, RoutedModel } from '../relay/types';
+import type { ChatRequest, OpenAIUsage, ReasoningEffort, ResponsesRequest, RoutedModel } from '../relay/types';
 import { toLanguageModelError } from './connection';
 import {
   convertMessages,
@@ -164,6 +164,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
+  const reasoningSummary = routedModel.openai?.reasoningSummary === true;
   const tokenLimit = !hasImageInput && config.sendMaxTokens
     ? createResponsesTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
     : {};
@@ -183,7 +184,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
       tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
     } : {}),
     ...tokenLimit,
-    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+    ...createResponsesReasoning(reasoningEffort, reasoningSummary),
     ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
   };
   logResponsesRequest(debug, config, request);
@@ -269,6 +270,7 @@ function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, reques
       + `tools=${request.tools?.length ?? 0}, imageParts=${imageParts}, store=${Boolean(request.store)}, `
       + `promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `encryptedReasoning=${request.include?.includes('reasoning.encrypted_content') ?? false}, `
+      + `reasoningSummary=${request.reasoning?.summary ?? 'off'}, `
       + `replayedReasoningItems=${countReplayedReasoningItems(request)}, `
       + `bodyBytes=${bodyBytes}`,
   );
@@ -326,6 +328,19 @@ function createTokenLimit(model: RoutedModel, value: number): Pick<ChatRequest, 
 
 function createResponsesTokenLimit(model: RoutedModel, value: number): Pick<ResponsesRequest, 'max_output_tokens'> {
   return model.openai?.tokenLimitField === 'omit' ? {} : { max_output_tokens: value };
+}
+
+function createResponsesReasoning(
+  effort: ReasoningEffort | undefined,
+  summary: boolean,
+): Pick<ResponsesRequest, 'reasoning'> {
+  if (!effort && !summary) return {};
+  return {
+    reasoning: {
+      ...(effort ? { effort } : {}),
+      ...(summary ? { summary: 'auto' as const } : {}),
+    },
+  };
 }
 
 function hashString(value: string): string {

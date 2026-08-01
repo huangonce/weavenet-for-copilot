@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -251,6 +251,9 @@
                         "encryptedReasoning": {
                           "type": "boolean"
                         },
+                        "reasoningSummary": {
+                          "type": "boolean"
+                        },
                         "developerRole": {
                           "type": "boolean"
                         },
@@ -305,7 +308,7 @@
             "%configuration.openaiApiStrategy.chat%",
             "%configuration.openaiApiStrategy.responses%"
           ],
-          "default": "auto",
+          "default": "chat",
           "scope": "application",
           "description": "%configuration.openaiApiStrategy.description%"
         },

@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.6.2 - 2026-08-02
+
+- `weavenet-copilot.openaiApiStrategy` 默认值由 `auto` 改为 `chat`。Responses 与 Chat Completions 的规范化前缀不同，自动探测把已有连接切到 Responses 会造成 Prompt 缓存整体冷启动、首字时延上升；改为默认 Chat Completions 后不再自动切换协议，需要 Responses 时显式选择 `responses` 或 `auto`。
+- 修复固定模型与自动发现模型合并时抹掉能力元数据的缺陷。此前合并按整体展开，固定模型未声明的字段会以 `undefined` 覆盖发现结果——只想补一条 `openai` 能力的固定模型会连带丢掉 `toolCalling`、`maxInputTokens`、`name` 等元数据，进而导致工具调用被整体禁用。现在固定模型只覆盖它真正声明过的字段，`openai` 能力对象亦按字段合并；元数据来源标注只对被覆盖的字段更新。
+- 新增 `openai.reasoningSummary` 能力（仅 Responses 协议，默认关闭）：启用后请求带 `reasoning.summary: "auto"`，模型在最终答案前流式输出可读的思考摘要，缩短长推理场景的可见空窗期。不支持该字段的网关可能返回 400，关闭即可；调试日志新增 `reasoningSummary=` 字段。
+
 ## 0.6.1 - 2026-08-01
 
 - 新增应用级 `weavenet-copilot.openaiApiStrategy` 设置（`auto` / `chat` / `responses`）。协议决策采用安全否决优先级：全局或固定模型任一处显式 `chat` 都强制 Chat Completions；没有 `chat` 时显式 `responses` 强制 Responses；均未指定时才执行现有能力探测。强制策略和模型级声明会跳过无意义的 Responses 探测，设置变化会自动失效旧目录快照并刷新模型。
