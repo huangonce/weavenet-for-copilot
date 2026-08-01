@@ -194,6 +194,110 @@ describe('responses input conversion', () => {
     });
   });
 
+  it('preserves interleaved text and tool-call order', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('I need to check.'),
+        new vscode.LanguageModelTextPart('Checking now.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
+        new vscode.LanguageModelTextPart('Found the answer.'),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false, true, true)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Checking now.' }], phase: 'commentary' },
+        { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'I need to check.' }], summary: [] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Found the answer.' }], phase: 'final_answer' },
+      ],
+    });
+  });
+
+  it('keeps a single synthesized reasoning item in front of consecutive tool calls', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('Thinking first.'),
+        new vscode.LanguageModelTextPart('The answer.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+        new vscode.LanguageModelToolCallPart('call-2', 'read', {}),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false, true, true)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }], phase: 'commentary' },
+        { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Thinking first.' }], summary: [] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+        { type: 'function_call', call_id: 'call-2', name: 'read', arguments: '{}' },
+      ],
+    });
+  });
+
+  it('does not synthesize reasoning for pure-text turns', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('A short thought.'),
+        new vscode.LanguageModelTextPart('The answer.'),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false, true, true)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }], phase: 'final_answer' },
+      ],
+    });
+  });
+
+  it('replays a carried encrypted reasoning item verbatim and in place', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelTextPart('Checking now.'),
+        new vscode.LanguageModelThinkingPart('', 'rs_1', {
+          weavenetResponsesReasoning: {
+            encryptedContent: 'gAAAAA-opaque',
+            summary: [{ type: 'summary_text', text: 'Looked it up.' }],
+          },
+        }),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false, true, false, true)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Checking now.' }] },
+        {
+          type: 'reasoning',
+          id: 'rs_1',
+          encrypted_content: 'gAAAAA-opaque',
+          summary: [{ type: 'summary_text', text: 'Looked it up.' }],
+        },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+    });
+  });
+
+  it('sends no reasoning item when the encrypted payload did not survive the round trip', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('Plaintext only.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+      ],
+    }] as never;
+
+    // Better to omit reasoning than to send a synthesized item the server rejects.
+    expect(convertResponsesInput(messages, false, true, false, true)).toEqual({
+      input: [
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+    });
+  });
+
   it('preserves images as input_image parts only when supported', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.User,

@@ -16,6 +16,7 @@ function callbacks() {
     onContent: vi.fn(),
     onReasoning: vi.fn(),
     onToolCall: vi.fn(),
+    onResponsesReasoningItem: vi.fn(),
     onRefusal: vi.fn(),
     onOpenAIFinishReason: vi.fn(),
     onProcessingStarted: vi.fn(),
@@ -165,6 +166,38 @@ describe('Responses SSE parsing', () => {
     const state = streamState();
     expect(() => processResponsesSseLine('data: {not json', tools, cb, state)).toThrow(RelayStreamError);
   });
+
+  it('captures the completed reasoning item including encrypted_content', () => {
+    const cb = callbacks();
+    const tools = new Map();
+    const state = streamState();
+    processResponsesSseLine(
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[],"content":[]}}',
+      tools,
+      cb,
+      state,
+    );
+    processResponsesSseLine(
+      'data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"think"}',
+      tools,
+      cb,
+      state,
+    );
+    processResponsesSseLine(
+      'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"short"}],"content":[{"type":"reasoning_text","text":"think"}],"encrypted_content":"enc:abc123"}}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+      id: 'rs_1',
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'short' }],
+      content: [{ type: 'reasoning_text', text: 'think' }],
+      encrypted_content: 'enc:abc123',
+    });
+    expect(cb.onReasoning).toHaveBeenCalledWith('think');
+  });
 });
 
 describe('Responses full response parsing', () => {
@@ -208,6 +241,33 @@ describe('Responses full response parsing', () => {
       total_tokens: 30,
       prompt_tokens_details: { cached_tokens: 4 },
       completion_tokens_details: { reasoning_tokens: 6 },
+    });
+    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+      id: 'rs_1',
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'short' }],
+      content: [{ type: 'reasoning_text', text: 'long thought' }],
+    });
+  });
+
+  it('passes through encrypted reasoning content from a full response', async () => {
+    const cb = callbacks();
+    const response = new Response(JSON.stringify({
+      id: 'resp_1',
+      status: 'completed',
+      output: [
+        { id: 'rs_1', type: 'reasoning', summary: [], content: [{ type: 'reasoning_text', text: 'think' }], encrypted_content: 'enc:xyz' },
+      ],
+    }), { headers: { 'content-type': 'application/json' } });
+
+    await processResponsesFullResponse(response, cb);
+
+    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+      id: 'rs_1',
+      type: 'reasoning',
+      summary: [],
+      content: [{ type: 'reasoning_text', text: 'think' }],
+      encrypted_content: 'enc:xyz',
     });
   });
 

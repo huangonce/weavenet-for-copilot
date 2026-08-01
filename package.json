@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -246,6 +246,9 @@
                           "type": "boolean"
                         },
                         "assistantPhase": {
+                          "type": "boolean"
+                        },
+                        "encryptedReasoning": {
                           "type": "boolean"
                         },
                         "developerRole": {

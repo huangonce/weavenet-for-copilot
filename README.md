@@ -113,6 +113,7 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
     "clientRequestId": true,
     "replayReasoningContent": false,
     "assistantPhase": false,
+    "encryptedReasoning": false,
     "reasoningEfforts": ["minimal", "low", "medium", "high"],
     "defaultReasoningEffort": "medium"
   }
@@ -123,7 +124,9 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 
 `context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。Responses API 采用自动能力探测：免费 `GET /responses` 可用性检查后，新发现的 OpenAI 兼容模型各执行一次最小探测 POST，探测结果按连接缓存，可被手动刷新或 `openaiApi` 显式声明覆盖，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
 
-`replayReasoningContent` 与 `assistantPhase` 只作用于 Responses 协议，且默认关闭。前者在每组 `function_call` 前回传合成的 `reasoning` item，仅供 DeepSeek 等要求回传思考内容的 Relay 使用——规范中的 `reasoning` item 需携带上游返回的 `id`，重放历史无法提供，因此默认不发送。后者为 assistant 历史消息标注 `phase`（工具调用前的文本记为 `commentary`，最终回答记为 `final_answer`），可改善 Codex 系模型的表现，但旧网关可能拒绝该字段。
+`replayReasoningContent` 与 `assistantPhase` 只作用于 Responses 协议，且默认关闭。前者在每组连续 `function_call` 前回传一个合成的 `reasoning` item，仅供 DeepSeek 等要求回传思考内容的 Relay 使用——规范中的 `reasoning` item 需携带上游返回的 `id`，合成项无法提供，因此默认不发送。后者为 assistant 历史消息标注 `phase`（最后一次工具调用之前的文本记为 `commentary`，其后记为 `final_answer`），可改善 Codex 系模型的表现，但旧网关可能拒绝该字段。重放历史始终按原始交错顺序产出 item（思考、文本、工具调用各就各位），不再按类型分组。
+
+`encryptedReasoning`（仅 Responses 协议，默认关闭）是 `replayReasoningContent` 的规范替代方案：启用后请求带 `include: ["reasoning.encrypted_content"]`，扩展把服务端返回的 reasoning item（真实 `id` + 加密载荷）原样寄存在会话历史的思考块上，下一轮按原位逐字回传，从而在不依赖服务端存储的前提下还原真实推理——请求仍为 `store: false`，也从不发送 `previous_response_id`。加密载荷对扩展完全不透明，只做透传。要求 Relay 上游接受 `include` 字段；不认识该字段的网关可能返回 400，关闭该能力即可。若宿主未把加密载荷带回下一轮，则退化为不发送任何 reasoning item——绝不会发送缺少加密载荷的 reasoning item。
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 

@@ -19,15 +19,44 @@ const SYSTEM_ROLE = 3;
 const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 /** Thinking models reject empty reasoning_text, so tool calls without recoverable thinking need a stand-in. */
 const REASONING_PLACEHOLDER = '(reasoning omitted)';
+/** Namespaced so the shared thinking-part metadata bag cannot collide with other providers. */
+export const RESPONSES_REASONING_METADATA_KEY = 'weavenetResponsesReasoning';
+
+interface ThinkingPartLike {
+  value: string;
+  id?: string;
+  metadata?: Record<string, unknown>;
+}
 
 /** Thinking parts are not in the stable API surface, so detect them structurally. */
-function isThinkingPart(part: unknown): part is { value: string } {
+function isThinkingPart(part: unknown): part is ThinkingPartLike {
   const ThinkingPart = (vscode as unknown as { LanguageModelThinkingPart?: new (value: string) => unknown })
     .LanguageModelThinkingPart;
   if (ThinkingPart && part instanceof ThinkingPart) {
     return typeof (part as { value?: unknown }).value === 'string';
   }
   return false;
+}
+
+/**
+ * Rebuilds the original reasoning item from a replayed thinking part. The
+ * encrypted payload is opaque and is only ever passed back verbatim, which is
+ * what makes reasoning replay possible without server-side storage.
+ */
+export function encryptedReasoningItem(part: ThinkingPartLike): ResponsesInputItem | undefined {
+  const carried = part.metadata?.[RESPONSES_REASONING_METADATA_KEY];
+  if (!carried || typeof carried !== 'object') return undefined;
+  const { encryptedContent, summary } = carried as { encryptedContent?: unknown; summary?: unknown };
+  if (typeof encryptedContent !== 'string' || !encryptedContent || !part.id) return undefined;
+  return {
+    type: 'reasoning',
+    id: part.id,
+    encrypted_content: encryptedContent,
+    summary: Array.isArray(summary)
+      ? summary.filter((entry): entry is { type: 'summary_text'; text: string } =>
+        typeof (entry as { text?: unknown })?.text === 'string')
+      : [],
+  };
 }
 
 export function convertMessages(
@@ -134,15 +163,18 @@ export function convertTools(
  * call_id; dropping them would leave the call_id dangling and can make strict
  * relays reject the history with a 400. Assistant message text uses
  * `output_text` parts, matching the output message schema that strict relays
- * validate against. A `reasoning` item requires an `id` from the response that
- * produced it, so a synthesized one is only sent for relays that demand it via
- * `replayReasoningContent`.
+ * validate against. A `reasoning` item requires the `id` of the response that
+ * produced it: with `encryptedReasoning` the real item is carried across turns
+ * on the thinking part and replayed verbatim, otherwise a stand-in is only sent
+ * for relays that demand it via `replayReasoningContent`. Replayed items keep
+ * their original interleaved order instead of being grouped by type.
  */
 export function convertResponsesInput(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
   supportsImageInput: boolean,
   replayReasoningContent = false,
   includeAssistantPhase = false,
+  encryptedReasoning = false,
 ): { input: ResponsesInputItem[]; instructions?: string } {
   const result: ResponsesInputItem[] = [];
   const instructionParts: string[] = [];
@@ -157,77 +189,115 @@ export function convertResponsesInput(
       }
       continue;
     }
-    const contentParts: ResponsesInputContentPart[] = [];
-    let textContent = '';
-    let thinkingText = '';
-    const functionCalls: ResponsesInputItem[] = [];
     const toolResults: ResponsesInputItem[] = [];
 
-    for (const part of message.content) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        textContent += part.value;
-        contentParts.push(
-          role === 'assistant'
-            ? { type: 'output_text', text: part.value }
-            : { type: 'input_text', text: part.value },
-        );
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        functionCalls.push({
-          type: 'function_call',
-          call_id: part.callId,
-          name: part.name,
-          arguments: JSON.stringify(part.input ?? {}),
-        });
-      } else if (part instanceof vscode.LanguageModelToolResultPart) {
-        toolResults.push({
-          type: 'function_call_output',
-          call_id: part.callId,
-          output: stringifyToolResult(part.content),
-        });
-      } else if (isThinkingPart(part)) {
-        thinkingText += part.value;
-      } else if (supportsImageInput) {
-        const imagePart = getImageDataPart(part);
-        if (!imagePart) {
-          continue;
-        }
-        contentParts.push({
-          type: 'input_image',
-          image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
-          detail: 'auto',
-        });
-      }
-    }
-
     if (role === 'assistant') {
-      if (textContent) {
-        // Text followed by tool calls is a preamble rather than the answer.
+      // Items are emitted in their original interleaved order rather than
+      // grouped by type, so replayed history matches the order the model
+      // produced it in. A real reasoning item (carried across turns on the
+      // thinking part) replays at its own position; the synthesized stand-in
+      // stays directly in front of each group of tool calls, which is the
+      // placement the relays requiring it expect.
+      const parts = [...message.content];
+      const lastToolCallIndex = parts.findLastIndex((part) => part instanceof vscode.LanguageModelToolCallPart);
+      let segment: ResponsesInputContentPart[] = [];
+      let segmentIndex = 0;
+      let pendingThinking = '';
+      let previousWasToolCall = false;
+      const flushText = () => {
+        if (segment.length === 0) return;
         result.push({
           role,
-          content: contentParts,
+          content: segment,
           ...(includeAssistantPhase
-            ? { phase: functionCalls.length > 0 ? 'commentary' as const : 'final_answer' as const }
+            ? { phase: segmentIndex < lastToolCallIndex ? ('commentary' as const) : ('final_answer' as const) }
             : {}),
         });
-      }
-      if (functionCalls.length > 0) {
-        // A spec-compliant reasoning item carries the `id` of the response that
-        // produced it, which a replayed history cannot supply, so it is only
-        // synthesized for relays that reject tool calls without one.
-        if (replayReasoningContent) {
+        segment = [];
+      };
+
+      for (const [index, part] of parts.entries()) {
+        if (part instanceof vscode.LanguageModelToolCallPart) {
+          flushText();
+          if (replayReasoningContent && !encryptedReasoning && !previousWasToolCall) {
+            result.push({
+              type: 'reasoning',
+              content: [{ type: 'reasoning_text', text: pendingThinking || REASONING_PLACEHOLDER }],
+              summary: [],
+            });
+          }
           result.push({
-            type: 'reasoning',
-            content: [{ type: 'reasoning_text', text: thinkingText || REASONING_PLACEHOLDER }],
-            summary: [],
+            type: 'function_call',
+            call_id: part.callId,
+            name: part.name,
+            arguments: JSON.stringify(part.input ?? {}),
+          });
+          previousWasToolCall = true;
+          continue;
+        }
+        previousWasToolCall = false;
+        if (part instanceof vscode.LanguageModelTextPart) {
+          if (segment.length === 0) segmentIndex = index;
+          segment.push({ type: 'output_text', text: part.value });
+        } else if (part instanceof vscode.LanguageModelToolResultPart) {
+          toolResults.push({
+            type: 'function_call_output',
+            call_id: part.callId,
+            output: stringifyToolResult(part.content),
+          });
+        } else if (isThinkingPart(part)) {
+          const replayed = encryptedReasoning ? encryptedReasoningItem(part) : undefined;
+          if (replayed) {
+            flushText();
+            result.push(replayed);
+          } else {
+            pendingThinking += part.value;
+          }
+        } else if (supportsImageInput) {
+          const imagePart = getImageDataPart(part);
+          if (!imagePart) {
+            continue;
+          }
+          if (segment.length === 0) segmentIndex = index;
+          segment.push({
+            type: 'input_image',
+            image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
+            detail: 'auto',
           });
         }
-        result.push(...functionCalls);
       }
-    } else if (contentParts.length > 0) {
-      result.push({
-        role,
-        content: contentParts.some((part) => part.type === 'input_image') ? contentParts : textContent,
-      });
+      flushText();
+    } else {
+      const contentParts: ResponsesInputContentPart[] = [];
+      let textContent = '';
+      for (const part of message.content) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          textContent += part.value;
+          contentParts.push({ type: 'input_text', text: part.value });
+        } else if (part instanceof vscode.LanguageModelToolResultPart) {
+          toolResults.push({
+            type: 'function_call_output',
+            call_id: part.callId,
+            output: stringifyToolResult(part.content),
+          });
+        } else if (supportsImageInput) {
+          const imagePart = getImageDataPart(part);
+          if (!imagePart) {
+            continue;
+          }
+          contentParts.push({
+            type: 'input_image',
+            image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
+            detail: 'auto',
+          });
+        }
+      }
+      if (contentParts.length > 0) {
+        result.push({
+          role,
+          content: contentParts.some((part) => part.type === 'input_image') ? contentParts : textContent,
+        });
+      }
     }
 
     result.push(...toolResults);

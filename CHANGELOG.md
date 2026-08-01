@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.5.7 - 2026-08-01
+
+- 新增 `openai.encryptedReasoning` 能力（Responses 协议，默认关闭）：启用后请求带 `include: ["reasoning.encrypted_content"]`，扩展把服务端返回的 reasoning item（真实 `id` + 加密载荷）原样寄存在会话历史的思考块上，下一轮按原位逐字回传。这是无状态占位回放的规范替代方案——推理内容由服务端加密、客户端无法构造，而回传加密件不需要服务端存储：请求仍为 `store: false`，且从不发送 `previous_response_id`。若宿主未能带回加密载荷，则退化为不发送任何 reasoning item（绝不发送缺少加密载荷的 reasoning item）。
+- 流式与全量响应解析现在完整捕获 reasoning 输出项（`id`、summary、`encrypted_content`），并通过新回调对外提供，供上述回放与诊断使用。
+- 修复重放历史输出顺序被打乱的问题：`convertResponsesInput` 不再按“文本→推理→工具调用”三段式合并，而是按原始交错顺序产出 input item，`phase` 标注按分段所处位置正确标记（最后一次工具调用之前的文本为 `commentary`，其后为 `final_answer`）。
+- 默认行为不变：未声明 `encryptedReasoning` 的请求不带 `include` 字段；`replayReasoningContent` 的占位推理仍紧邻其后的工具调用组发送，每组连续工具调用只发一次。
+
 ## 0.5.6 - 2026-08-01
 
 - 修复 Responses 能力探测缓存跨连接串扰的问题：缓存键改为“连接 UUID + 模型 ID”，两个连接即使共用同一 Relay 地址也不会互相继承探测结论；连接配置修订或删除时同步清除对应缓存。

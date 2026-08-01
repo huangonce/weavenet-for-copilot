@@ -12,6 +12,7 @@ import {
   convertResponsesInput,
   convertResponsesTools,
   convertTools,
+  RESPONSES_REASONING_METADATA_KEY,
 } from './convert';
 import {
   getConfiguredContextWindow,
@@ -129,9 +130,12 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
 }
 
 /**
- * OpenAI Responses API provider. The initial implementation is stateless:
- * `store` is always disabled, `previous_response_id` is never sent, and a
- * failed request never falls back to Chat Completions.
+ * OpenAI Responses API provider. Requests are stateless: `store` is always
+ * disabled, `previous_response_id` is never sent, and a failed request never
+ * falls back to Chat Completions. With the explicit `openai.encryptedReasoning`
+ * capability the server's encrypted reasoning items are requested, carried
+ * across turns on the thinking part, and replayed verbatim, which is how real
+ * reasoning survives without server-side storage.
  */
 export async function provideResponsesResponse(context: OpenAIResponseContext): Promise<void> {
   const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
@@ -146,11 +150,13 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
+  const encryptedReasoning = routedModel.openai?.encryptedReasoning === true;
   const { input, instructions } = convertResponsesInput(
     messages,
     supportsImageInput,
     routedModel.openai?.replayReasoningContent === true,
     routedModel.openai?.assistantPhase === true,
+    encryptedReasoning,
   );
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
@@ -163,6 +169,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     input,
     stream: true,
     store: false,
+    ...(encryptedReasoning ? { include: ['reasoning.encrypted_content'] } : {}),
     ...(instructions ? { instructions } : {}),
     temperature: config.temperature,
     // OpenAI recommends changing temperature or top_p, but not both.
@@ -187,6 +194,17 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
       onReasoning: (text) => {
         diagnostics.onReasoning();
         reportThinking(progress, text);
+      },
+      onResponsesReasoningItem: (item) => {
+        // Parked on a metadata-only thinking part so the next turn can replay
+        // the item verbatim; the payload stays opaque to the extension.
+        if (!encryptedReasoning || !item.id || !item.encrypted_content) return;
+        reportThinking(progress, '', item.id, {
+          [RESPONSES_REASONING_METADATA_KEY]: {
+            encryptedContent: item.encrypted_content,
+            summary: item.summary ?? [],
+          },
+        });
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
@@ -245,8 +263,15 @@ function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, reques
     config,
     `OpenAI Responses request: model=${request.model}, inputItems=${typeof request.input === 'string' ? 1 : request.input.length}, `
       + `tools=${request.tools?.length ?? 0}, imageParts=${imageParts}, store=${Boolean(request.store)}, `
+      + `encryptedReasoning=${request.include?.includes('reasoning.encrypted_content') ?? false}, `
+      + `replayedReasoningItems=${countReplayedReasoningItems(request)}, `
       + `bodyBytes=${bodyBytes}`,
   );
+}
+
+function countReplayedReasoningItems(request: ResponsesRequest): number {
+  if (typeof request.input === 'string') return 0;
+  return request.input.filter((item) => 'type' in item && item.type === 'reasoning' && Boolean(item.encrypted_content)).length;
 }
 
 function logOpenAIUsage(

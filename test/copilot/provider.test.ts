@@ -19,6 +19,7 @@ import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
 import { responsesProbeCache } from '../../src/relay/responsesProbeCache';
 import { formatLogError } from '../../src/copilot/requestDiagnostics';
+import type { ResponsesRequest } from '../../src/relay/types';
 import { InMemoryMemento } from '../support/memento';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
@@ -844,5 +845,49 @@ describe('Provider chat responses', () => {
 
     expect(streamResponses).not.toHaveBeenCalled();
     expect(streamChat).toHaveBeenCalledOnce();
+  });
+
+  it('requests encrypted reasoning without leaving the request stateless when encryptedReasoning is enabled', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      models: [{
+        id: 'gpt-test',
+        route: 'openai' as const,
+        openaiApi: 'responses' as const,
+        toolCalling: true,
+        thinking: true,
+        openai: { encryptedReasoning: true },
+      }],
+    };
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    let request: ResponsesRequest | undefined;
+    vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
+      request = sent as ResponsesRequest;
+      callbacks.onResponsesReasoningItem?.({
+        id: 'rs_1',
+        type: 'reasoning',
+        summary: [],
+        encrypted_content: 'enc:abc',
+      });
+      callbacks.onContent('answer');
+      callbacks.onStreamEnd?.('Responses', 'completed');
+    });
+    const reported = progress();
+
+    await provider.provideLanguageModelChatResponse(
+      { ...model, maxOutputTokens: 16 } as never,
+      [{ role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('hello')] }] as never,
+      {} as never,
+      reported as never,
+      token,
+    );
+
+    expect(request).toMatchObject({ store: false, include: ['reasoning.encrypted_content'] });
+    expect(request).not.toHaveProperty('previous_response_id');
+    // The opaque payload is parked on a thinking part so the next turn can replay it verbatim.
+    expect(reported.report).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'rs_1',
+      metadata: { weavenetResponsesReasoning: { encryptedContent: 'enc:abc', summary: [] } },
+    }));
   });
 });

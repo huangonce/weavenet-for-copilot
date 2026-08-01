@@ -75,8 +75,20 @@ export function estimateTextTokens(value: string): number {
 export function reportThinking(
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   text: string,
+  id?: string,
+  metadata?: Record<string, unknown>,
 ): void {
-  const ThinkingPart = (vscode as unknown as { LanguageModelThinkingPart?: new (value: string) => vscode.LanguageModelResponsePart })
-    .LanguageModelThinkingPart;
-  progress.report(ThinkingPart ? new ThinkingPart(text) : new vscode.LanguageModelTextPart(text));
+  const ThinkingPart = (vscode as unknown as {
+    LanguageModelThinkingPart?: new (
+      value: string,
+      id?: string,
+      metadata?: Record<string, unknown>,
+    ) => vscode.LanguageModelResponsePart;
+  }).LanguageModelThinkingPart;
+  if (!ThinkingPart) {
+    // A metadata-only part has nothing to show without a thinking part type.
+    if (text) progress.report(new vscode.LanguageModelTextPart(text));
+    return;
+  }
+  progress.report(new ThinkingPart(text, id, metadata));
 }

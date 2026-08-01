@@ -3,7 +3,11 @@ export class LanguageModelTextPart {
 }
 
 export class LanguageModelThinkingPart {
-  constructor(readonly value: string) {}
+  constructor(
+    readonly value: string,
+    readonly id?: string,
+    readonly metadata?: Record<string, unknown>,
+  ) {}
 }
 
 export class LanguageModelToolCallPart {

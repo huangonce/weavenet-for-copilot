@@ -226,6 +226,10 @@ export function processResponsesSseLine(
           if (event.item.arguments) current.function.arguments = event.item.arguments;
           state.parts += flushFunctionCall(index, pendingFunctionCalls, callbacks);
         }
+      } else if (event.item?.type === 'reasoning') {
+        // Carries the server-side `id` and, with `include: ["reasoning.encrypted_content"]`,
+        // the encrypted payload that a stateless replay must send back verbatim.
+        callbacks.onResponsesReasoningItem?.(event.item);
       }
       return false;
     }
@@ -292,6 +296,8 @@ export async function processResponsesFullResponse(
       });
       parts++;
     } else if (item.type === 'reasoning') {
+      // Surfaced in full so the caller can replay the real item verbatim.
+      callbacks.onResponsesReasoningItem?.(item);
       for (const part of [...(item.summary ?? []), ...(item.content ?? [])]) {
         if (part.text) {
           callbacks.onReasoning(part.text);

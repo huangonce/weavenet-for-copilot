@@ -133,6 +133,12 @@ export interface OpenAIRequestCapabilities {
   replayReasoningContent?: boolean;
   /** Codex-style models degrade when replayed assistant messages drop their `phase`. */
   assistantPhase?: boolean;
+  /**
+   * Requests `include: ["reasoning.encrypted_content"]` and replays the returned reasoning items
+   * verbatim (real `id` + encrypted payload) on later turns. Stateless: `store` stays disabled and
+   * `previous_response_id` is never sent. Requires an endpoint that accepts the `include` field.
+   */
+  encryptedReasoning?: boolean;
   developerRole?: boolean;
   clientRequestId?: boolean;
   reasoningEfforts?: ReasoningEffort[];
@@ -206,7 +212,15 @@ export type ResponsesInputItem =
     }
   | { type: 'function_call_output'; call_id: string; output: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
-  | { type: 'reasoning'; content: { type: 'reasoning_text'; text: string }[]; summary: { type: 'summary_text'; text: string }[] };
+  | {
+      type: 'reasoning';
+      /** The id of the response that produced this item; required for a spec-compliant replay. */
+      id?: string;
+      content?: { type: 'reasoning_text'; text: string }[];
+      summary: { type: 'summary_text'; text: string }[];
+      /** Opaque server-encrypted reasoning, replayed verbatim so stateless requests keep real reasoning. */
+      encrypted_content?: string;
+    };
 
 export type ResponsesInputContentPart =
   | { type: 'input_text'; text: string }
@@ -234,7 +248,8 @@ export interface ResponsesRequest {
   reasoning?: { effort?: ReasoningEffort; summary?: 'auto' | 'disabled' };
   store?: false;
   parallel_tool_calls?: boolean;
-  previous_response_id?: string | null;
+  /** Extra fields to include on output items, e.g. `["reasoning.encrypted_content"]`. */
+  include?: string[];
   text?: { format?: { type: 'text' } };
   truncation?: 'auto';
 }
@@ -275,6 +290,8 @@ export interface ResponsesOutputItemReasoning {
   type: 'reasoning';
   summary?: Array<{ type: 'summary_text'; text: string }>;
   content?: Array<{ type: 'reasoning_text'; text: string }>;
+  /** Server-side encrypted reasoning content; opaque to the client, only returned when `include: ["reasoning.encrypted_content"]` is set. */
+  encrypted_content?: string;
 }
 
 export type ResponsesOutputItem =
@@ -435,6 +452,8 @@ export interface StreamCallbacks {
   onContent(text: string): void;
   onReasoning(text: string): void;
   onToolCall(toolCall: ToolCall): void;
+  /** Full reasoning output item captured from the stream (id, summary, encrypted_content). */
+  onResponsesReasoningItem?(item: ResponsesOutputItemReasoning): void;
   /** Request metadata only; request bodies, URLs, and headers are never exposed. */
   onRequest?(protocol: RelayProtocol, metadata: RequestDiagnosticsMetadata): void;
   /** Transport state captured when fetch returns or rejects. */
