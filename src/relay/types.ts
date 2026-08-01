@@ -196,12 +196,12 @@ export interface OpenAIFullResponse extends StreamChunk {
 
 export type ResponsesInputItem =
   | { role: 'system' | 'user' | 'assistant'; content: string | ResponsesInputContentPart[] }
-  | { type: 'function_call_output'; call_id: string; output: string };
+  | { type: 'function_call_output'; call_id: string; output: string }
+  | { type: 'function_call'; call_id: string; name: string; arguments: string };
 
 export type ResponsesInputContentPart =
   | { type: 'input_text'; text: string }
-  | { type: 'input_image'; image_url: string; detail?: 'auto' }
-  | { type: 'function_call'; call_id: string; name: string; arguments: string };
+  | { type: 'input_image'; image_url: string; detail?: 'auto' };
 
 export interface ResponsesToolDefinition {
   type: 'function';

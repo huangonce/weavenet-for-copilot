@@ -124,11 +124,9 @@ describe('responses input conversion', () => {
     expect(convertResponsesInput(messages, false)).toEqual([
       {
         role: 'assistant',
-        content: [
-          { type: 'input_text', text: 'Calling search.' },
-          { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
-        ],
+        content: [{ type: 'input_text', text: 'Calling search.' }],
       },
+      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
       { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
     ]);
   });
@@ -160,7 +158,7 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false)).toEqual([
       { role: 'system', content: 'system instruction' },
-      { role: 'assistant', content: [{ type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' }] },
+      { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
     ]);
   });
 

@@ -115,7 +115,8 @@ export function convertTools(
 
 /**
  * Converts VS Code chat messages to OpenAI Responses API input items.
- * Assistant tool calls are preserved as `function_call` content parts so the
+ * Assistant tool calls are preserved as top-level `function_call` items (not
+ * nested content parts, which only accept input_text/input_image/etc.) so the
  * following `function_call_output` items keep a matching call_id; dropping
  * them would leave the call_id dangling and can make strict relays reject the
  * history with a 400.
@@ -130,6 +131,7 @@ export function convertResponsesInput(
     const role = mapResponsesRole(message.role);
     const contentParts: ResponsesInputContentPart[] = [];
     let textContent = '';
+    const functionCalls: ResponsesInputItem[] = [];
     const toolResults: ResponsesInputItem[] = [];
 
     for (const part of message.content) {
@@ -137,7 +139,7 @@ export function convertResponsesInput(
         textContent += part.value;
         contentParts.push({ type: 'input_text', text: part.value });
       } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        contentParts.push({
+        functionCalls.push({
           type: 'function_call',
           call_id: part.callId,
           name: part.name,
@@ -163,9 +165,10 @@ export function convertResponsesInput(
     }
 
     if (role === 'assistant') {
-      if (textContent || contentParts.some((part) => part.type === 'function_call')) {
+      if (textContent) {
         result.push({ role, content: contentParts });
       }
+      result.push(...functionCalls);
     } else if (contentParts.length > 0) {
       result.push({
         role,
