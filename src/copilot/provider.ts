@@ -414,7 +414,11 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         existing.message = undefined;
         existing.lastDiagnostics = this.diagnosticsStore.get(profile, diagnosticsOptions());
         changed = true;
-      } else if (JSON.stringify(existing.profile) !== JSON.stringify(profile)) {
+      } else if (existing.profile.name !== profile.name) {
+        // `catalogRevision` already covers baseUrl, requestHeaders, include/
+        // excludeModels and models; name is the only remaining user-visible
+        // field, so compare it explicitly instead of deep-serializing the
+        // whole profile (which is order-sensitive and slower).
         existing.profile = profile;
         changed = true;
       }

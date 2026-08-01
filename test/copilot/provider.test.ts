@@ -728,6 +728,25 @@ describe('Provider chat responses', () => {
       .rejects.toThrow('Unknown WeaveNet model route');
   });
 
+  it('updates aggregate bindings when only the profile name changes', async () => {
+    const { provider, secrets, setProfiles } = providerFixture();
+    secrets.values.set(keyFor(WORK_ID), 'work-key');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [openAIModel] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const [oldModel] = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
+    expect(oldModel.detail).toContain('work (work.example.test)');
+
+    setProfiles([{ ...WORK_PROFILE, name: 'renamed-work' }]);
+    await provider.refreshModels();
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
+    expect(information).toHaveLength(1);
+    // Only the display name changes; the model catalog and picker id are stable.
+    expect(information[0].detail).toContain('renamed-work (work.example.test)');
+    expect(information[0].id).toBe(oldModel.id);
+  });
+
   it('maps cancellation and Relay failures to VS Code language-model errors', async () => {
     const { provider, model } = await readyProvider(openAIModel);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockRejectedValue(new RelayRequestError('denied', 401, 'json'));

@@ -436,7 +436,7 @@ export interface StreamCallbacks {
   onResponse?(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
   onProcessingStarted?(protocol: RelayProtocol): void;
   /** Called only when the protocol's normal terminal event is received. */
-  onStreamEnd?(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed'): void;
+  onStreamEnd?(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete'): void;
 }
 
 export interface RequestDiagnosticsMetadata {

@@ -31,6 +31,8 @@ export interface OpenAIResponsesRequestOptions {
 interface ResponsesStreamState {
   parts: number;
   started: boolean;
+  /** Which terminal event closed the stream: normal completion or truncation. */
+  termination?: 'completed' | 'incomplete';
 }
 
 const MAX_SSE_EVENT_BYTES = 1024 * 1024;
@@ -80,14 +82,14 @@ export async function streamOpenAIResponses(
 
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (!request.stream || !contentType.includes('text/event-stream')) {
-    await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token);
-    callbacks.onStreamEnd?.('Responses', 'completed');
+    const termination = await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token);
+    callbacks.onStreamEnd?.('Responses', termination);
     return;
   }
 
   const outcome = await processResponsesStream(response, callbacks, options.streamIdleTimeoutMs, token);
   if (outcome.terminal) {
-    callbacks.onStreamEnd?.('Responses', 'completed');
+    callbacks.onStreamEnd?.('Responses', outcome.termination ?? 'completed');
     return;
   }
   throw createIncompleteStreamError(
@@ -102,7 +104,7 @@ export async function processResponsesStream(
   idleTimeoutMs: number,
   token?: CancellationToken,
   maxEventBytes = MAX_SSE_EVENT_BYTES,
-): Promise<{ parts: number; started: boolean; terminal: boolean }> {
+): Promise<{ parts: number; started: boolean; terminal: boolean; termination?: 'completed' | 'incomplete' }> {
   if (!response.body) throw new Error('Relay returned an empty response body.');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -228,10 +230,16 @@ export function processResponsesSseLine(
       return false;
     }
     case 'response.completed':
+    case 'response.incomplete':
+      // `response.incomplete` is a legitimate terminal event (e.g. the model
+      // hit max_output_tokens). The partially generated output is still valid,
+      // so it is reported as a terminal event rather than an error; the
+      // termination value distinguishes truncation from normal completion.
       if (event.response?.usage) {
         const usage = toOpenAIUsage(event.response.usage);
         if (usage) callbacks.onOpenAIUsage?.(usage);
       }
+      state.termination = event.type === 'response.incomplete' ? 'incomplete' : 'completed';
       state.parts += flushFunctionCalls(pendingFunctionCalls, callbacks);
       return true;
     case 'response.failed':
@@ -249,7 +257,7 @@ export async function processResponsesFullResponse(
   idleTimeoutMs = 60_000,
   token?: CancellationToken,
   maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
-): Promise<void> {
+): Promise<'completed' | 'incomplete'> {
   const body = await readResponseText(response, idleTimeoutMs, token, maxBodyBytes);
   let payload: ResponsesFullResponse;
   try {
@@ -292,6 +300,10 @@ export async function processResponsesFullResponse(
     }
   }
   if (parts === 0) throw createIncompleteStreamError('Responses', 'empty-response');
+  // `status === 'incomplete'` (e.g. max_output_tokens truncation) is not an
+  // error: the partial output above was still delivered to the caller. The
+  // return value lets the caller distinguish truncation in its terminal log.
+  return payload.status === 'incomplete' ? 'incomplete' : 'completed';
 }
 
 function flushFunctionCall(

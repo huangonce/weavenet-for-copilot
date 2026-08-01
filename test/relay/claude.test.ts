@@ -33,6 +33,34 @@ describe('Claude response parsing', () => {
     expect(cb.onClaudeUsage).toHaveBeenCalledOnce();
   });
 
+  it('reports the output-token delta from message_delta exactly once', () => {
+    const cb = callbacks();
+    const state = { parts: 0, started: false };
+    const tools = new Map<number, ToolCall>();
+    processClaudeSseLine(
+      'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":3}}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onClaudeUsage).toHaveBeenCalledOnce();
+    expect(cb.onClaudeUsage).toHaveBeenCalledWith({ output_tokens: 3 }, undefined);
+  });
+
+  it('never fires the usage callback twice when an event carries both usage shapes', () => {
+    const cb = callbacks();
+    const state = { parts: 0, started: false };
+    const tools = new Map<number, ToolCall>();
+    processClaudeSseLine(
+      'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":3},"message":{"id":"msg_1","usage":{"input_tokens":2,"output_tokens":3}}}',
+      tools,
+      cb,
+      state,
+    );
+    expect(cb.onClaudeUsage).toHaveBeenCalledOnce();
+    expect(cb.onClaudeUsage).toHaveBeenCalledWith({ output_tokens: 3 }, 'msg_1');
+  });
+
   it('parses a complete non-stream response with tools', async () => {
     const cb = callbacks();
     await processClaudeFullResponse(new Response(JSON.stringify({

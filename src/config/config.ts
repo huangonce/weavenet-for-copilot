@@ -99,9 +99,16 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
 
 export function getProfileConfiguration(): ProfileConfiguration {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  // Intentionally reads only `globalValue`: connection profiles may carry
+  // relay API keys, and workspace-level settings would write them into the
+  // repo-committed .vscode/settings.json. Workspace profiles are silently
+  // ignored to keep secrets out of the project files.
   const profiles = normalizeConnectionProfiles(config.inspect<unknown[]>('profiles')?.globalValue ?? []);
   return { profiles };
 }
+
+/** Warns at most once per invalid regex per extension process. */
+const warnedInvalidRegexes = new Set<string>();
 
 function compileRegexList(values: string[]): RegExp[] {
   const result: RegExp[] = [];
@@ -112,7 +119,10 @@ function compileRegexList(values: string[]): RegExp[] {
     try {
       result.push(new RegExp(value));
     } catch {
-      void vscode.window.showWarningMessage(`Invalid WeaveNet model regex ignored: ${value}`);
+      if (!warnedInvalidRegexes.has(value)) {
+        warnedInvalidRegexes.add(value);
+        void vscode.window.showWarningMessage(`Invalid WeaveNet model regex ignored: ${value}`);
+      }
     }
   }
   return result;

@@ -72,6 +72,26 @@ describe('Responses SSE parsing', () => {
     });
   });
 
+  it('treats response.incomplete as a terminal event and reports usage', () => {
+    const cb = callbacks();
+    const tools = new Map<number, ToolCall>();
+    const state = streamState();
+    const terminal = processResponsesSseLine(
+      'data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}}',
+      tools,
+      cb,
+      state,
+    );
+    expect(terminal).toBe(true);
+    expect(cb.onOpenAIUsage).toHaveBeenCalledWith({
+      prompt_tokens: 3,
+      completion_tokens: 4,
+      total_tokens: 7,
+      prompt_tokens_details: undefined,
+      completion_tokens_details: undefined,
+    });
+  });
+
   it('maps reasoning text deltas to onReasoning', () => {
     const cb = callbacks();
     const tools = new Map();
@@ -201,6 +221,22 @@ describe('Responses full response parsing', () => {
     await expect(processResponsesFullResponse(response, cb)).rejects.toThrow(RelayStreamError);
   });
 
+  it('delivers partial output and returns incomplete for a truncated full response', async () => {
+    const cb = callbacks();
+    const response = new Response(JSON.stringify({
+      id: 'resp_1',
+      status: 'incomplete',
+      output: [
+        { id: 'msg_1', type: 'message', role: 'assistant', status: 'incomplete', content: [
+          { type: 'output_text', text: 'partial answer' },
+        ] },
+      ],
+    }), { headers: { 'content-type': 'application/json' } });
+
+    await expect(processResponsesFullResponse(response, cb)).resolves.toBe('incomplete');
+    expect(cb.onContent).toHaveBeenCalledWith('partial answer');
+  });
+
   it('throws when an empty response contains no output parts', async () => {
     const cb = callbacks();
     const response = new Response(JSON.stringify({ status: 'completed', output: [] }), { headers: { 'content-type': 'application/json' } });
@@ -229,6 +265,19 @@ describe('streamOpenAIResponses', () => {
     expect(cb.onResponse).toHaveBeenCalledWith('Responses', 200, expect.stringContaining('text/event-stream'), expect.objectContaining({ clientRequestId: expect.any(String) }));
   });
 
+  it('reports an incomplete terminal event when the upstream truncates the response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sseResponse([
+      'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n',
+      'data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete"}}\n\n',
+    ]));
+    const cb = callbacks();
+    await streamOpenAIResponses({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, responsesRequest(), cb);
+    expect(cb.onContent).toHaveBeenCalledWith('partial');
+    expect(cb.onStreamEnd).toHaveBeenCalledWith('Responses', 'incomplete');
+  });
+
   it('throws when the stream ends without a terminal event', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sseResponse([
       'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n',
@@ -250,6 +299,20 @@ describe('streamOpenAIResponses', () => {
     }, responsesRequest({ stream: false }), cb);
     expect(cb.onContent).toHaveBeenCalledWith('ok');
     expect(cb.onStreamEnd).toHaveBeenCalledWith('Responses', 'completed');
+  });
+
+  it('delivers partial output for a non-streaming incomplete response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      id: 'resp_1',
+      status: 'incomplete',
+      output: [{ id: 'msg_1', type: 'message', role: 'assistant', status: 'incomplete', content: [{ type: 'output_text', text: 'partial answer' }] }],
+    }), { headers: { 'content-type': 'application/json' } }));
+    const cb = callbacks();
+    await streamOpenAIResponses({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, responsesRequest({ stream: false }), cb);
+    expect(cb.onContent).toHaveBeenCalledWith('partial answer');
+    expect(cb.onStreamEnd).toHaveBeenCalledWith('Responses', 'incomplete');
   });
 
   it('reports safe request metadata before fetch rejects during upload and never retries', async () => {

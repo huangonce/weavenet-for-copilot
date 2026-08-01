@@ -130,3 +130,20 @@ describe('connection-scoped route settings', () => {
     expect(config.models).toEqual([]);
   });
 });
+
+describe('invalid model regexes', () => {
+  it('warns only once per invalid regex across repeated getConfig calls', () => {
+    const warn = vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined as never);
+    const configValues: Record<string, unknown> = { imageInputModels: ['[invalid'] };
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: <T>(key: string) => configValues[key] as T | undefined,
+    } as never);
+
+    getConfig();
+    getConfig();
+    getConfig();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[invalid'));
+  });
+});

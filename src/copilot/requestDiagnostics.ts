@@ -18,7 +18,7 @@ export interface RequestDiagnostics {
   onRequestSettled(protocol: RelayProtocol, metadata: RequestTransportDiagnosticsMetadata): void;
   onOpenAIFinishReason(reason: string): void;
   onResponse(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
-  onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed'): void;
+  onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete'): void;
   complete(): void;
   cancelled(): void;
   failed(error: unknown): void;

@@ -136,8 +136,11 @@ export function processClaudeSseLine(
     state.started = true;
     callbacks.onProcessingStarted?.('Claude');
   }
-  if (event.message?.usage) callbacks.onClaudeUsage?.(event.message.usage, event.message.id);
-  if (event.usage) callbacks.onClaudeUsage?.(event.usage, event.message?.id);
+  // `message_start` carries cumulative usage on `message.usage`; `message_delta`
+  // carries an output-token delta on `usage`. Pick whichever this event has so
+  // a single event can never trigger the usage callback twice.
+  const usage = event.usage ?? event.message?.usage;
+  if (usage) callbacks.onClaudeUsage?.(usage, event.message?.id);
   if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
     const index = event.index ?? tools.size;
     const tool: PendingClaudeToolCall = {
