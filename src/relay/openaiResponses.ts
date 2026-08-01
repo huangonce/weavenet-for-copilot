@@ -257,6 +257,7 @@ export async function processResponsesFullResponse(
   idleTimeoutMs = 60_000,
   token?: CancellationToken,
   maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
+  allowEmptyOutput = false,
 ): Promise<'completed' | 'incomplete'> {
   const body = await readResponseText(response, idleTimeoutMs, token, maxBodyBytes);
   let payload: ResponsesFullResponse;
@@ -299,7 +300,10 @@ export async function processResponsesFullResponse(
       }
     }
   }
-  if (parts === 0) throw createIncompleteStreamError('Responses', 'empty-response');
+  // Reasoning models burn the whole `max_output_tokens: 1` budget on thinking
+  // and legitimately end `incomplete` with only reasoning items; capability
+  // probes accept that, real chat responses still require visible output.
+  if (parts === 0 && !allowEmptyOutput) throw createIncompleteStreamError('Responses', 'empty-response');
   // `status === 'incomplete'` (e.g. max_output_tokens truncation) is not an
   // error: the partial output above was still delivered to the caller. The
   // return value lets the caller distinguish truncation in its terminal log.

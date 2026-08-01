@@ -12,6 +12,7 @@ export interface ConfiguredModel {
   id: string;
   name?: string;
   route: 'openai' | 'chatgpt' | 'claude';
+  openaiApi?: 'chat' | 'responses';
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;
@@ -161,6 +162,7 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
       id,
       route,
       name: typeof record.name === 'string' && record.name.trim() ? record.name.trim() : undefined,
+      openaiApi: record.openaiApi === 'responses' ? 'responses' : record.openaiApi === 'chat' ? 'chat' : undefined,
       maxInputTokens: positiveNumber(record.maxInputTokens),
       maxOutputTokens: positiveNumber(record.maxOutputTokens),
       toolCalling: typeof record.toolCalling === 'boolean' ? record.toolCalling : undefined,

@@ -163,10 +163,12 @@ export function createAbortContext(token?: CancellationToken, timeoutMs?: number
     abortSource = 'vscode';
     controller.abort();
   }
-  const cancellation = token?.onCancellationRequested(() => {
-    if (!controller.signal.aborted) abortSource = 'vscode';
-    controller.abort();
-  });
+  const cancellation = typeof token?.onCancellationRequested === 'function'
+    ? token.onCancellationRequested(() => {
+      if (!controller.signal.aborted) abortSource = 'vscode';
+      controller.abort();
+    })
+    : undefined;
   const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
     if (controller.signal.aborted) return;
     abortSource = 'timeout';

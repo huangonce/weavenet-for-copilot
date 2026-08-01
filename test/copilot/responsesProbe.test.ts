@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExtensionConfig } from '../../src/config/config';
+import { RelayRequestError } from '../../src/relay/errors';
 import type { RoutedModel } from '../../src/relay/types';
 import type * as OpenRouterFallbackModule from '../../src/metadata/openrouterFallback';
 
@@ -27,6 +28,7 @@ vi.mock('../../src/metadata/openrouterFallback', async (importOriginal) => {
 import { loadAllModels } from '../../src/copilot/modelRegistry';
 
 const baseConfig = {
+  profileId: 'profile-0',
   baseUrl: 'https://relay.example.test/v1',
   requestHeaders: {},
   anthropicVersion: '2023-06-01',
@@ -55,9 +57,13 @@ let relayCounter = 0;
 beforeEach(() => {
   vi.clearAllMocks();
   relayCounter++;
-  // The probing cache is module-global and keyed by relay base URL; a fresh URL
+  // The probing cache is module-global and keyed by profile id; a fresh id
   // per test keeps cached verdicts from leaking across tests.
-  config = { ...baseConfig, baseUrl: `https://relay-${relayCounter}.example.test/v1` } as unknown as ExtensionConfig;
+  config = {
+    ...baseConfig,
+    baseUrl: `https://relay-${relayCounter}.example.test/v1`,
+    profileId: `profile-${relayCounter}`,
+  } as unknown as ExtensionConfig;
   clientMocks.listModels.mockResolvedValue({
     data: [
       { id: 'gpt-a' },
@@ -127,6 +133,78 @@ describe('Responses endpoint probing during model load', () => {
 
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
+  });
+
+  it('retries transient probe failures on the next refresh instead of caching chat', async () => {
+    clientMocks.testOpenAIResponses.mockRejectedValue(new TypeError('network down'));
+
+    await loadAllModels(config, 'secret-key', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+
+    clientMocks.testOpenAIResponses.mockResolvedValue(undefined);
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    // Nothing was cached, so the retry re-probes and now succeeds.
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(4);
+    expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
+  });
+
+  it('caches definitive rejections so the next refresh skips probing', async () => {
+    clientMocks.testOpenAIResponses.mockRejectedValue(
+      new RelayRequestError('unsupported model', 400, 'json'),
+    );
+
+    await loadAllModels(config, 'secret-key', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+
+    clientMocks.testOpenAIResponses.mockClear();
+    await loadAllModels(config, 'secret-key', () => {});
+
+    expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
+  });
+
+  it('re-probes when a user-invoked refresh forces cache invalidation', async () => {
+    await loadAllModels(config, 'secret-key', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+    clientMocks.testOpenAIResponses.mockClear();
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {}, new Map(), undefined, true);
+
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+    expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
+  });
+
+  it('keeps probe verdicts per profile even when two profiles share a relay URL', async () => {
+    const sharedUrl = 'https://shared.example.test/v1';
+    const first = { ...config, baseUrl: sharedUrl, profileId: 'profile-a' } as unknown as ExtensionConfig;
+    const second = { ...config, baseUrl: sharedUrl, profileId: 'profile-b' } as unknown as ExtensionConfig;
+    clientMocks.testOpenAIResponses.mockResolvedValue(undefined);
+
+    await loadAllModels(first, 'key-a', () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+
+    clientMocks.testOpenAIResponses.mockRejectedValue(
+      new RelayRequestError('unsupported model', 400, 'json'),
+    );
+    clientMocks.testOpenAIResponses.mockClear();
+    const { models } = await loadAllModels(second, 'key-b', () => {});
+
+    // profile-a's positive verdict must not leak into profile-b.
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
+    expect(openaiModels(models).every((model) => model.openaiApi === undefined)).toBe(true);
+  });
+
+  it('probes each unique model id only once when the catalog repeats ids', async () => {
+    clientMocks.listModels.mockResolvedValue({
+      data: [{ id: 'gpt-a' }, { id: 'gpt-a' }, { id: 'claude-x' }],
+    });
+
+    const { models } = await loadAllModels(config, 'secret-key', () => {});
+
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(1);
+    const matched = openaiModels(models).filter((model) => model.openaiApi === 'responses');
+    expect(matched).toHaveLength(1);
+    expect(matched[0].upstreamId).toBe('gpt-a');
   });
 
   it('skips probing entirely when no OpenAI models are present', async () => {

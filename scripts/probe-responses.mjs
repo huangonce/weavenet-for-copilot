@@ -74,9 +74,9 @@ async function main() {
   models = (await catalogResponse.json()).data ?? [];
   console.log(`GET /models    => ${models.length} models`);
 
-  const candidates = models.filter((model) => !String(model.id).toLowerCase().startsWith('claude-'));
+  let candidates = models.filter((model) => !String(model.id).toLowerCase().startsWith('claude-'));
   if (ONLY.length) {
-    candidates.filter((model) => ONLY.includes(model.id));
+    candidates = candidates.filter((model) => ONLY.includes(model.id));
   }
   console.log(`Probing ${candidates.length} OpenAI-compatible model(s) via minimal POST /responses...\n`);
 

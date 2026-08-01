@@ -36,6 +36,7 @@ import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
 import { provideClaudeResponse } from './claudeResponse';
 import { loadAllModels } from './modelRegistry';
+import { responsesProbeCache } from '../relay/responsesProbeCache';
 import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
 import { formatLogError } from './requestDiagnostics';
 
@@ -253,10 +254,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
-  async refreshModels(intent: ModelRefreshIntent = 'passive', notifySuccess = false): Promise<void> {
+  async refreshModels(intent: ModelRefreshIntent = 'passive', notifySuccess = false, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
     const runtimes = this.syncProfiles();
     await mapWithConcurrency(runtimes, 3, async (runtime) => {
-      await this.requestConnectionRefresh(runtime, intent === 'invalidate');
+      await this.requestConnectionRefresh(runtime, intent === 'invalidate', token, forceProbe);
     });
     if (notifySuccess) this.showRefreshSummary();
   }
@@ -271,11 +272,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
-    void token;
     try {
-      await this.refreshModels('passive', options.silent === false);
+      await this.refreshModels('passive', options.silent === false, token);
     } catch (error) {
-      this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
+      if (!isCancellationError(error)) {
+        this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
+      }
     }
     const entries = [...this.modelBindings.values()];
     const keyStates = new Map<string, boolean>();
@@ -394,6 +396,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     let changed = false;
     for (const [id, runtime] of this.runtimes) {
       if (ids.has(id)) continue;
+      responsesProbeCache.clearProfile(id);
       runtime.generation++;
       this.runtimes.delete(id);
       changed = true;
@@ -408,6 +411,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         });
         changed = true;
       } else if (existing.revision !== revision) {
+        // baseUrl, headers or fixed models changed: prior probe verdicts no
+        // longer apply to this profile.
+        responsesProbeCache.clearProfile(profile.id);
         existing.generation++;
         existing.profile = profile;
         existing.revision = revision;
@@ -437,14 +443,18 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     else this.changeEmitter.fire();
   }
 
-  private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean): Promise<void> {
+  private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
     if (force) {
       if (runtime.resolved || runtime.refreshTask) runtime.generation++;
       runtime.resolved = false;
     }
     if (runtime.resolved && !force) return Promise.resolve();
-    if (runtime.refreshTask) return runtime.refreshTask;
-    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime));
+    if (runtime.refreshTask) {
+      // A cancelled picker call stops waiting immediately; the shared refresh
+      // continues for whoever started it.
+      return token ? Promise.race([runtime.refreshTask, cancelledPromise(token)]) : runtime.refreshTask;
+    }
+    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime, token, forceProbe));
     const sharedTask = task.finally(() => {
       if (runtime.refreshTask === sharedTask) runtime.refreshTask = undefined;
     });
@@ -452,15 +462,15 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     return sharedTask;
   }
 
-  private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime): Promise<void> {
+  private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
     while (this.runtimes.get(runtime.profile.id) === runtime) {
       const generation = runtime.generation;
-      await this.refreshRuntimeOnce(runtime, generation);
+      await this.refreshRuntimeOnce(runtime, generation, token, forceProbe);
       if (runtime.generation === generation) return;
     }
   }
 
-  private async refreshRuntimeOnce(runtime: ConnectionRuntime, generation: number): Promise<void> {
+  private async refreshRuntimeOnce(runtime: ConnectionRuntime, generation: number, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
     const profile = runtime.profile;
     const revision = runtime.revision;
     let apiKey: string | undefined;
@@ -492,7 +502,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.rebuildStatus();
     const config = getConfig(profile);
     try {
-      const result = await loadAllModels(config, apiKey, this.debug.bind(this), new Map(runtime.snapshots));
+      const result = await loadAllModels(config, apiKey, this.debug.bind(this), new Map(runtime.snapshots), token, forceProbe);
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       runtime.models = result.models;
       runtime.snapshots = new Map(result.snapshots);
@@ -503,6 +513,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       for (const failure of result.failedRoutes) this.reportRouteRefreshFailure(config, failure.route, failure.error);
     } catch (error) {
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
+      if (isCancellationError(error)) return;
       runtime.resolved = true;
       runtime.phase = runtime.models.length ? 'degraded' : 'error';
       runtime.message = connectionErrorMessage(error);
@@ -570,6 +581,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
     if (!profileId) {
       await this.diagnosticsStore.clear();
+      responsesProbeCache.clear();
       for (const runtime of this.runtimes.values()) {
         runtime.lastDiagnostics = undefined;
         runtime.generation++;
@@ -579,6 +591,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       return;
     }
     await this.diagnosticsStore.deleteProfile(profileId);
+    responsesProbeCache.clearProfile(profileId);
     const runtime = this.runtimes.get(profileId);
     if (!runtime) return;
     runtime.lastDiagnostics = undefined;
@@ -629,6 +642,24 @@ async function mapWithConcurrency<T>(
 
 function isClaudeModel(modelId: string): boolean {
   return modelId.toLowerCase().startsWith('claude-');
+}
+
+function isCancellationError(error: unknown): boolean {
+  return error instanceof vscode.CancellationError
+    || (error instanceof Error && (error.name === 'CancellationError' || error.name === 'AbortError'));
+}
+
+function cancelledPromise(token: vscode.CancellationToken): Promise<never> {
+  return new Promise((_, reject) => {
+    if (token.isCancellationRequested) {
+      reject(new vscode.CancellationError());
+      return;
+    }
+    const onCancel = token.onCancellationRequested as unknown;
+    if (typeof onCancel === 'function') {
+      (onCancel as (listener: () => void) => void)(() => reject(new vscode.CancellationError()));
+    }
+  });
 }
 
 function diagnosticsOptions(): { anthropicVersion: string } {

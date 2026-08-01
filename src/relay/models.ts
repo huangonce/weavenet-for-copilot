@@ -232,6 +232,7 @@ export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
     thinking: model.thinking,
     contextWindows: model.contextWindows,
     openai: model.openai,
+    openaiApi: model.openaiApi,
     metadataSources: {},
   };
 }

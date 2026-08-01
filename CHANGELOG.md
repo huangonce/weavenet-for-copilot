@@ -1,5 +1,17 @@
 # Change Log
 
+## 0.5.6 - 2026-08-01
+
+- 修复 Responses 能力探测缓存跨连接串扰的问题：缓存键改为“连接 UUID + 模型 ID”，两个连接即使共用同一 Relay 地址也不会互相继承探测结论；连接配置修订或删除时同步清除对应缓存。
+- 修复探测结果误缓存的问题：只有明确的 HTTP 拒绝（400/404/426）才缓存为“不支持”，超时、限流、5xx 与网络故障等临时失败不再缓存，下次刷新会自动重试。
+- 修复推理模型探测误判的问题：`max_output_tokens: 1` 下思考可能耗尽全部 token 预算，返回零可见内容但 HTTP 200 的合法信封。探测成功标准改为“HTTP 200 + 合法响应体”，不再因空输出而误判为失败。
+- 模型刷新改为接受取消令牌：选择器打开期间的刷新可随选择器关闭而取消，取消不再被记录为连接错误。
+- 手动执行 `Refresh Models` 会先清除对应连接的能力探测缓存，再重新探测全部模型，结果立即可见。
+- 修复固定模型 `openaiApi` 显式声明被发现结果覆盖的问题：显式配置优先于自动探测，未声明时才沿用探测结论。
+- 探测前按模型 ID 去重，目录重复列出同一模型时只发送一次付费 POST。
+- 修复 `scripts/probe-responses.mjs` 中 `WEAVENET_MODELS` 白名单过滤结果未生效的问题。
+- 新增固定模型 `openaiApi` 配置字段：`responses`（Responses API）或 `chat`（Chat Completions，默认），显式声明优先于自动探测。
+
 ## 0.5.5 - 2026-08-01
 
 - 改进 HTTP 426 的错误提示：部分 Relay 分组以 WebSocket 提供 `/responses`，而本扩展使用 HTTP 流式请求。此时不再原样透传网关的 `WebSocket upgrade required`，而是说明成因并给出处置方式（改用以 HTTP 暴露 Responses 的分组，或将该模型路由到 Chat Completions）。

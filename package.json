@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -197,6 +197,14 @@
                     },
                     "thinking": {
                       "type": "boolean"
+                    },
+                    "openaiApi": {
+                      "type": "string",
+                      "enum": [
+                        "chat",
+                        "responses"
+                      ],
+                      "description": "%configuration.modelOpenaiApi.description%"
                     },
                     "contextWindows": {
                       "type": "array",

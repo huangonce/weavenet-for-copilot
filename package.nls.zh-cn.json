@@ -21,6 +21,7 @@
   "configuration.legacyConnectionField.deprecation": "请在 weavenet-copilot.profiles 的连接项中配置该字段。顶层值仅用于升级迁移。",
   "configuration.profiles.description": "所有具名 Relay 连接都会同时启用并聚合模型目录。每个配置档拥有扩展管理的 UUID，并只使用一把保存在 VS Code SecretStorage 中的 API 密钥。附加请求头属于普通设置，不得包含敏感信息。",
   "configuration.modelOpenAICapabilities.description": "可选的模型级 OpenAI 请求能力。仅在 Relay 明确声明支持时设置；留空会保持旧版兼容行为。",
+  "configuration.modelOpenaiApi.description": "该固定模型的请求协议。默认使用 Chat Completions；仅对支持 Responses API 的模型设为 \"responses\"。",
   "configuration.anthropicVersion.description": "调用 Claude 模型的 /messages 时发送的 Anthropic 协议版本请求头。",
   "configuration.openaiPromptCaching.description": "为 GPT 模型发送稳定的 prompt_cache_key，改善 OpenAI 兼容提示词缓存的路由命中率。",
   "configuration.openaiPromptCacheKey.description": "可选的 GPT prompt_cache_key 覆盖值。留空时插件会根据当前工作区生成稳定值。",

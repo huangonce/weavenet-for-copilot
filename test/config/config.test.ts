@@ -42,6 +42,27 @@ describe('connection profiles', () => {
     }]);
   });
 
+  it('normalizes the openaiApi protocol of fixed models', () => {
+    const profiles = normalizeConnectionProfiles([
+      {
+        id: '10000000-0000-4000-8000-000000000010',
+        name: 'Protocols',
+        baseUrl: 'https://relay.example.com/v1',
+        models: [
+          { id: 'explicit-responses', route: 'openai', openaiApi: 'responses' },
+          { id: 'explicit-chat', route: 'openai', openaiApi: 'chat' },
+          { id: 'unspecified', route: 'openai', openaiApi: 'bogus' },
+        ],
+      },
+    ]);
+
+    expect(profiles[0].models).toEqual([
+      { id: 'explicit-responses', route: 'openai', openaiApi: 'responses' },
+      { id: 'explicit-chat', route: 'openai', openaiApi: 'chat' },
+      { id: 'unspecified', route: 'openai' },
+    ]);
+  });
+
   it('keeps an empty profile list unconfigured', () => {
     expect(normalizeConnectionProfiles([])).toEqual([]);
   });

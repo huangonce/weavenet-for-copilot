@@ -17,6 +17,7 @@ import { RELAY_API_KEY_SECRET } from '../../src/constants';
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
+import { responsesProbeCache } from '../../src/relay/responsesProbeCache';
 import { formatLogError } from '../../src/copilot/requestDiagnostics';
 import { InMemoryMemento } from '../support/memento';
 
@@ -91,7 +92,12 @@ async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  // Probe verdicts are cached per profile id; several tests reuse the same
+  // profile ids with different probe outcomes, so isolate each test.
+  responsesProbeCache.clear();
+});
 
 describe('connection pool model refresh', () => {
   it('aggregates models from every configured connection and namespaces duplicate IDs', async () => {
@@ -458,7 +464,10 @@ describe('Provider request helpers', () => {
 });
 
 describe('Provider chat responses', () => {
-  const token = { isCancellationRequested: false } as never;
+  const token = {
+    isCancellationRequested: false,
+    onCancellationRequested: () => ({ dispose: () => {} }),
+  } as never;
   const progress = () => ({ report: vi.fn() });
   const openAIModel = { id: 'gpt-test', capabilities: { tool_calling: true, reasoning: true }, context_length: 128_000 };
   const claudeModel = { id: 'claude-test', capabilities: { tool_calling: true, reasoning: true } };
@@ -689,6 +698,9 @@ describe('Provider chat responses', () => {
       JSON.stringify({ data: [openAIModel] }),
       { headers: { 'content-type': 'application/json' } },
     ));
+    // This test verifies per-profile routing of duplicate ids, not protocol
+    // capability, so keep the catalog on Chat Completions.
+    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('unsupported');
     const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
     const selected = information.find((model) => model.id.includes(PERSONAL_ID));
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async function (request) {

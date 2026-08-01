@@ -2,19 +2,17 @@ import type * as vscode from 'vscode';
 import type { ExtensionConfig } from '../config/config';
 import { enrichModelsWithOpenRouter, scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
 import { RelayClient } from '../relay/client';
+import { RelayRequestError } from '../relay/errors';
 import {
   assignUniquePickerIds,
   filterModels,
   fromConfiguredModel,
   toRoutedModel,
 } from '../relay/models';
-import { ResponsesProbeCache } from '../relay/responsesProbeCache';
+import { responsesProbeCache } from '../relay/responsesProbeCache';
 import type { ResponsesEndpointAvailability } from '../relay/probes';
 import type { ModelProtocol, RelayModel, RoutedModel } from '../relay/types';
 import { formatLogError, type DebugLogger } from './requestDiagnostics';
-
-/** Probing verdict cache keyed by model id plus relay base URL. */
-const responsesProbeCache = new ResponsesProbeCache();
 
 const RESPONSES_PROBE_CONCURRENCY = 4;
 
@@ -31,6 +29,7 @@ export async function loadAllModels(
   debug: DebugLogger,
   previousSnapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]> = new Map(),
   token?: vscode.CancellationToken,
+  forceProbe = false,
 ): Promise<ModelLoadResult> {
   void scheduleOpenRouterRefresh(config.metadataRefreshHours * 3_600_000);
 
@@ -38,7 +37,7 @@ export async function loadAllModels(
   if (apiKey) {
     routes.push({
       name: 'openai',
-      task: loadModelsForProtocol('openai', 'openai', apiKey, config, debug, token),
+      task: loadModelsForProtocol('openai', 'openai', apiKey, config, debug, token, forceProbe),
     });
   }
 
@@ -80,6 +79,7 @@ async function loadModelsForProtocol(
   config: ExtensionConfig,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
+  forceProbe = false,
 ): Promise<RoutedModel[]> {
   const startedAt = Date.now();
   const client = new RelayClient({
@@ -97,18 +97,21 @@ async function loadModelsForProtocol(
   // A shared /models catalog may advertise both OpenAI-compatible and native
   // Claude models. Route selection happens per model ID above.
   const filtered = filterModels(enrichModelsWithOpenRouter(routed), config);
-  const withResponsesProbe = await applyResponsesProtocolProbes(client, filtered, config, debug, token);
+  const withResponsesProbe = await applyResponsesProtocolProbes(client, filtered, config, debug, token, forceProbe);
   debug(config, `[models] loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
   return withResponsesProbe;
 }
 
 /**
- * Two-layer Responses capability detection, run only during user-triggered
- * model load/refresh. The free `GET /responses` check short-circuits relays
- * that do not implement the endpoint (404/405) so no paid POST is ever issued.
- * Remaining uncached OpenAI models get one minimal `POST /responses` probe each
- * (concurrency-bounded); results are cached for `metadataRefreshHours`. Claude
- * models and explicitly configured fixed models are never probed.
+ * Two-layer Responses capability detection, run on every model load/refresh.
+ * The free `GET /responses` check short-circuits relays that do not implement
+ * the endpoint (404) so no paid POST is ever issued. Remaining uncached OpenAI
+ * models get one minimal `POST /responses` probe each (concurrency-bounded,
+ * deduplicated by model id); results are cached per profile for
+ * `metadataRefreshHours`. Only definitive rejections (HTTP 400/404/426) are
+ * cached as unsupported; transient failures stay uncached so the next refresh
+ * retries. `forceProbe` (user-invoked refresh) drops the profile's cached
+ * verdicts first. Claude models are never probed.
  */
 async function applyResponsesProtocolProbes(
   client: RelayClient,
@@ -116,12 +119,13 @@ async function applyResponsesProtocolProbes(
   config: ExtensionConfig,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
+  forceProbe = false,
 ): Promise<RoutedModel[]> {
   const openaiModels = models.filter((model) => model.route !== 'claude' && !isClaudeModel(model.upstreamId));
   if (openaiModels.length === 0) return models;
 
-  const connectionKey = config.baseUrl;
   const ttlMs = config.metadataRefreshHours * 3_600_000;
+  if (forceProbe) responsesProbeCache.clearProfile(config.profileId);
 
   let endpointAvailable: ResponsesEndpointAvailability;
   try {
@@ -135,19 +139,28 @@ async function applyResponsesProtocolProbes(
     return models;
   }
 
-  const uncached = openaiModels.filter(
-    (model) => responsesProbeCache.get(model.upstreamId, connectionKey) === undefined,
+  // The catalog may list the same model id more than once; probe each unique
+  // id so one model never pays for parallel duplicate POSTs.
+  const uniqueModels = [...new Map(openaiModels.map((model) => [model.upstreamId, model])).values()];
+  const uncached = uniqueModels.filter(
+    (model) => responsesProbeCache.get(config.profileId, model.upstreamId) === undefined,
   );
   const probed = new Map<string, 'chat' | 'responses'>();
   await mapWithConcurrency(uncached, RESPONSES_PROBE_CONCURRENCY, async (model) => {
     try {
       await client.testOpenAIResponses(model.upstreamId, false, token);
       probed.set(model.upstreamId, 'responses');
-      responsesProbeCache.set(model.upstreamId, connectionKey, 'responses', ttlMs);
+      responsesProbeCache.set(config.profileId, model.upstreamId, 'responses', ttlMs);
     } catch (error) {
-      probed.set(model.upstreamId, 'chat');
-      responsesProbeCache.set(model.upstreamId, connectionKey, 'chat', ttlMs);
-      debug(config, `[models] model=${model.upstreamId} does not support /responses: ${formatLogError(error)}`);
+      if (isDefinitiveProbeFailure(error)) {
+        probed.set(model.upstreamId, 'chat');
+        responsesProbeCache.set(config.profileId, model.upstreamId, 'chat', ttlMs);
+        debug(config, `[models] model=${model.upstreamId} does not support /responses: ${formatLogError(error)}`);
+      } else {
+        // Transient failures (timeouts, 429/5xx, network, cancellation) are
+        // not cached, so a later refresh retries instead of pinning chat.
+        debug(config, `[models] model=${model.upstreamId} /responses probe transient failure: ${formatLogError(error)}`);
+      }
     }
   });
 
@@ -155,7 +168,7 @@ async function applyResponsesProtocolProbes(
   let responsesCount = 0;
   const withApi = models.map((model) => {
     if (!openaiById.has(model.upstreamId)) return model;
-    const verdict = responsesProbeCache.get(model.upstreamId, connectionKey) ?? probed.get(model.upstreamId) ?? 'chat';
+    const verdict = responsesProbeCache.get(config.profileId, model.upstreamId) ?? probed.get(model.upstreamId) ?? 'chat';
     if (verdict !== 'responses') return model;
     responsesCount++;
     return { ...model, openaiApi: 'responses' as const };
@@ -164,6 +177,12 @@ async function applyResponsesProtocolProbes(
     debug(config, `[models] ${responsesCount}/${openaiModels.length} OpenAI models support /responses`);
   }
   return withApi;
+}
+
+/** Only explicit HTTP rejections settle the verdict; transient errors do not. */
+function isDefinitiveProbeFailure(error: unknown): boolean {
+  return error instanceof RelayRequestError
+    && (error.status === 400 || error.status === 404 || error.status === 426);
 }
 
 async function mapWithConcurrency<T>(
@@ -194,13 +213,13 @@ function dedupeModels(models: RoutedModel[]): RoutedModel[] {
       byKey.set(key, model);
       continue;
     }
-    // Explicitly configured models override discovery metadata, but the
-    // Responses probing verdict attached during discovery must survive the
-    // merge or dispatch would silently fall back to Chat Completions.
+    // Explicitly configured models override discovery metadata. A fixed model
+    // that declares `openaiApi` decides its own protocol; otherwise the
+    // discovery probe verdict survives so dispatch keeps using Responses.
     byKey.set(key, {
       ...existing,
       ...model,
-      openaiApi: existing.openaiApi ?? model.openaiApi,
+      openaiApi: model.openaiApi ?? existing.openaiApi,
     });
   }
   return [...byKey.values()].sort((a, b) => {

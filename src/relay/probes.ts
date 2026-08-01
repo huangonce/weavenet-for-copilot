@@ -103,8 +103,8 @@ export async function probeClaudeMessages(
 }
 
 /**
- * Minimal `POST /responses` probe. Used only during user-triggered model
- * refresh/test; background discovery never performs paid POST probes.
+ * Minimal `POST /responses` probe. Runs during model discovery and explicit
+ * connection tests; each call is a paid request, so results are cached.
  */
 export async function probeOpenAIResponses(
   options: ProtocolProbeOptions,
@@ -132,8 +132,9 @@ export async function probeOpenAIResponses(
   const callbacks = emptyProbeCallbacks();
   if (!stream) {
     // `max_output_tokens: 1` makes truncation the common case for tiny replies;
-    // propagate the full-response status so probes record the real termination.
-    const termination = await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token, MAX_PROBE_RESPONSE_BYTES);
+    // a valid envelope with zero visible parts (thinking consumed the budget)
+    // still proves capability, so empty output is accepted.
+    const termination = await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token, MAX_PROBE_RESPONSE_BYTES, true);
     return { endpoint: '/responses', ...metadata, stream: false, termination };
   }
   requireEventStream(metadata.responseType, 'Responses');

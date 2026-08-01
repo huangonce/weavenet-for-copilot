@@ -21,6 +21,7 @@
   "configuration.legacyConnectionField.deprecation": "Configure this field inside an item in weavenet-copilot.profiles. The top-level value is used only during upgrade migration.",
   "configuration.profiles.description": "All named global Relay connections are enabled simultaneously and their model catalogs are aggregated. Each profile has an extension-managed UUID and one API key stored only in VS Code SecretStorage. Extra header values are regular VS Code settings and must not contain secrets.",
   "configuration.modelOpenAICapabilities.description": "Optional per-model OpenAI request capabilities. Leave fields unset unless the Relay documents support; legacy behavior remains the default.",
+  "configuration.modelOpenaiApi.description": "Request protocol for this fixed model. Defaults to chat completions; set to \"responses\" only for models that support the Responses API.",
   "configuration.anthropicVersion.description": "Anthropic protocol version header sent when calling /messages for Claude models.",
   "configuration.openaiPromptCaching.description": "Send a stable prompt_cache_key for GPT models to improve OpenAI-compatible prompt cache routing.",
   "configuration.openaiPromptCacheKey.description": "Optional override for the GPT prompt_cache_key. Leave empty to use a stable key derived from the current workspace.",

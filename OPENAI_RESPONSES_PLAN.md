@@ -1,5 +1,7 @@
 # OpenAI Responses API 增量演进计划
 
+> **0.5.6 偏离记录**：本计划最初要求“后台模型发现不得执行付费 POST，只有显式配置才启用 Responses”。经复审与产品决策（见 CHANGELOG 0.5.6），保留自动能力探测：新发现的 OpenAI 兼容模型各执行一次最小 `POST /responses` 探测（`max_output_tokens: 1`、`store: false`），免费 `GET /responses` 可用性检查短路不支持的 Relay。探测结果按连接 UUID 缓存 `metadataRefreshHours`；明确拒绝（HTTP 400/404/426）与成功才缓存，临时失败（超时、限流、5xx、网络）不缓存并在下次刷新重试。固定模型可用 `openaiApi: "responses" | "chat"` 显式覆盖，该声明优先于探测结果；手动 `Refresh Models` 会先清除能力缓存再重新探测。以下“不得执行付费 POST”“只有显式声明才启用”等约束句均已被本段覆盖。
+
 ## 目标
 
 在不改变现有 Relay 默认行为的前提下，将 OpenAI Responses API 作为新的显式协议加入。现有 OpenAI-compatible 模型继续使用 `POST /chat/completions`；不得因一次聊天 POST 失败而自动切换协议或重试。
