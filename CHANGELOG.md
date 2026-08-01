@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.5.5 - 2026-08-01
+
+- 改进 HTTP 426 的错误提示：部分 Relay 分组以 WebSocket 提供 `/responses`，而本扩展使用 HTTP 流式请求。此时不再原样透传网关的 `WebSocket upgrade required`，而是说明成因并给出处置方式（改用以 HTTP 暴露 Responses 的分组，或将该模型路由到 Chat Completions）。
+- 免费的 `GET /responses` 端点探测收到 426 时保持 `unknown`，交由每个模型各自的 POST 探测判定。该 GET 不携带 `model`，按模型分组路由的网关只会以默认分组作答，其结论不能推广到同一 Relay 下的其他模型。
+
 ## 0.5.4 - 2026-08-01
 
 - 修复严格 Relay 拒绝 Responses 工具调用历史的问题：默认不再回传合成的 `reasoning` item。规范中的 `reasoning` item 必须携带上游返回的 `id`，重放历史无法提供；部分网关据此将 `reasoning.content` 限制为空数组，返回 `array_above_max_length` 的 HTTP 400。DeepSeek 等要求回传思考内容的 Relay 可通过模型能力 `openai.replayReasoningContent` 显式开启。

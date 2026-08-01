@@ -52,6 +52,16 @@ export function createRelayRequestError(
   }
 
   const statusLabel = `HTTP ${status}${statusText ? ` ${statusText}` : ''}`;
+  if (status === 426) {
+    return new RelayRequestError(
+      `Relay request failed: ${statusLabel} - this endpoint is served over WebSocket, but the extension uses HTTP streaming. Use a relay group that exposes the Responses API over HTTP, or route this model to Chat Completions.`,
+      status,
+      responseKind,
+      detail.code,
+      detail.type,
+      requestId,
+    );
+  }
   if (responseKind === 'html') {
     const hint = status === 502
       ? ' The upstream connection failed. If this occurred at the end of a long conversation, start a new chat or reduce attached context.'

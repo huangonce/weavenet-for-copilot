@@ -45,6 +45,18 @@ describe('relay error mapping', () => {
     expect(toLanguageModelError(relayError).message).toContain('[ea867033-a931-4628-8016-188272427b69]');
   });
 
+  it('explains a WebSocket-only endpoint instead of echoing the upgrade error', () => {
+    const relayError = createRelayRequestError(
+      426,
+      'Upgrade Required',
+      'application/json',
+      '{"error":{"message":"WebSocket upgrade required (Upgrade: websocket)","type":"invalid_request_error"}}',
+    );
+    expect(relayError.message).toContain('served over WebSocket');
+    expect(relayError.message).toContain('Chat Completions');
+    expect(relayError).toMatchObject({ status: 426, upstreamType: 'invalid_request_error' });
+  });
+
   it.each([
     [401, 'authentication'],
     [403, 'authentication'],

@@ -152,8 +152,10 @@ export async function probeOpenAIResponses(
  *   exactly what the Responses API requires (GET is never part of the spec).
  * - `404` → `unsupported` — the relay does not implement the endpoint at all;
  *   every OpenAI model falls back to Chat Completions with zero cost.
- * - Anything else (auth errors, gateways such as 426, network failures) →
- *   `unknown`, and per-model POST probes decide.
+ * - Anything else (auth errors, `426` upgrade demands, network failures) →
+ *   `unknown`, and per-model POST probes decide. This GET carries no `model`,
+ *   so gateways that route each model to a different upstream answer it from
+ *   their default group only, and its verdict cannot be generalised.
  */
 export async function probeResponsesEndpoint(
   options: ProtocolProbeOptions,

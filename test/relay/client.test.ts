@@ -201,6 +201,11 @@ describe('RelayClient', () => {
 
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
     await expect(client().probeResponsesEndpoint()).resolves.toBe('unsupported');
+
+    // A gateway may demand a WebSocket upgrade for only some of the models it
+    // routes, so this bodyless GET must not settle the endpoint for all of them.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 426 }));
+    await expect(client().probeResponsesEndpoint()).resolves.toBe('unknown');
   });
 
   it('returns unknown when the /responses availability GET fails', async () => {
