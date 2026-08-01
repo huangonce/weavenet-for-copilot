@@ -206,9 +206,13 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         const model = candidates.openai;
         probes.push(await runProtocolProbe('openai.nonStreaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, false)));
         probes.push(await runProtocolProbe('openai.streaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, true)));
+        // A free GET reports whether the relay exposes /responses at all. It is
+        // informational only and never downgrades overall health on its own.
+        probes.push(await runOpenAIResponsesProbe(client));
       } else {
         probes.push(skippedProbe('openai.nonStreaming', '/chat/completions', 'noOpenAIModel'));
         probes.push(skippedProbe('openai.streaming', '/chat/completions', 'noOpenAIModel'));
+        probes.push(skippedProbe('openai.responses', '/responses', 'noOpenAIModel'));
       }
       if (candidates.claude) {
         const model = candidates.claude;
@@ -698,9 +702,38 @@ function probeVerdictForFailure(failure: ConnectionTestFailure): ConnectionProbe
   return failure.category === 'notFound' ? 'unsupported' : 'indeterminate';
 }
 
+async function runOpenAIResponsesProbe(client: RelayClient): Promise<ConnectionProbeResult> {
+  const startedAt = Date.now();
+  try {
+    // probeResponsesEndpoint is a free GET and never throws; it maps network
+    // failures to 'unknown', which we surface as 'indeterminate'.
+    const availability = await client.probeResponsesEndpoint();
+    return {
+      probe: 'openai.responses',
+      verdict: availability === 'supported' ? 'supported' : availability === 'unsupported' ? 'unsupported' : 'indeterminate',
+      endpointPath: '/responses',
+      startedAt,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+    };
+  } catch (error) {
+    const failure = describeConnectionTestError(error);
+    return {
+      probe: 'openai.responses',
+      verdict: 'indeterminate',
+      endpointPath: '/responses',
+      startedAt,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      status: failure.status,
+      responseType: failure.responseType,
+      requestId: failure.requestId,
+      failure,
+    };
+  }
+}
+
 function skippedProbe(
   probe: ConnectionProbeId,
-  endpointPath: '/chat/completions' | '/messages',
+  endpointPath: '/chat/completions' | '/responses' | '/messages',
   skippedReason: 'noOpenAIModel' | 'noClaudeModel',
 ): ConnectionProbeResult {
   return { probe, verdict: 'skipped', endpointPath, startedAt: Date.now(), elapsedMs: 0, skippedReason };

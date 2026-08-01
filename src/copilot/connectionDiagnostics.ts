@@ -4,6 +4,7 @@ export type ConnectionProbeId =
   | 'models'
   | 'openai.nonStreaming'
   | 'openai.streaming'
+  | 'openai.responses'
   | 'claude.nonStreaming'
   | 'claude.streaming';
 
@@ -24,7 +25,7 @@ export interface ConnectionProbeResult {
   readonly responseType?: string;
   readonly requestId?: string;
   readonly evidenceModelId?: string;
-  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed';
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete';
   readonly failure?: ConnectionTestFailure;
   readonly skippedReason?: ConnectionProbeSkipReason;
 }
@@ -87,8 +88,14 @@ export function deriveConnectionCapabilities(probes: readonly ConnectionProbeRes
 export function deriveDiagnosticsOverall(probes: readonly ConnectionProbeResult[]): ConnectionDiagnosticsSnapshot['overall'] {
   const models = probes.find((probe) => probe.probe === 'models');
   if (!models || models.verdict !== 'supported') return 'failed';
-  const protocolProbes = probes.filter((probe) => probe.probe !== 'models');
-  return protocolProbes.length > 0 && protocolProbes.every((probe) => probe.verdict === 'supported')
+  // A single-model relay intentionally skips the other protocol; skipped probes
+  // are not failures. The /responses availability probe is informational: it is
+  // free (GET), so it must not downgrade overall health.
+  const executed = probes.filter((probe) =>
+    probe.probe !== 'models'
+    && probe.probe !== 'openai.responses'
+    && probe.verdict !== 'skipped');
+  return executed.length > 0 && executed.every((probe) => probe.verdict === 'supported')
     ? 'success'
     : 'degraded';
 }

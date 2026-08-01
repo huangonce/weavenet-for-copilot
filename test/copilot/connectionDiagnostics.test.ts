@@ -41,6 +41,7 @@ function snapshot(fingerprint = fingerprintConnection(profile)): ConnectionDiagn
     probe({}),
     probe({ probe: 'openai.nonStreaming', endpointPath: '/chat/completions', evidenceModelId: 'gpt-test' }),
     probe({ probe: 'openai.streaming', endpointPath: '/chat/completions', evidenceModelId: 'gpt-test', termination: '[DONE]' }),
+    probe({ probe: 'openai.responses', endpointPath: '/responses' }),
     probe({ probe: 'claude.nonStreaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
     probe({ probe: 'claude.streaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
   ] as const;
@@ -72,6 +73,28 @@ describe('connection diagnostics', () => {
     });
     expect(deriveDiagnosticsOverall(probes)).toBe('degraded');
     expect(deriveDiagnosticsOverall([probe({ verdict: 'indeterminate' })])).toBe('failed');
+  });
+
+  it('ignores skipped protocols and the informational /responses probe for overall health', () => {
+    const singleProtocol = [
+      probe({}),
+      probe({ probe: 'openai.nonStreaming', endpointPath: '/chat/completions' }),
+      probe({ probe: 'openai.streaming', endpointPath: '/chat/completions' }),
+      probe({ probe: 'openai.responses', endpointPath: '/responses', verdict: 'indeterminate' }),
+      probe({ probe: 'claude.nonStreaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
+      probe({ probe: 'claude.streaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
+    ];
+    expect(deriveDiagnosticsOverall(singleProtocol)).toBe('success');
+
+    const noExecutedProbes = [
+      probe({}),
+      probe({ probe: 'openai.nonStreaming', endpointPath: '/chat/completions', verdict: 'skipped', skippedReason: 'noOpenAIModel' }),
+      probe({ probe: 'openai.streaming', endpointPath: '/chat/completions', verdict: 'skipped', skippedReason: 'noOpenAIModel' }),
+      probe({ probe: 'openai.responses', endpointPath: '/responses', verdict: 'skipped', skippedReason: 'noOpenAIModel' }),
+      probe({ probe: 'claude.nonStreaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
+      probe({ probe: 'claude.streaming', endpointPath: '/messages', verdict: 'skipped', skippedReason: 'noClaudeModel' }),
+    ];
+    expect(deriveDiagnosticsOverall(noExecutedProbes)).toBe('degraded');
   });
 
   it('creates stable isolated fingerprints without exposing configuration values', () => {
@@ -107,6 +130,20 @@ describe('connection diagnostics', () => {
     await store.update(snapshot());
     await store.clear();
     expect(state.get('unrelated')).toBe(true);
+  });
+
+  it('accepts Responses completed and incomplete terminations in persisted probes', () => {
+    const valid = snapshot();
+    const completed = parseConnectionDiagnosticsSnapshot({
+      ...valid,
+      probes: [{ ...valid.probes[2], termination: 'completed' }, ...valid.probes.filter((entry) => entry.probe !== 'openai.streaming')],
+    }, valid.fingerprint, 2_000);
+    expect(completed?.probes.find((entry) => entry.probe === 'openai.streaming')?.termination).toBe('completed');
+    const incomplete = parseConnectionDiagnosticsSnapshot({
+      ...valid,
+      probes: [{ ...valid.probes[2], termination: 'incomplete' }, ...valid.probes.filter((entry) => entry.probe !== 'openai.streaming')],
+    }, valid.fingerprint, 2_000);
+    expect(incomplete?.probes.find((entry) => entry.probe === 'openai.streaming')?.termination).toBe('incomplete');
   });
 
   it('ignores damaged, mismatched, unsafe, and future-schema values', () => {

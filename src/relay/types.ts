@@ -200,7 +200,8 @@ export type ResponsesInputItem =
 
 export type ResponsesInputContentPart =
   | { type: 'input_text'; text: string }
-  | { type: 'input_image'; image_url: string; detail?: 'auto' };
+  | { type: 'input_image'; image_url: string; detail?: 'auto' }
+  | { type: 'function_call'; call_id: string; name: string; arguments: string };
 
 export interface ResponsesToolDefinition {
   type: 'function';

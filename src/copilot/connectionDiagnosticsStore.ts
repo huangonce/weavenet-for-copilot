@@ -16,12 +16,13 @@ import type {
 } from './connectionDiagnostics';
 
 const MAX_PERSISTED_STRING_LENGTH = 500;
-const MAX_PROBES = 5;
+const MAX_PROBES = 6;
 const MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
 const PROBE_IDS: readonly ConnectionProbeId[] = [
   'models',
   'openai.nonStreaming',
   'openai.streaming',
+  'openai.responses',
   'claude.nonStreaming',
   'claude.streaming',
 ];
@@ -144,14 +145,14 @@ function parseProbe(value: unknown, now: number): ConnectionProbeResult | undefi
   if (!isRecord(value)
     || !PROBE_IDS.includes(value.probe as ConnectionProbeId)
     || !VERDICTS.includes(value.verdict as ConnectionProbeVerdict)
-    || (value.endpointPath !== '/models' && value.endpointPath !== '/chat/completions' && value.endpointPath !== '/messages')
+    || (value.endpointPath !== '/models' && value.endpointPath !== '/chat/completions' && value.endpointPath !== '/responses' && value.endpointPath !== '/messages')
     || !isTimestamp(value.startedAt, now)
     || !isNonNegativeNumber(value.elapsedMs)
     || !isOptionalInteger(value.status)
     || !isOptionalSafeString(value.responseType)
     || !isOptionalSafeString(value.requestId)
     || !isOptionalSafeString(value.evidenceModelId)
-    || (value.termination !== undefined && value.termination !== '[DONE]' && value.termination !== 'finish_reason' && value.termination !== 'message_stop')
+    || (value.termination !== undefined && value.termination !== '[DONE]' && value.termination !== 'finish_reason' && value.termination !== 'message_stop' && value.termination !== 'completed' && value.termination !== 'incomplete')
     || (value.skippedReason !== undefined && !SKIP_REASONS.includes(value.skippedReason as ConnectionProbeSkipReason))
   ) return undefined;
   const failure = value.failure === undefined ? undefined : parseFailure(value.failure);

@@ -154,6 +154,31 @@ describe('RelayClient', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-test', stream: true });
   });
 
+  it('reports an incomplete Responses probe termination from truncation', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_1',
+      status: 'incomplete',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'truncated' }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }), {
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_resp_trunc' },
+    }));
+
+    await expect(client().testOpenAIResponses('gpt-test')).resolves.toMatchObject({
+      endpoint: '/responses', stream: false, termination: 'incomplete', requestId: 'req_resp_trunc',
+    });
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n' +
+      'data: {"type":"response.incomplete","response":{"id":"resp_1"}}\n\n',
+      { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_resp_trunc_stream' } },
+    ));
+
+    await expect(client().testOpenAIResponses('gpt-test', true)).resolves.toMatchObject({
+      endpoint: '/responses', stream: true, termination: 'incomplete', requestId: 'req_resp_trunc_stream',
+    });
+  });
+
   it('rejects an unsuccessful Responses probe without falling back', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       error: { message: 'model does not support responses' },

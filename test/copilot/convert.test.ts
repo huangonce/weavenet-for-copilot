@@ -111,7 +111,7 @@ describe('chat request conversion', () => {
 });
 
 describe('responses input conversion', () => {
-  it('maps assistant text and tool results without assistant tool calls', () => {
+  it('preserves assistant function calls so call_ids match tool results', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
@@ -122,7 +122,13 @@ describe('responses input conversion', () => {
     }] as never;
 
     expect(convertResponsesInput(messages, false)).toEqual([
-      { role: 'assistant', content: 'Calling search.' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'input_text', text: 'Calling search.' },
+          { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
+        ],
+      },
       { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
     ]);
   });
@@ -146,7 +152,7 @@ describe('responses input conversion', () => {
     }]);
   });
 
-  it('maps system messages to the system role and drops empty assistant messages', () => {
+  it('maps system messages and keeps function calls in assistant history', () => {
     const messages = [
       { role: 3, content: [new vscode.LanguageModelTextPart('system instruction')] },
       { role: vscode.LanguageModelChatMessageRole.Assistant, content: [new vscode.LanguageModelToolCallPart('call-1', 'search', {})] },
@@ -154,6 +160,7 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false)).toEqual([
       { role: 'system', content: 'system instruction' },
+      { role: 'assistant', content: [{ type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' }] },
     ]);
   });
 

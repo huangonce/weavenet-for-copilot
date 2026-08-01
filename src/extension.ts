@@ -174,7 +174,12 @@ export async function configureActiveRelay(provider: WeaveNetChatProvider): Prom
       void vscode.window.showErrorMessage('This connection was deleted while updating its API key. Please try again.');
       return false;
     }
-    await provider.storeRelayKey(current, apiKey);
+    try {
+      await provider.storeRelayKey(current, apiKey);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`WeaveNet could not save the API key for “${current.name}”: ${errorMessage(error)}`);
+      return false;
+    }
     return true;
   });
   if (!stored) return;
@@ -191,7 +196,12 @@ export async function clearActiveRelayKey(provider: WeaveNetChatProvider): Promi
   const cleared = await runConnectionMutation(async () => {
     const current = getProfileConfiguration().profiles.find((entry) => entry.id === profile.id);
     if (!current) return false;
-    await provider.clearRelayKeyForProfile(current);
+    try {
+      await provider.clearRelayKeyForProfile(current);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`WeaveNet could not clear the API key for “${current.name}”: ${errorMessage(error)}`);
+      return false;
+    }
     void vscode.window.showInformationMessage(`WeaveNet API key for “${current.name}” cleared.`);
     return true;
   });

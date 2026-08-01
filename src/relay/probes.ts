@@ -20,7 +20,7 @@ export interface RelayProtocolProbeResult {
   readonly responseType: string;
   readonly requestId?: string;
   readonly stream: boolean;
-  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed';
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete';
 }
 
 export type ResponsesEndpointAvailability = 'supported' | 'unsupported' | 'unknown';
@@ -131,15 +131,17 @@ export async function probeOpenAIResponses(
   await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
   const callbacks = emptyProbeCallbacks();
   if (!stream) {
-    await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token, MAX_PROBE_RESPONSE_BYTES);
-    return { endpoint: '/responses', ...metadata, stream: false, termination: 'completed' };
+    // `max_output_tokens: 1` makes truncation the common case for tiny replies;
+    // propagate the full-response status so probes record the real termination.
+    const termination = await processResponsesFullResponse(response, callbacks, options.streamIdleTimeoutMs, token, MAX_PROBE_RESPONSE_BYTES);
+    return { endpoint: '/responses', ...metadata, stream: false, termination };
   }
   requireEventStream(metadata.responseType, 'Responses');
   const outcome = await processResponsesStream(response, callbacks, options.streamIdleTimeoutMs, token, MAX_PROBE_EVENT_BYTES);
   if (!outcome.terminal) {
     throw createIncompleteStreamError('Responses', outcome.parts === 0 ? 'missing-terminal-empty-response' : 'missing-terminal-event');
   }
-  return { endpoint: '/responses', ...metadata, stream: true, termination: 'completed' };
+  return { endpoint: '/responses', ...metadata, stream: true, termination: outcome.termination ?? 'completed' };
 }
 
 /**

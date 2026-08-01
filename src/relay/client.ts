@@ -36,7 +36,7 @@ export interface RelayEndpointTestResult {
   readonly responseType: string;
   readonly requestId?: string;
   readonly stream?: boolean;
-  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed';
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete';
 }
 
 export class RelayClient {

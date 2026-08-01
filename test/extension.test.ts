@@ -318,6 +318,32 @@ describe('connection mutation queue', () => {
     expect(provider.storeRelayKey).toHaveBeenCalledWith(config.profiles[0], 'new-key');
   });
 
+  it('reports a failed key save without refreshing the connection', async () => {
+    configurationFixture([WORK_PROFILE]);
+    const provider = providerFixture();
+    provider.storeRelayKey.mockRejectedValueOnce(new Error('secret storage unavailable'));
+    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: WORK_PROFILE } as never);
+    const error = vi.spyOn(vscode.window, 'showErrorMessage');
+
+    await configureActiveRelay(provider);
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('could not save the API key'));
+    expect(provider.refreshConnection).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed key clear without refreshing the connection', async () => {
+    configurationFixture([WORK_PROFILE]);
+    const provider = providerFixture();
+    provider.clearRelayKeyForProfile.mockRejectedValueOnce(new Error('secret storage unavailable'));
+    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile: WORK_PROFILE } as never);
+    const error = vi.spyOn(vscode.window, 'showErrorMessage');
+
+    await clearActiveRelayKey(provider);
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('could not clear the API key'));
+    expect(provider.refreshConnection).not.toHaveBeenCalled();
+  });
+
   it('selects among multiple profiles when setting or clearing a key and refreshes only that connection', async () => {
     configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
