@@ -127,21 +127,22 @@ export function convertTools(
 
 /**
  * Converts VS Code chat messages to OpenAI Responses API input items.
- * System instructions are extracted into the top-level `instructions` field
- * (the Responses spec does not accept `role: 'system'` input items; strict
- * relays reject them). Assistant tool calls are preserved as top-level
- * `function_call` items (not nested content parts, which only accept
- * output_text/input_text/input_image etc.) so the following
- * `function_call_output` items keep a matching call_id; dropping them would
- * leave the call_id dangling and can make strict relays reject the history
- * with a 400. Assistant message text uses `output_text` parts per the
- * Responses spec; strict relays reject `input_text` on assistant messages.
- * Thinking models additionally require a non-empty `reasoning` item before
- * each batch of tool calls.
+ * System messages are hoisted into the top-level `instructions` field, which
+ * the spec describes as the system/developer message slot. Assistant tool
+ * calls are preserved as top-level `function_call` items (not nested content
+ * parts) so the following `function_call_output` items keep a matching
+ * call_id; dropping them would leave the call_id dangling and can make strict
+ * relays reject the history with a 400. Assistant message text uses
+ * `output_text` parts, matching the output message schema that strict relays
+ * validate against. A `reasoning` item requires an `id` from the response that
+ * produced it, so a synthesized one is only sent for relays that demand it via
+ * `replayReasoningContent`.
  */
 export function convertResponsesInput(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
   supportsImageInput: boolean,
+  replayReasoningContent = false,
+  includeAssistantPhase = false,
 ): { input: ResponsesInputItem[]; instructions?: string } {
   const result: ResponsesInputItem[] = [];
   const instructionParts: string[] = [];
@@ -200,14 +201,26 @@ export function convertResponsesInput(
 
     if (role === 'assistant') {
       if (textContent) {
-        result.push({ role, content: contentParts });
+        // Text followed by tool calls is a preamble rather than the answer.
+        result.push({
+          role,
+          content: contentParts,
+          ...(includeAssistantPhase
+            ? { phase: functionCalls.length > 0 ? 'commentary' as const : 'final_answer' as const }
+            : {}),
+        });
       }
       if (functionCalls.length > 0) {
-        result.push({
-          type: 'reasoning',
-          content: [{ type: 'reasoning_text', text: thinkingText || REASONING_PLACEHOLDER }],
-          summary: [],
-        });
+        // A spec-compliant reasoning item carries the `id` of the response that
+        // produced it, which a replayed history cannot supply, so it is only
+        // synthesized for relays that reject tool calls without one.
+        if (replayReasoningContent) {
+          result.push({
+            type: 'reasoning',
+            content: [{ type: 'reasoning_text', text: thinkingText || REASONING_PLACEHOLDER }],
+            summary: [],
+          });
+        }
         result.push(...functionCalls);
       }
     } else if (contentParts.length > 0) {

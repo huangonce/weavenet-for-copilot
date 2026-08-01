@@ -129,6 +129,10 @@ export interface OpenAIRequestCapabilities {
   store?: boolean;
   strictTools?: boolean;
   parallelToolCalls?: boolean;
+  /** DeepSeek-style thinking relays reject tool-call history unless `reasoning.content` is replayed, even without the `id` the spec expects. */
+  replayReasoningContent?: boolean;
+  /** Codex-style models degrade when replayed assistant messages drop their `phase`. */
+  assistantPhase?: boolean;
   developerRole?: boolean;
   clientRequestId?: boolean;
   reasoningEfforts?: ReasoningEffort[];
@@ -195,7 +199,11 @@ export interface OpenAIFullResponse extends StreamChunk {
 // independent per protocol.
 
 export type ResponsesInputItem =
-  | { role: 'user' | 'assistant'; content: string | ResponsesInputContentPart[] }
+  | {
+      role: 'user' | 'assistant';
+      content: string | ResponsesInputContentPart[];
+      phase?: 'commentary' | 'final_answer';
+    }
   | { type: 'function_call_output'; call_id: string; output: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'reasoning'; content: { type: 'reasoning_text'; text: string }[]; summary: { type: 'summary_text'; text: string }[] };

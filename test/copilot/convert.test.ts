@@ -127,14 +127,13 @@ describe('responses input conversion', () => {
           role: 'assistant',
           content: [{ type: 'output_text', text: 'Calling search.' }],
         },
-        { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
         { type: 'function_call_output', call_id: 'call-1', output: 'Found it.' },
       ],
     });
   });
 
-  it('reuses thinking content as the reasoning item preceding tool calls', () => {
+  it('omits the synthesized reasoning item by default', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
@@ -145,8 +144,52 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false)).toEqual({
       input: [
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+    });
+  });
+
+  it('replays reasoning_text in content for DeepSeek-style relays', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelThinkingPart('Need to look this up.'),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+      ],
+    }] as never;
+
+    expect(convertResponsesInput(messages, false, true)).toEqual({
+      input: [
         { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Need to look this up.' }], summary: [] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+      ],
+    });
+  });
+
+  it('labels replayed assistant messages with their phase when enabled', () => {
+    const preamble = [
+      {
+        role: vscode.LanguageModelChatMessageRole.Assistant,
+        content: [
+          new vscode.LanguageModelTextPart('Let me search.'),
+          new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
+        ],
+      },
+      { role: vscode.LanguageModelChatMessageRole.Assistant, content: [new vscode.LanguageModelTextPart('Found it.')] },
+    ] as never;
+
+    expect(convertResponsesInput(preamble, false, false, true)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Let me search.' }], phase: 'commentary' },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Found it.' }], phase: 'final_answer' },
+      ],
+    });
+    expect(convertResponsesInput(preamble, false)).toEqual({
+      input: [
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Let me search.' }] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Found it.' }] },
       ],
     });
   });
@@ -180,7 +223,6 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false)).toEqual({
       input: [
-        { type: 'reasoning', content: [{ type: 'reasoning_text', text: '(reasoning omitted)' }], summary: [] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
       ],
       instructions: 'system instruction',

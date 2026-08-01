@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.5.4 - 2026-08-01
+
+- 修复严格 Relay 拒绝 Responses 工具调用历史的问题：默认不再回传合成的 `reasoning` item。规范中的 `reasoning` item 必须携带上游返回的 `id`，重放历史无法提供；部分网关据此将 `reasoning.content` 限制为空数组，返回 `array_above_max_length` 的 HTTP 400。DeepSeek 等要求回传思考内容的 Relay 可通过模型能力 `openai.replayReasoningContent` 显式开启。
+- 新增可选的 `openai.assistantPhase` 能力：为重放的 assistant 消息标注 `phase`（工具调用前的文本记为 `commentary`，最终回答记为 `final_answer`）。官方文档指出 Codex 系模型丢失该字段会把前导说明误判为最终答案；因旧网关可能拒绝未知字段，默认关闭。
+- 更正 0.5.3 说明中的错误表述：Responses 规范的 input item **接受** `role: "system"`（`EasyInputMessage` 与 `Message` 均允许 `system`/`developer`）。改用顶层 `instructions` 是等效且更通用的写法，并非修复规范违规。
+
 ## 0.5.3 - 2026-08-01
 
 - 修复 Responses 请求中 assistant 消息 content 分片类型错误的问题：assistant 文本改为规范的 `output_text`（之前误用 `input_text`），避免严格校验的 Relay 对含 assistant 历史消息的请求返回 `Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'` 的 HTTP 400。

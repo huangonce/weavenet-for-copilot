@@ -146,7 +146,12 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
-  const { input, instructions } = convertResponsesInput(messages, supportsImageInput);
+  const { input, instructions } = convertResponsesInput(
+    messages,
+    supportsImageInput,
+    routedModel.openai?.replayReasoningContent === true,
+    routedModel.openai?.assistantPhase === true,
+  );
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);

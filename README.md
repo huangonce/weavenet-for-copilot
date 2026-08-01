@@ -110,6 +110,8 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
     "parallelToolCalls": true,
     "developerRole": true,
     "clientRequestId": true,
+    "replayReasoningContent": false,
+    "assistantPhase": false,
     "reasoningEfforts": ["minimal", "low", "medium", "high"],
     "defaultReasoningEffort": "medium"
   }
@@ -117,6 +119,8 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 ```
 
 `context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。Responses API 不会被自动启用，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
+
+`replayReasoningContent` 与 `assistantPhase` 只作用于 Responses 协议，且默认关闭。前者在每组 `function_call` 前回传合成的 `reasoning` item，仅供 DeepSeek 等要求回传思考内容的 Relay 使用——规范中的 `reasoning` item 需携带上游返回的 `id`，重放历史无法提供，因此默认不发送。后者为 assistant 历史消息标注 `phase`（工具调用前的文本记为 `commentary`，最终回答记为 `final_answer`），可改善 Codex 系模型的表现，但旧网关可能拒绝该字段。
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 
