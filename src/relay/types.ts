@@ -188,6 +188,118 @@ export interface OpenAIFullResponse extends StreamChunk {
   }>;
 }
 
+// OpenAI Responses API protocol types. Kept separate from Chat Completions so
+// that request construction, SSE event parsing, and usage mapping stay
+// independent per protocol.
+
+export type ResponsesInputItem =
+  | { role: 'system' | 'user' | 'assistant'; content: string | ResponsesInputContentPart[] }
+  | { type: 'function_call_output'; call_id: string; output: string };
+
+export type ResponsesInputContentPart =
+  | { type: 'input_text'; text: string }
+  | { type: 'input_image'; image_url: string; detail?: 'auto' };
+
+export interface ResponsesToolDefinition {
+  type: 'function';
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  strict?: true;
+}
+
+export interface ResponsesRequest {
+  model: string;
+  input: string | ResponsesInputItem[];
+  instructions?: string;
+  stream: boolean;
+  tools?: ResponsesToolDefinition[];
+  tool_choice?: 'auto' | 'required' | 'none';
+  max_output_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  reasoning?: { effort?: ReasoningEffort; summary?: 'auto' | 'disabled' };
+  store?: false;
+  parallel_tool_calls?: boolean;
+  previous_response_id?: string | null;
+  text?: { format?: { type: 'text' } };
+  truncation?: 'auto';
+}
+
+export interface ResponsesUsage {
+  input_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  output_tokens?: number;
+  output_tokens_details?: { reasoning_tokens?: number };
+  total_tokens?: number;
+}
+
+export interface ResponsesMessageOutputContentPart {
+  type: 'output_text' | 'refusal';
+  text?: string;
+  refusal?: string;
+}
+
+export interface ResponsesOutputItemMessage {
+  id?: string;
+  type: 'message';
+  role?: 'assistant';
+  status?: string;
+  content?: ResponsesMessageOutputContentPart[];
+}
+
+export interface ResponsesOutputItemFunctionCall {
+  id?: string;
+  type: 'function_call';
+  call_id?: string;
+  name: string;
+  arguments: string;
+  status?: string;
+}
+
+export interface ResponsesOutputItemReasoning {
+  id?: string;
+  type: 'reasoning';
+  summary?: Array<{ type: 'summary_text'; text: string }>;
+  content?: Array<{ type: 'reasoning_text'; text: string }>;
+}
+
+export type ResponsesOutputItem =
+  | ResponsesOutputItemMessage
+  | ResponsesOutputItemFunctionCall
+  | ResponsesOutputItemReasoning;
+
+export interface ResponsesFullResponse {
+  id?: string;
+  object?: string;
+  status?: 'completed' | 'failed' | 'in_progress' | 'incomplete' | 'cancelled';
+  error?: { code?: string; message?: string; param?: string; type?: string };
+  output?: ResponsesOutputItem[];
+  usage?: ResponsesUsage;
+}
+
+export interface ResponsesStreamEvent {
+  type?: string;
+  event_id?: string;
+  response_id?: string;
+  item_id?: string;
+  output_index?: number;
+  content_index?: number;
+  /** Text delta for output_text/refusal/reasoning events. */
+  delta?: string;
+  /** Complete arguments for function_call_arguments.done events. */
+  arguments?: string;
+  item?: ResponsesOutputItem;
+  response?: {
+    id?: string;
+    status?: ResponsesFullResponse['status'];
+    error?: ResponsesFullResponse['error'];
+    usage?: ResponsesUsage;
+  };
+  error?: { code?: string; message?: string; param?: string; type?: string };
+  usage?: ResponsesUsage;
+}
+
 export interface ClaudeContentBlockText {
   type: 'text';
   text: string;
@@ -303,23 +415,26 @@ export interface ClaudeStreamEvent {
   }>;
 }
 
+/** Protocol family used in diagnostics and error attribution. */
+export type RelayProtocol = 'OpenAI' | 'Responses' | 'Claude';
+
 export interface StreamCallbacks {
   onContent(text: string): void;
   onReasoning(text: string): void;
   onToolCall(toolCall: ToolCall): void;
   /** Request metadata only; request bodies, URLs, and headers are never exposed. */
-  onRequest?(protocol: 'OpenAI' | 'Claude', metadata: RequestDiagnosticsMetadata): void;
+  onRequest?(protocol: RelayProtocol, metadata: RequestDiagnosticsMetadata): void;
   /** Transport state captured when fetch returns or rejects. */
-  onRequestSettled?(protocol: 'OpenAI' | 'Claude', metadata: RequestTransportDiagnosticsMetadata): void;
+  onRequestSettled?(protocol: RelayProtocol, metadata: RequestTransportDiagnosticsMetadata): void;
   onRefusal?(text: string): void;
   onOpenAIFinishReason?(reason: string): void;
   onOpenAIUsage?(usage: OpenAIUsage): void;
   onClaudeUsage?(usage: ClaudeUsage, responseId?: string): void;
   /** HTTP response metadata only; authentication headers and bodies are never exposed. */
-  onResponse?(protocol: 'OpenAI' | 'Claude', status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
-  onProcessingStarted?(protocol: 'OpenAI' | 'Claude'): void;
+  onResponse?(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
+  onProcessingStarted?(protocol: RelayProtocol): void;
   /** Called only when the protocol's normal terminal event is received. */
-  onStreamEnd?(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+  onStreamEnd?(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed'): void;
 }
 
 export interface RequestDiagnosticsMetadata {

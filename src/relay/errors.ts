@@ -1,3 +1,5 @@
+import type { RelayProtocol } from './types';
+
 export class RelayRequestError extends Error {
   constructor(
     message: string,
@@ -15,7 +17,7 @@ export class RelayRequestError extends Error {
 export class RelayStreamError extends Error {
   constructor(
     message: string,
-    readonly protocol: 'OpenAI' | 'Claude',
+    readonly protocol: RelayProtocol,
     readonly upstreamCode?: string,
     readonly upstreamType?: string,
     readonly requestId?: string,

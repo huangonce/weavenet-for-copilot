@@ -3,6 +3,7 @@ import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
 import { InvalidToolArgumentsError } from './helpers';
 import type {
+  RelayProtocol,
   RequestDiagnosticsMetadata,
   RequestTransportDiagnosticsMetadata,
   ResponseDiagnosticsMetadata,
@@ -13,11 +14,11 @@ export interface RequestDiagnostics {
   onReasoning(): void;
   onToolCall(): void;
   onRefusal(): void;
-  onRequest(protocol: 'OpenAI' | 'Claude', metadata: RequestDiagnosticsMetadata): void;
-  onRequestSettled(protocol: 'OpenAI' | 'Claude', metadata: RequestTransportDiagnosticsMetadata): void;
+  onRequest(protocol: RelayProtocol, metadata: RequestDiagnosticsMetadata): void;
+  onRequestSettled(protocol: RelayProtocol, metadata: RequestTransportDiagnosticsMetadata): void;
   onOpenAIFinishReason(reason: string): void;
-  onResponse(protocol: 'OpenAI' | 'Claude', status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
-  onStreamEnd(protocol: 'OpenAI' | 'Claude', terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop'): void;
+  onResponse(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
+  onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed'): void;
   complete(): void;
   cancelled(): void;
   failed(error: unknown): void;
@@ -28,7 +29,7 @@ export type DebugLogger = (config: ExtensionConfig, message: string) => void;
 export function createRequestDiagnostics(
   debug: DebugLogger,
   config: ExtensionConfig,
-  protocol: 'OpenAI' | 'Claude',
+  protocol: RelayProtocol,
   model: string,
   messageCount: number,
   toolCount: number,

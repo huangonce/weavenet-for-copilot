@@ -3,12 +3,14 @@ import type {
   ChatRequest,
   ClaudeRequest,
   ModelsResponse,
+  ResponsesRequest,
   StreamCallbacks,
 } from './types';
 import { streamClaudeMessages } from './claude';
 import { isReservedRelayHeader } from '../config/config';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata } from './http';
 import { streamOpenAIChatCompletion } from './openai';
+import { streamOpenAIResponses } from './openaiResponses';
 import { probeClaudeMessages, probeOpenAIChatCompletion } from './probes';
 import type { RelayProtocolProbeResult } from './probes';
 import { relayEndpointUrl } from './url';
@@ -80,6 +82,21 @@ export class RelayClient {
     sendClientRequestId = false,
   ): Promise<void> {
     await streamOpenAIChatCompletion({
+      baseUrl: this.options.baseUrl,
+      headers: this.headers(),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+      sendClientRequestId,
+    }, request, callbacks, token);
+  }
+
+  async streamResponses(
+    request: ResponsesRequest,
+    callbacks: StreamCallbacks,
+    token?: CancellationToken,
+    sendClientRequestId = false,
+  ): Promise<void> {
+    await streamOpenAIResponses({
       baseUrl: this.options.baseUrl,
       headers: this.headers(),
       requestTimeoutMs: this.options.requestTimeoutMs,
