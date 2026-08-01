@@ -20,6 +20,8 @@ export interface RoutedModel extends RelayModel {
   upstreamId: string;
   protocol: ModelProtocol;
   route: 'openai' | 'chatgpt' | 'claude';
+  /** Probing result: Responses API support for OpenAI-compatible models. `undefined` means Chat Completions. */
+  openaiApi?: 'chat' | 'responses';
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;

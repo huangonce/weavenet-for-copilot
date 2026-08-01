@@ -80,7 +80,9 @@ function keyFor(profileId: string): string {
 }
 
 function relayModelRequestCount(fetchMock: ReturnType<typeof vi.spyOn>): number {
-  return fetchMock.mock.calls.filter(([input]) => String(input).includes('.example.test')).length;
+  return fetchMock.mock.calls
+    .filter(([input]) => String(input).includes('.example.test') && String(input).includes('/models'))
+    .length;
 }
 
 async function flushAsyncWork(): Promise<void> {
@@ -173,9 +175,14 @@ describe('connection pool model refresh', () => {
     const key = keyFor(WORK_ID);
     secrets.values.set(key, 'work-key');
     let resolveResponse: ((response: Response) => void) | undefined;
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => {
-      resolveResponse = resolve;
-    }));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/models')) {
+        return new Promise<Response>((resolve) => {
+          resolveResponse = resolve;
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify({ data: [] }), { headers: { 'content-type': 'application/json' } }));
+    });
 
     const refresh = provider.refreshModels();
     await flushAsyncWork();

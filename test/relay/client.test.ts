@@ -114,6 +114,75 @@ describe('RelayClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('probes OpenAI Responses with a single bounded POST and reports completion', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_1',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }), {
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_resp' },
+    }));
+
+    await expect(client().testOpenAIResponses('gpt-test')).resolves.toMatchObject({
+      endpoint: '/responses', status: 200, responseType: 'application/json', requestId: 'req_resp',
+      stream: false, termination: 'completed',
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://relay.example.test/v1/responses');
+    expect(init?.method).toBe('POST');
+    const body = JSON.parse(String(init?.body));
+    expect(body.model).toBe('gpt-test');
+    expect(body.max_output_tokens).toBe(1);
+    expect(body.stream).toBe(false);
+    expect(body.store).toBe(false);
+    expect(body.input).toEqual([{ role: 'user', content: 'OK' }]);
+  });
+
+  it('probes OpenAI Responses streaming through the completed event', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n' +
+      'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n',
+      { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_resp_stream' } },
+    ));
+
+    await expect(client().testOpenAIResponses('gpt-test', true)).resolves.toMatchObject({
+      endpoint: '/responses', stream: true, termination: 'completed', requestId: 'req_resp_stream',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ model: 'gpt-test', stream: true });
+  });
+
+  it('rejects an unsuccessful Responses probe without falling back', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'model does not support responses' },
+    }), {
+      status: 404,
+      headers: { 'content-type': 'application/json', 'x-request-id': 'req_missing' },
+    }));
+
+    await expect(client().testOpenAIResponses('gpt-test')).rejects.toThrow('404');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/responses');
+  });
+
+  it('reports /responses endpoint availability from a free GET', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    await expect(client().probeResponsesEndpoint()).resolves.toBe('supported');
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 405 }));
+    await expect(client().probeResponsesEndpoint()).resolves.toBe('supported');
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+    await expect(client().probeResponsesEndpoint()).resolves.toBe('unsupported');
+  });
+
+  it('returns unknown when the /responses availability GET fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('network down'));
+    await expect(client().probeResponsesEndpoint()).resolves.toBe('unknown');
+  });
+
   it('sanitizes and bounds successful response metadata', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
       headers: { 'content-type': `application/json${'x'.repeat(300)}`, 'x-request-id': `req${'y'.repeat(200)}` },

@@ -663,7 +663,7 @@ function successfulProbe(
 
 async function runProtocolProbe(
   probe: ConnectionProbeId,
-  endpointPath: '/chat/completions' | '/messages',
+  endpointPath: RelayEndpointTestResult['endpoint'],
   evidenceModelId: string,
   operation: () => Promise<RelayEndpointTestResult>,
 ): Promise<ConnectionProbeResult> {

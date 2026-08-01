@@ -17,14 +17,14 @@ export type ConnectionProbeSkipReason =
 export interface ConnectionProbeResult {
   readonly probe: ConnectionProbeId;
   readonly verdict: ConnectionProbeVerdict;
-  readonly endpointPath: '/models' | '/chat/completions' | '/messages';
+  readonly endpointPath: '/models' | '/chat/completions' | '/responses' | '/messages';
   readonly startedAt: number;
   readonly elapsedMs: number;
   readonly status?: number;
   readonly responseType?: string;
   readonly requestId?: string;
   readonly evidenceModelId?: string;
-  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop';
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed';
   readonly failure?: ConnectionTestFailure;
   readonly skippedReason?: ConnectionProbeSkipReason;
 }

@@ -11,8 +11,13 @@ import { isReservedRelayHeader } from '../config/config';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata } from './http';
 import { streamOpenAIChatCompletion } from './openai';
 import { streamOpenAIResponses } from './openaiResponses';
-import { probeClaudeMessages, probeOpenAIChatCompletion } from './probes';
-import type { RelayProtocolProbeResult } from './probes';
+import {
+  probeClaudeMessages,
+  probeOpenAIChatCompletion,
+  probeOpenAIResponses,
+  probeResponsesEndpoint as probeResponsesEndpointRequest,
+} from './probes';
+import type { RelayProtocolProbeResult, ResponsesEndpointAvailability } from './probes';
 import { relayEndpointUrl } from './url';
 
 export interface RelayClientOptions {
@@ -26,12 +31,12 @@ export interface RelayClientOptions {
 }
 
 export interface RelayEndpointTestResult {
-  readonly endpoint: '/models' | '/chat/completions' | '/messages';
+  readonly endpoint: '/models' | '/chat/completions' | '/responses' | '/messages';
   readonly status: number;
   readonly responseType: string;
   readonly requestId?: string;
   readonly stream?: boolean;
-  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop';
+  readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed';
 }
 
 export class RelayClient {
@@ -63,6 +68,25 @@ export class RelayClient {
       requestTimeoutMs: this.options.requestTimeoutMs,
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
     }, model, stream, token);
+  }
+
+  async testOpenAIResponses(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
+    return probeOpenAIResponses({
+      baseUrl: this.options.baseUrl,
+      headers: this.headersFor('bearer'),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+    }, model, stream, token);
+  }
+
+  /** Free GET /responses availability check; returns 'supported' | 'unsupported' | 'unknown'. */
+  async probeResponsesEndpoint(token?: CancellationToken): Promise<ResponsesEndpointAvailability> {
+    return probeResponsesEndpointRequest({
+      baseUrl: this.options.baseUrl,
+      headers: this.headersFor('bearer'),
+      requestTimeoutMs: this.options.requestTimeoutMs,
+      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+    }, token);
   }
 
   async testClaudeMessages(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
