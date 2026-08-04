@@ -59,6 +59,10 @@ export class LanguageModelError extends Error {
 
 export class CancellationError extends Error {}
 
+export const env = {
+  language: 'en',
+};
+
 export class EventEmitter<T> {
   private readonly listeners = new Set<(value: T) => void>();
 
