@@ -2,9 +2,9 @@ import * as vscode from 'vscode';
 import { AuthManager } from '../auth/auth';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile } from '../config/config';
-import { CONFIG_SECTION } from '../constants';
+import { CONFIG_SECTION, VENDOR } from '../constants';
 import { safeHost } from './connection';
-import { toChatInformation } from '../relay/models';
+import { supportsImageInputForRoutedModel, toChatInformation } from '../relay/models';
 import { provideClaudeResponse } from './claudeResponse';
 import {
   ConnectionRuntimeManager,
@@ -24,6 +24,14 @@ import { ModelSnapshotStore } from './modelSnapshotStore';
 import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
 import { formatLogError } from './requestDiagnostics';
 import { resolveOpenAIApiVariant } from '../relay/models';
+import { snapshotChatRequest, snapshotChatResponseOptions } from './canonicalRequest';
+import {
+  resolveVisionProxyMessages,
+  selectVisionDescriber,
+  validateVisionImageRequest,
+  VisionDescriptionCache,
+} from './visionProxy';
+import type { VisionDescriptionCacheWrite } from './visionProxy';
 
 export {
   ConnectionTestError,
@@ -53,6 +61,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly runtimeManager: ConnectionRuntimeManager;
   private readonly bindingRegistry = new ModelBindingRegistry();
   private readonly connectionTest: ConnectionTestService;
+  private readonly visionDescriptionCache = new VisionDescriptionCache();
+  private visionCacheGeneration = 0;
   private connectionStatus: ConnectionStatus = {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
   };
@@ -77,6 +87,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         this.connectionStatusEmitter.fire(status);
       },
       onCatalogChanged: () => {
+        this.invalidateVisionRouting();
         this.changeEmitter.fire();
       },
     });
@@ -90,8 +101,22 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.changeEmitter,
       this.connectionStatusEmitter,
       this.output,
+      vscode.lm.onDidChangeChatModels(() => {
+        this.invalidateVisionRouting();
+      }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(CONFIG_SECTION)) {
+          if (
+            event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyEnabled`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyModel`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyPrompt`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.supportsImageInput`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.imageInputModels`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.disabledImageInputModels`)
+            || event.affectsConfiguration(`${CONFIG_SECTION}.profiles`)
+          ) {
+            this.invalidateVisionRouting();
+          }
           void this.runtimeManager.reconcileConfiguration();
         }
       }),
@@ -186,6 +211,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
+    const messageSnapshot = snapshotChatRequest(messages);
+    const optionsSnapshot = snapshotChatResponseOptions(options);
+    if (messageSnapshot.hasImages) validateVisionImageRequest(messageSnapshot);
     const binding = this.bindingRegistry.get(model.id);
     if (!binding) {
       throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
@@ -199,25 +227,72 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       throw vscode.LanguageModelError.NotFound('This model connection is no longer available. Refresh models and select it again.');
     }
     const config = getConfig(currentProfile);
+    const visionCacheGeneration = this.visionCacheGeneration;
     const routedModel = binding.model;
     const apiKey = await this.auth.getApiKey(currentProfile);
     if (!apiKey) {
       throw vscode.LanguageModelError.NoPermissions(`The API key for “${currentProfile.name}” is not configured.`);
     }
-    const context = {
-      config,
-      routedModel,
-      model,
-      messages,
-      options,
-      progress,
-      token,
-      apiKey,
-      debug: this.debug.bind(this),
-    };
-    if (routedModel.protocol === 'claude') await provideClaudeResponse(context);
-    else if (resolveOpenAIApiVariant(routedModel) === 'responses') await provideResponsesResponse(context);
-    else await provideOpenAIResponse(context);
+    this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
+    const nativeImageInput = supportsImageInputForRoutedModel(routedModel, config);
+    let resolvedMessages = messageSnapshot;
+    let pendingVisionCacheWrites: readonly VisionDescriptionCacheWrite[] = [];
+    try {
+      if (!nativeImageInput && messageSnapshot.hasImages) {
+        if (!config.visionProxyEnabled) {
+          throw new vscode.LanguageModelError(
+            'This WeaveNet model does not support native image input. Enable the WeaveNet vision proxy and select an installed native vision model, or choose a native vision model directly.',
+          );
+        }
+        const vision = await resolveVisionProxyMessages(
+          messageSnapshot,
+          config,
+          { vendor: VENDOR, id: model.id },
+          token,
+          this.visionDescriptionCache,
+          async (configuredModel, targetModel) => {
+            const selected = await selectVisionDescriber(
+              configuredModel,
+              targetModel,
+              (candidate) => this.isSafeVisionProxyCandidate(candidate),
+            );
+            this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
+            return selected;
+          },
+        );
+        resolvedMessages = vision.messages;
+        pendingVisionCacheWrites = vision.pendingCacheWrites;
+        this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
+        this.debug(
+          config,
+          `[vision-proxy] generated=${vision.generatedImageMessages}, replayed=${vision.replayedImageMessages}, `
+            + `model=${vision.visionModel ? `${vision.visionModel.vendor}/${vision.visionModel.id}` : 'none'}`,
+        );
+      }
+      const context = {
+        config,
+        routedModel,
+        model,
+        messages: resolvedMessages,
+        options: optionsSnapshot,
+        progress,
+        token,
+        apiKey,
+        debug: this.debug.bind(this),
+      };
+      this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
+      if (routedModel.protocol === 'claude') await provideClaudeResponse(context);
+      else if (resolveOpenAIApiVariant(routedModel) === 'responses') await provideResponsesResponse(context);
+      else await provideOpenAIResponse(context);
+      if (!token.isCancellationRequested && visionCacheGeneration === this.visionCacheGeneration) {
+        this.visionDescriptionCache.commitAll(pendingVisionCacheWrites);
+      } else {
+        this.visionDescriptionCache.releasePending(pendingVisionCacheWrites);
+      }
+    } catch (error) {
+      this.visionDescriptionCache.releasePending(pendingVisionCacheWrites);
+      throw error;
+    }
   }
 
   showDebugLog(): void {
@@ -240,6 +315,29 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (config.debug) {
       this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
     }
+  }
+
+  private assertVisionConfigurationCurrent(
+    generation: number,
+    hasImages: boolean,
+  ): void {
+    if (hasImages && generation !== this.visionCacheGeneration) {
+      throw new vscode.CancellationError();
+    }
+  }
+
+  private invalidateVisionRouting(): void {
+    this.visionDescriptionCache.clear();
+    this.visionCacheGeneration += 1;
+  }
+
+  private isSafeVisionProxyCandidate(candidate: vscode.LanguageModelChat): boolean {
+    if (candidate.vendor !== VENDOR) return true;
+    const binding = this.bindingRegistry.get(candidate.id);
+    if (!binding) return false;
+    const runtime = this.runtimeManager.getRuntime(binding.profileId);
+    if (!runtime) return false;
+    return supportsImageInputForRoutedModel(binding.model, getConfig(runtime.profile));
   }
 
   async provideTokenCount(

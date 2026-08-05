@@ -25,9 +25,9 @@ export function toStrictJsonSchema(value: Record<string, unknown>): Record<strin
 function sanitize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitize);
   if (!value || typeof value !== 'object') return value;
-  const result: Record<string, unknown> = {};
+  const result = dictionary();
   for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (!UNSUPPORTED_SCHEMA_KEYS.has(key) && nested !== undefined) result[key] = sanitize(nested);
+    if (!UNSUPPORTED_SCHEMA_KEYS.has(key) && nested !== undefined) defineData(result, key, sanitize(nested));
   }
   return result;
 }
@@ -44,7 +44,8 @@ function normalizeStrictNode(value: unknown): unknown | undefined {
   }
   if (!value || typeof value !== 'object') return value;
   const record = value as Record<string, unknown>;
-  const result: Record<string, unknown> = { ...record };
+  const result = dictionary();
+  for (const [key, nested] of Object.entries(record)) defineData(result, key, nested);
   const type = record.type;
   const isObject = type === 'object'
     || Array.isArray(type) && type.includes('object')
@@ -53,40 +54,53 @@ function normalizeStrictNode(value: unknown): unknown | undefined {
     if (!record.properties || typeof record.properties !== 'object' || Array.isArray(record.properties)) return undefined;
     const propertyNames = Object.keys(record.properties as Record<string, unknown>);
     const required = record.required;
-    if (required === undefined && propertyNames.length === 0) result.required = [];
+    if (required === undefined && propertyNames.length === 0) defineData(result, 'required', []);
     else if (!Array.isArray(required)
       || required.some((entry) => typeof entry !== 'string')
       || required.length !== propertyNames.length
       || propertyNames.some((name) => !required.includes(name))) return undefined;
-    if (record.additionalProperties === undefined) result.additionalProperties = false;
+    if (record.additionalProperties === undefined) defineData(result, 'additionalProperties', false);
     else if (record.additionalProperties !== false) return undefined;
-    const properties: Record<string, unknown> = {};
+    const properties = dictionary();
     for (const [name, property] of Object.entries(record.properties as Record<string, unknown>)) {
       const normalized = normalizeStrictNode(property);
       if (normalized === undefined) return undefined;
-      properties[name] = normalized;
+      defineData(properties, name, normalized);
     }
-    result.properties = properties;
+    defineData(result, 'properties', properties);
   }
   for (const [key, nested] of Object.entries(result)) {
     if (key === 'properties') continue;
     if (key === '$defs' || key === 'definitions') {
       if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return undefined;
-      const definitions: Record<string, unknown> = {};
+      const definitions = dictionary();
       for (const [name, definition] of Object.entries(nested as Record<string, unknown>)) {
         const normalized = normalizeStrictNode(definition);
         if (normalized === undefined) return undefined;
-        definitions[name] = normalized;
+        defineData(definitions, name, normalized);
       }
-      result[key] = definitions;
+      defineData(result, key, definitions);
       continue;
     }
     if (!shouldNormalizeSchemaChild(key)) continue;
     const normalized = normalizeStrictNode(nested);
     if (normalized === undefined) return undefined;
-    result[key] = normalized;
+    defineData(result, key, normalized);
   }
   return result;
+}
+
+function dictionary(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>;
+}
+
+function defineData(record: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
 }
 
 function shouldNormalizeSchemaChild(key: string): boolean {

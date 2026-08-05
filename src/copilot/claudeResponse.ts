@@ -12,16 +12,16 @@ import {
   reportThinking,
   toClaudeThinking,
 } from './helpers';
-import type { ModelOptions } from './helpers';
 import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
+import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 
 export interface ClaudeResponseContext {
   readonly config: ExtensionConfig;
   readonly routedModel: RoutedModel;
   readonly model: vscode.LanguageModelChatInformation;
-  readonly messages: readonly vscode.LanguageModelChatRequestMessage[];
-  readonly options: ModelOptions;
+  readonly messages: CanonicalChatRequestSnapshot;
+  readonly options: CanonicalChatResponseOptions;
   readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>;
   readonly token: vscode.CancellationToken;
   readonly apiKey: string;
@@ -105,6 +105,7 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
 }
 
 function logClaudeRequest(debug: DebugLogger, config: ExtensionConfig, request: ClaudeRequest): void {
+  if (!config.debug) return;
   const systemChars = typeof request.system === 'string'
     ? request.system.length
     : request.system?.reduce((total, block) => total + block.text.length, 0) ?? 0;

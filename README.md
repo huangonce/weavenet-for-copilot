@@ -82,6 +82,9 @@ src/
 - `weavenet-copilot.supportsImageInput`：是否为所有模型向 Copilot 声明图片输入能力，默认关闭。
 - `weavenet-copilot.imageInputModels`：可选的模型 ID 正则表达式；命中后强制向 Copilot 声明图片输入能力。正常情况下无需配置，插件会优先根据 sub2api 和 OpenRouter 的模型元数据自动识别。
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
+- `weavenet-copilot.visionProxyEnabled`：为不支持图片输入的 WeaveNet 模型启用视觉代理，默认关闭。开启前需确认将图片交给另一模型处理符合你的隐私、安全和费用要求；原生视觉模型仍直接接收图片，不经过代理。
+- `weavenet-copilot.visionProxyModel`：视觉代理使用的已安装 VS Code 语言模型，必须精确填写 `vendor/id`，例如 `copilot/gpt-4o`。扩展不自动挑选其他模型，也不在失败时 fallback；当前目标模型以及仅通过视觉代理声明图片能力的 WeaveNet 模型不能作为代理，以避免递归。
+- `weavenet-copilot.visionProxyPrompt`：发送给视觉模型的指令；留空使用内置的忠实描述指令。每条当前含图用户消息中的图片会带编号统一识别，并同时发送该消息的有界布局；布局可能包含图片周边用户文本和工具结果文本，以保留必要语境。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
 - `weavenet-copilot.models`：仅供从 `0.3.x` 升级迁移使用的废弃顶层固定模型列表；新配置应写入 `profiles` 中。
@@ -136,6 +139,14 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 
 当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
 
+### 纯文本模型的视觉代理
+
+启用视觉代理后，扩展先把当前用户消息中的图片、配置的视觉指令以及该消息的有界布局发送给指定的已安装视觉模型。布局最多 16 KiB，可能递归包含图片周边用户文本和工具结果文本（例如文件内容或测试输出），因此这些数据也会交给视觉模型提供方。视觉模型返回的文字描述会作为长度前缀 JSON 不可信数据替换图片，再发送给目标 WeaveNet 纯文本模型；目标模型不会收到原始图片。每条当前、未命中缓存的含图用户消息会产生一次独立视觉调用，调用由所选模型的提供方处理，可能独立计费，并受该提供方自己的数据处理和保留政策约束。
+
+单个目标请求最多处理 8 张待代理图片；单张图片最多 10 MiB，待代理图片合计最多 20 MiB，视觉指令最多 32 KiB，插入目标请求的单条描述（含安全 framing）最多 48 KiB。视觉模型返回流最多接受 4,096 个 chunk；连续 90 秒没有新 chunk 或整次视觉调用超过 120 秒时，扩展会取消本地模型请求并失败，不会把部分描述发送给目标 Relay。超过可预检限制时请求会在选择或调用视觉模型前失败。限制只统计当前轮次可能外发的图片；历史图片不会自动重新外发。
+
+为了避免 Agent 工具轮次重复识别同一批图片，描述只保存在扩展进程内的有界短期缓存中：最多 64 条、描述正文合计最多 512 KiB、30 分钟过期，并按最近最少使用规则淘汰。缓存不写入设置、文件、SecretStorage、`globalState` 或日志，扩展进程结束后即消失；只有目标请求成功后才写入缓存。缓存键由视觉模型、完整视觉指令和消息布局、图片 MIME 类型与字节摘要计算，日志不会记录该键、摘要、图片、指令或描述正文。若较早轮次的图片描述已不在缓存中，扩展不会在后续 Agent 轮次中自动再次外发图片，而会明确标记描述不可用。
+
 API Key 会存储在 VS Code SecretStorage 中。
 
 请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；命令会同时清除对应 API Key，避免产生无法归属的 Secret。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
@@ -150,7 +161,8 @@ API Key 会存储在 VS Code SecretStorage 中。
 
 - API Key 只保存在 VS Code SecretStorage 中，不会写入工作区文件或调试日志。
 - 自定义 `requestHeaders` 值由 VS Code 配置系统保存，不受 SecretStorage 保护；不得在其中放置 API Key、令牌或其他敏感信息。
-- 对话、代码、图片和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务。
+- 对话、代码和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务；原生视觉请求也会发送图片。视觉代理启用时，原始图片、视觉指令和所在用户消息的有界布局（可能包含工具结果文本）会先发送给你明确选择的已安装视觉模型，目标纯文本 Relay 只接收生成的图片描述。
+- 视觉代理默认关闭，不自动选择模型或 fallback。视觉调用可能由不同提供商独立计费，并受其隐私与数据保留政策约束。
 - 插件不会收集遥测数据。开启调试日志时只记录脱敏请求摘要，不记录 API Key 或提示词正文。
 - 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。
 

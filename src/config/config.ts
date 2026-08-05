@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION } from '../constants';
+import { DEFAULT_VISION_PROXY_PROMPT } from '../copilot/visionProxy';
 import { isReservedRelayHeader } from '../relay/headers';
 import { normalizeOpenAIRequestCapabilities } from '../relay/openaiCapabilities';
 import type { OpenAIRequestCapabilities, RouteKey } from '../relay/types';
@@ -60,6 +61,9 @@ export interface ExtensionConfig {
   supportsImageInput: boolean;
   imageInputModels: RegExp[];
   disabledImageInputModels: RegExp[];
+  visionProxyEnabled: boolean;
+  visionProxyModel: string;
+  visionProxyPrompt: string;
   metadataRefreshHours: number;
   requestHeaders: Record<string, string>;
   models: ConfiguredModel[];
@@ -97,6 +101,9 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     supportsImageInput: config.get<boolean>('supportsImageInput') ?? false,
     imageInputModels: compileRegexList(config.get<string[]>('imageInputModels') ?? []),
     disabledImageInputModels: compileRegexList(config.get<string[]>('disabledImageInputModels') ?? []),
+    visionProxyEnabled: config.get<boolean>('visionProxyEnabled') ?? false,
+    visionProxyModel: (config.get<string>('visionProxyModel') ?? '').trim(),
+    visionProxyPrompt: (config.get<string>('visionProxyPrompt') ?? '').trim() || DEFAULT_VISION_PROXY_PROMPT,
     metadataRefreshHours: Math.max(1, config.get<number>('metadataRefreshHours') ?? 6),
     requestHeaders: profile?.requestHeaders ?? {},
     models: profile?.models ?? [],

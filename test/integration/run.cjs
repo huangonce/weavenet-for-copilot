@@ -8,6 +8,7 @@ async function main() {
     extensionDevelopmentPath,
     extensionTestsPath,
     launchArgs: ['--disable-extensions', '--skip-welcome', '--skip-release-notes'],
+    version: process.env.VSCODE_VERSION,
   });
 }
 

@@ -128,6 +128,28 @@ describe('model routing', () => {
       detail: 'API key required',
     });
   });
+
+  it('advertises opt-in proxy vision in the picker without changing native model capability', () => {
+    const config = {
+      modelNamePrefix: 'WeaveNet',
+      maxInputTokens: 100_000,
+      maxOutputTokens: 8_000,
+      supportsToolCalling: true,
+      supportsImageInput: false,
+      imageInputModels: [],
+      disabledImageInputModels: [],
+      visionProxyEnabled: true,
+      visionProxyModel: 'copilot/gpt-4o',
+    } as never;
+    const model = toRoutedModel({ id: 'deepseek-chat' }, 'openai');
+
+    expect(supportsImageInputForModel(model.id, config)).toBe(false);
+    expect(toChatInformation(model, config, true).capabilities.imageInput).toBe(true);
+    expect(toChatInformation(model, { ...config, visionProxyEnabled: false }, true).capabilities.imageInput).toBe(false);
+    expect(toChatInformation(model, { ...config, visionProxyModel: '' }, true).capabilities.imageInput).toBe(false);
+    expect(toChatInformation(model, { ...config, visionProxyModel: 'gpt-4o' }, true).capabilities.imageInput).toBe(false);
+    expect(toChatInformation(model, { ...config, visionProxyModel: 'copilot/gpt 4o' }, true).capabilities.imageInput).toBe(false);
+  });
 });
 
 describe('catalog source and protocol helpers', () => {

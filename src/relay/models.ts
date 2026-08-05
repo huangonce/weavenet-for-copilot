@@ -53,7 +53,7 @@ export function toChatInformation(
     isUserSelectable: true,
     capabilities: {
       toolCalling: supportsToolCallingForModel(model, config),
-      imageInput: supportsImageInputForRoutedModel(model, config),
+      imageInput: supportsImageInputForRoutedModel(model, config) || supportsVisionProxy(config),
     },
     ...toModelCostInfo(model),
     ...toConfigurationSchema(model),
@@ -166,6 +166,10 @@ export function supportsImageInputForModel(modelId: string, config: ExtensionCon
 export function supportsImageInputForRoutedModel(model: RoutedModel, config: ExtensionConfig): boolean {
   if (config.disabledImageInputModels.some((regex) => regex.test(model.id))) return false;
   return supportsImageInputForModel(model.id, config) || model.imageInput === true;
+}
+
+export function supportsVisionProxy(config: Pick<ExtensionConfig, 'visionProxyEnabled' | 'visionProxyModel'>): boolean {
+  return config.visionProxyEnabled && /^[^/\s]+\/[^\s]+$/.test(config.visionProxyModel);
 }
 
 export function supportsToolCallingForModel(model: RoutedModel, config: ExtensionConfig): boolean {

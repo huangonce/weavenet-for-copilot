@@ -20,16 +20,16 @@ import {
   parseToolArguments,
   reportThinking,
 } from './helpers';
-import type { ModelOptions } from './helpers';
 import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
+import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 
 export interface OpenAIResponseContext {
   readonly config: ExtensionConfig;
   readonly routedModel: RoutedModel;
   readonly model: vscode.LanguageModelChatInformation;
-  readonly messages: readonly vscode.LanguageModelChatRequestMessage[];
-  readonly options: ModelOptions;
+  readonly messages: CanonicalChatRequestSnapshot;
+  readonly options: CanonicalChatResponseOptions;
   readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>;
   readonly token: vscode.CancellationToken;
   readonly apiKey: string;
@@ -252,6 +252,7 @@ function getOpenAIPromptCacheKey(config: ExtensionConfig): string {
 }
 
 function logOpenAIRequest(debug: DebugLogger, config: ExtensionConfig, request: ChatRequest): void {
+  if (!config.debug) return;
   const bodyBytes = Buffer.byteLength(JSON.stringify(request));
   const imageParts = countOpenAIImages(request);
   debug(
@@ -264,6 +265,7 @@ function logOpenAIRequest(debug: DebugLogger, config: ExtensionConfig, request: 
 }
 
 function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, request: ResponsesRequest): void {
+  if (!config.debug) return;
   const bodyBytes = Buffer.byteLength(JSON.stringify(request));
   const imageParts = countResponsesImages(request);
   debug(

@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -453,6 +453,25 @@
           },
           "default": [],
           "description": "%configuration.disabledImageInputModels.description%"
+        },
+        "weavenet-copilot.visionProxyEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "%configuration.visionProxyEnabled.description%"
+        },
+        "weavenet-copilot.visionProxyModel": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "pattern": "^[^/\\s]+/\\S+$|^$",
+          "description": "%configuration.visionProxyModel.description%"
+        },
+        "weavenet-copilot.visionProxyPrompt": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "%configuration.visionProxyPrompt.description%"
         },
         "weavenet-copilot.metadataRefreshHours": {
           "type": "number",

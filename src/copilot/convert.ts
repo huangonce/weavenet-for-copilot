@@ -14,98 +14,93 @@ import type {
   ToolCall,
 } from '../relay/types';
 import { sanitizeJsonSchema, toStrictJsonSchema } from '../relay/schema';
+import {
+  canonicalToolInput,
+  isCanonicalImagePart,
+} from './canonicalRequest';
+import type {
+  CanonicalChatRequestSnapshot,
+  CanonicalDataPart,
+  CanonicalInputPart,
+  CanonicalMessageRole,
+  CanonicalThinkingPart,
+  CanonicalToolResultContentPart,
+} from './canonicalRequest';
 
-const SYSTEM_ROLE = 3;
 const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 /** Thinking models reject empty reasoning_text, so tool calls without recoverable thinking need a stand-in. */
 const REASONING_PLACEHOLDER = '(reasoning omitted)';
 /** Namespaced so the shared thinking-part metadata bag cannot collide with other providers. */
 export const RESPONSES_REASONING_METADATA_KEY = 'weavenetResponsesReasoning';
-
-interface ThinkingPartLike {
-  value: string;
-  id?: string;
-  metadata?: Record<string, unknown>;
-}
-
-/** Thinking parts are not in the stable API surface, so detect them structurally. */
-function isThinkingPart(part: unknown): part is ThinkingPartLike {
-  const ThinkingPart = (vscode as unknown as { LanguageModelThinkingPart?: new (value: string) => unknown })
-    .LanguageModelThinkingPart;
-  if (ThinkingPart && part instanceof ThinkingPart) {
-    return typeof (part as { value?: unknown }).value === 'string';
-  }
-  return false;
-}
 
 /**
  * Rebuilds the original reasoning item from a replayed thinking part. The
  * encrypted payload is opaque and is only ever passed back verbatim, which is
  * what makes reasoning replay possible without server-side storage.
  */
-export function encryptedReasoningItem(part: ThinkingPartLike): ResponsesInputItem | undefined {
-  const carried = part.metadata?.[RESPONSES_REASONING_METADATA_KEY];
-  if (!carried || typeof carried !== 'object') return undefined;
-  const { encryptedContent, summary } = carried as { encryptedContent?: unknown; summary?: unknown };
-  if (typeof encryptedContent !== 'string' || !encryptedContent || !part.id) return undefined;
+export function encryptedReasoningItem(part: CanonicalThinkingPart): ResponsesInputItem | undefined {
+  if (!part.encryptedContent || !part.id) return undefined;
   return {
     type: 'reasoning',
     id: part.id,
-    encrypted_content: encryptedContent,
-    summary: Array.isArray(summary)
-      ? summary.filter((entry): entry is { type: 'summary_text'; text: string } =>
-        typeof (entry as { text?: unknown })?.text === 'string')
-      : [],
+    encrypted_content: part.encryptedContent,
+    summary: [...part.summary],
   };
 }
 
 export function convertMessages(
-  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  request: CanonicalChatRequestSnapshot,
   supportsImageInput: boolean,
   supportsDeveloperRole = false,
 ): ChatMessage[] {
+  const messages = request.messages;
   const result: ChatMessage[] = [];
 
   for (const message of messages) {
     const role = mapRole(message.role, supportsDeveloperRole);
+    assertRolePartCompatibility(message.role, message.content, 'OpenAI Chat Completions');
+    if ((role === 'system' || role === 'developer') && message.content.some(isCanonicalImagePart)) {
+      if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Chat Completions');
+      throw unsupportedImageRoleError('OpenAI Chat Completions', role);
+    }
     const contentParts: ChatContentPart[] = [];
     let textContent = '';
     const toolCalls: ToolCall[] = [];
     const toolResults: ChatMessage[] = [];
 
     for (const part of message.content) {
-      if (part instanceof vscode.LanguageModelTextPart) {
+      if (part.kind === 'text') {
         textContent += part.value;
         contentParts.push({ type: 'text', text: part.value });
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
+      } else if (part.kind === 'toolCall') {
         toolCalls.push({
           id: part.callId,
           type: 'function',
           function: {
             name: part.name,
-            arguments: JSON.stringify(part.input ?? {}),
+            arguments: part.inputJson,
           },
         });
-      } else if (part instanceof vscode.LanguageModelToolResultPart) {
+      } else if (part.kind === 'toolResult') {
         toolResults.push({
           role: 'tool',
           tool_call_id: part.callId,
           content: stringifyToolResult(part.content),
         });
-      } else if (supportsImageInput) {
-        const imagePart = getImageDataPart(part);
-        if (!imagePart) {
-          continue;
-        }
+      } else if (part.kind === 'data') {
+        const imagePart = requireOpenAIImage(part, 'OpenAI Chat Completions');
+        if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Chat Completions');
+        if (role === 'assistant') throw unsupportedImageRoleError('OpenAI Chat Completions', role);
         contentParts.push({
           type: 'image_url',
           image_url: {
-            url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
+            url: `data:${imagePart.mediaType};base64,${imagePart.base64}`,
             detail: 'auto',
-            media_type: imagePart.mimeType,
+            media_type: imagePart.mediaType,
           },
         });
-      }
+      } else if (part.kind !== 'thinking') assertNever(part);
     }
 
     if (role === 'assistant') {
@@ -170,21 +165,26 @@ export function convertTools(
  * their original interleaved order instead of being grouped by type.
  */
 export function convertResponsesInput(
-  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  request: CanonicalChatRequestSnapshot,
   supportsImageInput: boolean,
   replayReasoningContent = false,
   includeAssistantPhase = false,
   encryptedReasoning = false,
 ): { input: ResponsesInputItem[]; instructions?: string } {
+  const messages = request.messages;
   const result: ResponsesInputItem[] = [];
   const instructionParts: string[] = [];
 
   for (const message of messages) {
     const role = mapResponsesRole(message.role);
+    assertRolePartCompatibility(message.role, message.content, 'OpenAI Responses');
     if (role === 'system') {
       for (const part of message.content) {
-        if (part instanceof vscode.LanguageModelTextPart) {
+        if (part.kind === 'text') {
           instructionParts.push(part.value);
+        } else if (isCanonicalImagePart(part)) {
+          if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Responses');
+          throw unsupportedImageRoleError('OpenAI Responses', role);
         }
       }
       continue;
@@ -199,7 +199,7 @@ export function convertResponsesInput(
       // stays directly in front of each group of tool calls, which is the
       // placement the relays requiring it expect.
       const parts = [...message.content];
-      const lastToolCallIndex = parts.findLastIndex((part) => part instanceof vscode.LanguageModelToolCallPart);
+      const lastToolCallIndex = parts.findLastIndex((part) => part.kind === 'toolCall');
       let segment: ResponsesInputContentPart[] = [];
       let segmentIndex = 0;
       let pendingThinking = '';
@@ -217,7 +217,7 @@ export function convertResponsesInput(
       };
 
       for (const [index, part] of parts.entries()) {
-        if (part instanceof vscode.LanguageModelToolCallPart) {
+        if (part.kind === 'toolCall') {
           flushText();
           if (replayReasoningContent && !encryptedReasoning && !previousWasToolCall) {
             result.push({
@@ -230,22 +230,22 @@ export function convertResponsesInput(
             type: 'function_call',
             call_id: part.callId,
             name: part.name,
-            arguments: JSON.stringify(part.input ?? {}),
+            arguments: part.inputJson,
           });
           previousWasToolCall = true;
           continue;
         }
         previousWasToolCall = false;
-        if (part instanceof vscode.LanguageModelTextPart) {
+        if (part.kind === 'text') {
           if (segment.length === 0) segmentIndex = index;
           segment.push({ type: 'output_text', text: part.value });
-        } else if (part instanceof vscode.LanguageModelToolResultPart) {
+        } else if (part.kind === 'toolResult') {
           toolResults.push({
             type: 'function_call_output',
             call_id: part.callId,
             output: stringifyToolResult(part.content),
           });
-        } else if (isThinkingPart(part)) {
+        } else if (part.kind === 'thinking') {
           const replayed = encryptedReasoning ? encryptedReasoningItem(part) : undefined;
           if (replayed) {
             flushText();
@@ -253,44 +253,37 @@ export function convertResponsesInput(
           } else {
             pendingThinking += part.value;
           }
-        } else if (supportsImageInput) {
-          const imagePart = getImageDataPart(part);
-          if (!imagePart) {
-            continue;
-          }
-          if (segment.length === 0) segmentIndex = index;
-          segment.push({
-            type: 'input_image',
-            image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
-            detail: 'auto',
-          });
-        }
+        } else if (part.kind === 'data') {
+          requireCanonicalImage(part);
+          if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Responses');
+          throw unsupportedImageRoleError('OpenAI Responses', role);
+        } else assertNever(part);
       }
       flushText();
     } else {
       const contentParts: ResponsesInputContentPart[] = [];
       let textContent = '';
       for (const part of message.content) {
-        if (part instanceof vscode.LanguageModelTextPart) {
+        if (part.kind === 'text') {
           textContent += part.value;
           contentParts.push({ type: 'input_text', text: part.value });
-        } else if (part instanceof vscode.LanguageModelToolResultPart) {
+        } else if (part.kind === 'toolResult') {
           toolResults.push({
             type: 'function_call_output',
             call_id: part.callId,
             output: stringifyToolResult(part.content),
           });
-        } else if (supportsImageInput) {
-          const imagePart = getImageDataPart(part);
-          if (!imagePart) {
-            continue;
-          }
+        } else if (part.kind === 'data') {
+          const imagePart = requireOpenAIImage(part, 'OpenAI Responses');
+          if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Responses');
           contentParts.push({
             type: 'input_image',
-            image_url: `data:${imagePart.mimeType};base64,${Buffer.from(imagePart.data).toString('base64')}`,
+            image_url: `data:${imagePart.mediaType};base64,${imagePart.base64}`,
             detail: 'auto',
           });
-        }
+        } else if (part.kind === 'toolCall') {
+          throw new vscode.LanguageModelError('A tool call cannot appear in a user message and cannot be sent safely.');
+        } else if (part.kind !== 'thinking') assertNever(part);
       }
       if (contentParts.length > 0) {
         result.push({
@@ -330,74 +323,106 @@ export function convertResponsesTools(
   });
 }
 
-function mapResponsesRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'user' | 'assistant' {
-  if (role === vscode.LanguageModelChatMessageRole.Assistant) {
+function mapResponsesRole(role: CanonicalMessageRole): 'system' | 'user' | 'assistant' {
+  if (role === 'assistant') {
     return 'assistant';
   }
-  if ((role as number) === SYSTEM_ROLE) {
+  if (role === 'system') {
     return 'system';
   }
-  return 'user';
+  if (role === 'user') return 'user';
+  throw unsupportedMessageRoleError();
 }
 
-function getImageDataPart(part: unknown): { mimeType: string; data: Uint8Array } | undefined {
-  if (part instanceof vscode.LanguageModelDataPart) {
-    return part.mimeType.startsWith('image/')
-      ? { mimeType: part.mimeType, data: part.data }
-      : undefined;
+function stringifyToolResult(content: readonly CanonicalToolResultContentPart[]): string {
+  if (content.some(isCanonicalImagePart)) {
+    throw new vscode.LanguageModelError(
+      'This Relay protocol cannot encode images inside tool results. Attach the image to a user message instead.',
+    );
   }
-
-  if (!part || typeof part !== 'object') {
-    return undefined;
-  }
-
-  const candidate = part as Record<string, unknown>;
-  const mimeType = firstString(candidate.mimeType, candidate.mime_type, candidate.mediaType);
-  if (!mimeType?.startsWith('image/')) {
-    return undefined;
-  }
-
-  const data = firstBytes(candidate.data, candidate.value, candidate.bytes);
-  return data ? { mimeType, data } : undefined;
-}
-
-function firstString(...values: unknown[]): string | undefined {
-  return values.find((value): value is string => typeof value === 'string' && value.length > 0);
-}
-
-function firstBytes(...values: unknown[]): Uint8Array | undefined {
-  for (const value of values) {
-    if (value instanceof Uint8Array) {
-      return value;
-    }
-    if (value instanceof ArrayBuffer) {
-      return new Uint8Array(value);
-    }
-    if (ArrayBuffer.isView(value)) {
-      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    }
-  }
-  return undefined;
-}
-
-function stringifyToolResult(content: readonly vscode.LanguageModelToolResultPart['content'][number][]): string {
   let result = '';
   for (const part of content) {
-    if (part instanceof vscode.LanguageModelTextPart) {
+    if (part.kind === 'text') {
       result += part.value;
     }
   }
-  return result || JSON.stringify(content);
+  if (result) return result;
+  if (content.some((part) => part.kind === 'data')) {
+    throw new vscode.LanguageModelError(
+      'This Relay protocol cannot encode non-text data inside tool results. Return text instead.',
+    );
+  }
+  return '';
 }
 
-function mapRole(role: vscode.LanguageModelChatMessageRole, supportsDeveloperRole: boolean): 'system' | 'developer' | 'user' | 'assistant' {
-  if (role === vscode.LanguageModelChatMessageRole.Assistant) {
+function unsupportedImageRoleError(protocol: string, role: string): vscode.LanguageModelError {
+  return new vscode.LanguageModelError(
+    `${protocol} cannot encode image attachments in ${role} messages. Attach the image to a user message instead.`,
+  );
+}
+
+function unsupportedImageCapabilityError(protocol: string): vscode.LanguageModelError {
+  return new vscode.LanguageModelError(
+    `${protocol} target does not support image input. Resolve the image through the vision proxy before conversion.`,
+  );
+}
+
+function unsupportedMessageRoleError(): vscode.LanguageModelError {
+  return new vscode.LanguageModelError('This message role is not supported and cannot be sent safely.');
+}
+
+function requireCanonicalImage(part: CanonicalDataPart): CanonicalDataPart {
+  if (isCanonicalImagePart(part)) return part;
+  throw new vscode.LanguageModelError(
+    'This Relay protocol cannot encode non-image data attachments. Convert the data to text before sending it.',
+  );
+}
+
+function requireOpenAIImage(
+  part: CanonicalDataPart,
+  protocol: 'OpenAI Chat Completions' | 'OpenAI Responses',
+): { readonly mediaType: string; readonly base64: string } {
+  requireCanonicalImage(part);
+  const mediaType = normalizeImageMediaType(part.mimeType, OPENAI_IMAGE_TYPES);
+  if (!mediaType) {
+    throw new vscode.LanguageModelError(
+      `${protocol} accepts only JPEG, PNG, GIF, or WebP image attachments. Convert the image and try again.`,
+    );
+  }
+  return { mediaType, base64: part.base64 };
+}
+
+function assertRolePartCompatibility(
+  role: CanonicalMessageRole,
+  content: readonly CanonicalInputPart[],
+  protocol: string,
+): void {
+  for (const part of content) {
+    if (part.kind === 'toolCall' && role !== 'assistant') {
+      throw new vscode.LanguageModelError(`${protocol} cannot encode a tool call in a ${role} message.`);
+    }
+    if (part.kind === 'toolResult' && role !== 'user') {
+      throw new vscode.LanguageModelError(`${protocol} cannot encode a tool result in a ${role} message.`);
+    }
+    if (part.kind === 'thinking' && role !== 'assistant') {
+      throw new vscode.LanguageModelError(`${protocol} cannot encode thinking data in a ${role} message.`);
+    }
+  }
+}
+
+function assertNever(value: never): never {
+  throw new vscode.LanguageModelError(`Unsupported canonical message part: ${String(value)}`);
+}
+
+function mapRole(role: CanonicalMessageRole, supportsDeveloperRole: boolean): 'system' | 'developer' | 'user' | 'assistant' {
+  if (role === 'assistant') {
     return 'assistant';
   }
-  if ((role as number) === SYSTEM_ROLE) {
+  if (role === 'system') {
     return supportsDeveloperRole ? 'developer' : 'system';
   }
-  return 'user';
+  if (role === 'user') return 'user';
+  throw unsupportedMessageRoleError();
 }
 
 // ---------------------------------------------------------------------------
@@ -411,9 +436,10 @@ export interface ClaudeConversionOptions {
 }
 
 export function convertClaudeMessages(
-  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  request: CanonicalChatRequestSnapshot,
   options: ClaudeConversionOptions,
 ): { system?: string | ClaudeContentBlockText[]; messages: ClaudeMessage[] } {
+  const messages = request.messages;
   const result: ClaudeMessage[] = [];
   const system: string[] = [];
   const pendingToolUseIds = new Set<string>();
@@ -438,33 +464,45 @@ export function convertClaudeMessages(
 
   for (const message of messages) {
     const role = mapClaudeRole(message.role);
+    assertRolePartCompatibility(message.role, message.content, 'Claude Messages');
     const blocks: ClaudeContentBlock[] = [];
     let textContent = '';
     let interruptsToolChain = false;
     if (role === 'assistant' || role === 'system') discardPendingToolUses();
     for (const part of message.content) {
-      if (part instanceof vscode.LanguageModelTextPart) {
+      if (part.kind === 'text') {
         textContent += part.value;
         blocks.push({ type: 'text', text: part.value });
         interruptsToolChain = role === 'user';
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        blocks.push({ type: 'tool_use', id: part.callId, name: part.name, input: part.input ?? {} });
+      } else if (part.kind === 'toolCall') {
+        blocks.push({ type: 'tool_use', id: part.callId, name: part.name, input: canonicalToolInput(part) });
         if (role === 'assistant') pendingToolUseIds.add(part.callId);
-      } else if (part instanceof vscode.LanguageModelToolResultPart) {
+      } else if (part.kind === 'toolResult') {
+        if (part.content.some(isCanonicalImagePart)) {
+          throw new vscode.LanguageModelError(
+            'This Relay protocol cannot encode images inside tool results. Attach the image to a user message instead.',
+          );
+        }
         if (role === 'user' && pendingToolUseIds.has(part.callId)) {
           blocks.push({ type: 'tool_result', tool_use_id: part.callId, content: stringifyToolResult(part.content) });
           pendingToolUseIds.delete(part.callId);
         }
-      } else if (options.supportsImageInput && part instanceof vscode.LanguageModelDataPart) {
-        const mediaType = normalizeClaudeImageMediaType(part.mimeType);
-        if (mediaType) {
-          blocks.push({
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data: Buffer.from(part.data).toString('base64') },
-          });
-          interruptsToolChain = role === 'user';
+      } else if (part.kind === 'data') {
+        const imagePart = requireCanonicalImage(part);
+        if (!options.supportsImageInput) throw unsupportedImageCapabilityError('Claude Messages');
+        if (role !== 'user') throw unsupportedImageRoleError('Claude Messages', role);
+        const mediaType = normalizeClaudeImageMediaType(imagePart.mimeType);
+        if (!mediaType) {
+          throw new vscode.LanguageModelError(
+            'Claude Messages accepts only JPEG, PNG, GIF, or WebP image attachments. Convert the image and try again.',
+          );
         }
-      }
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: mediaType, data: imagePart.base64 },
+        });
+        interruptsToolChain = role === 'user';
+      } else if (part.kind !== 'thinking') assertNever(part);
     }
     if (interruptsToolChain) discardPendingToolUses();
     if (role === 'system') {
@@ -500,10 +538,14 @@ export function convertClaudeTools(
 }
 
 export function normalizeClaudeImageMediaType(value: string): string | undefined {
+  return normalizeImageMediaType(value, CLAUDE_IMAGE_TYPES);
+}
+
+function normalizeImageMediaType(value: string, allowed: ReadonlySet<string>): string | undefined {
   const normalized = value.trim().toLowerCase() === 'image/jpg'
     ? 'image/jpeg'
     : value.trim().toLowerCase();
-  return CLAUDE_IMAGE_TYPES.has(normalized) ? normalized : undefined;
+  return allowed.has(normalized) ? normalized : undefined;
 }
 
 export function applyLastTwoUserCacheControl(messages: ClaudeMessage[], ttl: '5m' | '1h'): void {
@@ -520,9 +562,11 @@ export function applyLastTwoUserCacheControl(messages: ClaudeMessage[], ttl: '5m
   }
 }
 
-function mapClaudeRole(role: vscode.LanguageModelChatMessageRole): 'system' | 'user' | 'assistant' {
-  if (role === vscode.LanguageModelChatMessageRole.Assistant) return 'assistant';
-  return (role as number) === SYSTEM_ROLE ? 'system' : 'user';
+function mapClaudeRole(role: CanonicalMessageRole): 'system' | 'user' | 'assistant' {
+  if (role === 'assistant') return 'assistant';
+  if (role === 'system') return 'system';
+  if (role === 'user') return 'user';
+  throw unsupportedMessageRoleError();
 }
 
 function mergeAdjacentClaudeMessages(messages: ClaudeMessage[]): ClaudeMessage[] {

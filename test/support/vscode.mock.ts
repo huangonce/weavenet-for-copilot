@@ -31,6 +31,19 @@ export enum LanguageModelChatMessageRole {
   Assistant = 2,
 }
 
+export const LanguageModelChatMessage = {
+  User: (content: string | readonly unknown[], name?: string) => ({
+    role: LanguageModelChatMessageRole.User,
+    content: typeof content === 'string' ? [new LanguageModelTextPart(content)] : content,
+    name,
+  }),
+  Assistant: (content: string | readonly unknown[], name?: string) => ({
+    role: LanguageModelChatMessageRole.Assistant,
+    content: typeof content === 'string' ? [new LanguageModelTextPart(content)] : content,
+    name,
+  }),
+};
+
 export enum LanguageModelChatToolMode {
   Auto = 1,
   Required = 2,
@@ -58,6 +71,33 @@ export class LanguageModelError extends Error {
 }
 
 export class CancellationError extends Error {}
+
+export class CancellationTokenSource {
+  private readonly emitter = new EventEmitter<void>();
+  private cancelled = false;
+  readonly token: {
+    readonly isCancellationRequested: boolean;
+    readonly onCancellationRequested: (listener: (value: void) => void) => { dispose(): void };
+  };
+
+  constructor() {
+    const cancelled = () => this.cancelled;
+    this.token = {
+      get isCancellationRequested() { return cancelled(); },
+      onCancellationRequested: this.emitter.event,
+    };
+  }
+
+  cancel(): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    this.emitter.fire();
+  }
+
+  dispose(): void {
+    this.emitter.dispose();
+  }
+}
 
 export const env = {
   language: 'en',
@@ -87,7 +127,10 @@ export const window = {
   showInputBox: async (_options: unknown): Promise<string | undefined> => undefined,
   showQuickPick: async <T>(_items: readonly T[], _options?: unknown): Promise<T | undefined> => undefined,
   withProgress: async <T>(_options: unknown, task: () => Promise<T>): Promise<T> => task(),
-  createOutputChannel: (_name: string) => ({ appendLine(_value: string) {}, show(_preserveFocus?: boolean) {}, dispose() {} }),
+  createOutputChannel: (_name: string) => {
+    const lines: string[] = [];
+    return { lines, appendLine(value: string) { lines.push(value); }, show(_preserveFocus?: boolean) {}, dispose() {} };
+  },
   createStatusBarItem: (_alignment: number, _priority: number) => new StatusBarItem(),
 };
 
@@ -112,6 +155,25 @@ export const commands = {
   executeCommand: async (_id: string, ..._args: unknown[]): Promise<unknown> => undefined,
 };
 
+export const lm = {
+  selectChatModels: async (_selector?: unknown): Promise<unknown[]> => [],
+  registerLanguageModelChatProvider: (_vendor: string, _provider: unknown) => new Disposable(),
+  get onDidChangeChatModels() { return onDidChangeChatModels; },
+  fireDidChangeChatModels,
+};
+
+const chatModelListeners = new Set<() => void>();
+
+function onDidChangeChatModels(listener: () => void) {
+  chatModelListeners.add(listener);
+  return { dispose: () => chatModelListeners.delete(listener) };
+}
+
+export function fireDidChangeChatModels(): number {
+  for (const listener of chatModelListeners) listener();
+  return chatModelListeners.size;
+}
+
 export enum StatusBarAlignment {
   Left = 1,
   Right = 2,
@@ -119,9 +181,27 @@ export enum StatusBarAlignment {
 
 export const workspace = {
   getConfiguration: (_section?: string): unknown => ({}),
-  onDidChangeConfiguration: (_listener: (event: { affectsConfiguration(section: string): boolean }) => void) => ({ dispose() {} }),
+  get onDidChangeConfiguration() { return onDidChangeConfiguration; },
+  fireDidChangeConfiguration,
   workspaceFolders: undefined as undefined | Array<{ uri: { toString(): string } }>,
 };
+
+const configurationListeners = new Set<(event: { affectsConfiguration(section: string): boolean }) => void>();
+
+function onDidChangeConfiguration(listener: (event: { affectsConfiguration(section: string): boolean }) => void) {
+  configurationListeners.add(listener);
+  return { dispose: () => configurationListeners.delete(listener) };
+}
+
+export function fireDidChangeConfiguration(...sections: string[]): number {
+  const event = {
+    affectsConfiguration: (section: string) => sections.some((changed) =>
+      changed === section || changed.startsWith(`${section}.`) || section.startsWith(`${changed}.`),
+    ),
+  };
+  for (const listener of configurationListeners) listener(event);
+  return configurationListeners.size;
+}
 
 export enum ConfigurationTarget {
   Global = 1,

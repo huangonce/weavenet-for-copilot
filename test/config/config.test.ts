@@ -163,6 +163,26 @@ describe('connection-scoped route settings', () => {
 
     expect(getConfig().openaiApiStrategy).toBe(expected);
   });
+
+  it('keeps the vision proxy opt-in and normalizes its exact model and prompt settings', () => {
+    mockConfiguration({});
+    expect(getConfig()).toMatchObject({
+      visionProxyEnabled: false,
+      visionProxyModel: '',
+      visionProxyPrompt: expect.stringContaining('Describe all image attachments'),
+    });
+
+    mockConfiguration({
+      visionProxyEnabled: true,
+      visionProxyModel: ' copilot/gpt-4o ',
+      visionProxyPrompt: ' Describe visible text. ',
+    });
+    expect(getConfig()).toMatchObject({
+      visionProxyEnabled: true,
+      visionProxyModel: 'copilot/gpt-4o',
+      visionProxyPrompt: 'Describe visible text.',
+    });
+  });
 });
 
 describe('invalid model regexes', () => {

@@ -2,16 +2,52 @@ import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
 import {
   applyLastTwoUserCacheControl,
-  convertClaudeMessages,
+  convertClaudeMessages as convertCanonicalClaudeMessages,
   convertClaudeTools,
-  convertMessages,
-  convertResponsesInput,
+  convertMessages as convertCanonicalMessages,
+  convertResponsesInput as convertCanonicalResponsesInput,
   convertResponsesTools,
   convertTools,
   normalizeClaudeImageMediaType,
 } from '../../src/copilot/convert';
 import { clampClaudeTemperature } from '../../src/copilot/helpers';
+import { snapshotChatRequest } from '../../src/copilot/canonicalRequest';
 import type { ClaudeMessage } from '../../src/relay/types';
+
+function userMessage(...content: vscode.LanguageModelInputPart[]): vscode.LanguageModelChatRequestMessage {
+  return { role: vscode.LanguageModelChatMessageRole.User, content, name: undefined };
+}
+
+function convertMessages(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  supportsImageInput: boolean,
+  supportsDeveloperRole = false,
+) {
+  return convertCanonicalMessages(snapshotChatRequest(messages), supportsImageInput, supportsDeveloperRole);
+}
+
+function convertResponsesInput(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  supportsImageInput: boolean,
+  replayReasoningContent = false,
+  includeAssistantPhase = false,
+  encryptedReasoning = false,
+) {
+  return convertCanonicalResponsesInput(
+    snapshotChatRequest(messages),
+    supportsImageInput,
+    replayReasoningContent,
+    includeAssistantPhase,
+    encryptedReasoning,
+  );
+}
+
+function convertClaudeMessages(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  options: Parameters<typeof convertCanonicalClaudeMessages>[1],
+) {
+  return convertCanonicalClaudeMessages(snapshotChatRequest(messages), options);
+}
 
 describe('chat request conversion', () => {
   it('converts assistant text and tool calls, then emits tool results', () => {
@@ -20,8 +56,10 @@ describe('chat request conversion', () => {
       content: [
         new vscode.LanguageModelTextPart('Working on it.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
-        new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('Found it.')]),
       ],
+    }, {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('Found it.')])],
     }] as never;
 
     expect(convertMessages(messages, false)).toEqual([
@@ -44,11 +82,10 @@ describe('chat request conversion', () => {
       content: [
         new vscode.LanguageModelTextPart('Describe this'),
         new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/png'),
-        new vscode.LanguageModelDataPart(new Uint8Array([4]), 'application/pdf'),
       ],
     }] as never;
 
-    expect(convertMessages(messages, false)).toEqual([{ role: 'user', content: 'Describe this' }]);
+    expect(() => convertMessages(messages, false)).toThrow('target does not support image input');
     expect(convertMessages(messages, true)).toEqual([{
       role: 'user',
       content: [
@@ -56,6 +93,15 @@ describe('chat request conversion', () => {
         { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID', detail: 'auto', media_type: 'image/png' } },
       ],
     }]);
+  });
+
+  it('rejects non-image data instead of silently discarding it', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([4]), 'application/pdf')],
+    } as never;
+
+    expect(() => convertMessages([message], true)).toThrow('non-image data attachment');
   });
 
   it('sanitizes tool schemas and returns undefined when no tools are provided', () => {
@@ -74,16 +120,13 @@ describe('chat request conversion', () => {
     }]);
   });
 
-  it('accepts compatible image-like data and safely ignores unsupported parts', () => {
+  it('accepts compatible image-like data and rejects unsupported parts', () => {
     const imageBuffer = new Uint8Array([9, 8]).buffer;
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.User,
       content: [
         { mime_type: 'image/jpeg', value: imageBuffer },
         { mediaType: 'image/webp', bytes: new Uint8Array([7]) },
-        { mimeType: 'text/plain', data: new Uint8Array([6]) },
-        { mimeType: 'image/png', data: 'not bytes' },
-        null,
       ],
     }] as never;
 
@@ -94,19 +137,55 @@ describe('chat request conversion', () => {
         { type: 'image_url', image_url: { url: 'data:image/webp;base64,Bw==', detail: 'auto', media_type: 'image/webp' } },
       ],
     }]);
-    expect(convertMessages(messages, false)).toEqual([]);
+    expect(() => convertMessages(messages, false)).toThrow('target does not support image input');
+
+    for (const part of [
+      { mimeType: 'text/plain', data: new Uint8Array([6]) },
+      { mimeType: 'image/png', data: 'not bytes' },
+      null,
+    ]) {
+      const invalid = [{ role: vscode.LanguageModelChatMessageRole.User, content: [part] }] as never;
+      expect(() => convertMessages(invalid, true)).toThrow();
+    }
   });
 
-  it('maps system messages and preserves non-text tool results as JSON', () => {
+  it('maps system messages and rejects unsupported tool-result containers', () => {
     const messages = [
       { role: 3, content: [new vscode.LanguageModelTextPart('system instruction')] },
       { role: vscode.LanguageModelChatMessageRole.Assistant, content: [new vscode.LanguageModelToolResultPart('call-1', [{ value: 'data' }])] },
     ] as never;
 
-    expect(convertMessages(messages, false)).toEqual([
-      { role: 'system', content: 'system instruction' },
-      { role: 'tool', tool_call_id: 'call-1', content: '[{"value":"data"}]' },
-    ]);
+    expect(() => convertMessages(messages, false)).toThrow('unsupported tool-result container');
+  });
+
+  it('rejects assistant images instead of silently dropping them from Chat Completions', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertMessages([message], true))
+      .toThrow('OpenAI Chat Completions cannot encode image attachments in assistant messages');
+  });
+
+  it('rejects system images instead of silently dropping them from Chat Completions', () => {
+    const message = {
+      role: 3,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertMessages([message], true))
+      .toThrow('OpenAI Chat Completions cannot encode image attachments in system messages');
+  });
+
+  it('allows only OpenAI-supported image MIME types and normalizes image/jpg', () => {
+    const jpeg = [userMessage(new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/jpg'))] as never;
+    const svg = [userMessage(new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/svg+xml'))] as never;
+
+    expect(convertMessages(jpeg, true)[0]).toMatchObject({
+      content: [{ image_url: { url: 'data:image/jpeg;base64,AQ==', media_type: 'image/jpeg' } }],
+    });
+    expect(() => convertMessages(svg, true)).toThrow('accepts only JPEG, PNG, GIF, or WebP');
   });
 });
 
@@ -117,8 +196,10 @@ describe('responses input conversion', () => {
       content: [
         new vscode.LanguageModelTextPart('Calling search.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
-        new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('Found it.')]),
       ],
+    }, {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('Found it.')])],
     }] as never;
 
     expect(convertResponsesInput(messages, false)).toEqual({
@@ -307,7 +388,7 @@ describe('responses input conversion', () => {
       ],
     }] as never;
 
-    expect(convertResponsesInput(messages, false)).toEqual({ input: [{ role: 'user', content: 'What is this?' }] });
+    expect(() => convertResponsesInput(messages, false)).toThrow('target does not support image input');
     expect(convertResponsesInput(messages, true)).toEqual({
       input: [{
         role: 'user',
@@ -331,6 +412,31 @@ describe('responses input conversion', () => {
       ],
       instructions: 'system instruction',
     });
+  });
+
+  it('rejects assistant images instead of emitting invalid Responses output content', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertResponsesInput([message], true))
+      .toThrow('OpenAI Responses cannot encode image attachments in assistant messages');
+  });
+
+  it('rejects system images instead of silently dropping them from Responses instructions', () => {
+    const message = {
+      role: 3,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertResponsesInput([message], true))
+      .toThrow('OpenAI Responses cannot encode image attachments in system messages');
+  });
+
+  it('rejects unsupported OpenAI Responses image MIME types', () => {
+    const message = userMessage(new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/svg+xml')) as never;
+    expect(() => convertResponsesInput([message], true)).toThrow('accepts only JPEG, PNG, GIF, or WebP');
   });
 
   it('sanitizes tool schemas into flat Responses tool definitions', () => {
@@ -368,6 +474,145 @@ describe('Claude conversion helpers', () => {
     expect(normalizeClaudeImageMediaType('image/jpg')).toBe('image/jpeg');
     expect(normalizeClaudeImageMediaType('image/webp')).toBe('image/webp');
     expect(normalizeClaudeImageMediaType('image/svg+xml')).toBeUndefined();
+  });
+
+  it('rejects unsupported Claude image MIME types instead of silently dropping them', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [
+        new vscode.LanguageModelTextPart('Inspect this image'),
+        new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/svg+xml'),
+      ],
+    } as never;
+
+    expect(() => convertClaudeMessages([message], { supportsImageInput: true }))
+      .toThrow('Claude Messages accepts only JPEG, PNG, GIF, or WebP');
+  });
+
+  it('normalizes structurally compatible images for Claude Messages', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [{ mime_type: 'image/png', bytes: new Uint8Array([1, 2]) }],
+    } as never;
+
+    expect(convertClaudeMessages([message], { supportsImageInput: true }).messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AQI=' } }],
+    }]);
+  });
+
+  it('rejects assistant images instead of emitting invalid Claude content', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertClaudeMessages([message], { supportsImageInput: true }))
+      .toThrow('Claude Messages cannot encode image attachments in assistant messages');
+  });
+
+  it('rejects system images instead of silently dropping them from Claude system content', () => {
+    const message = {
+      role: 3,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertClaudeMessages([message], { supportsImageInput: true }))
+      .toThrow('Claude Messages cannot encode image attachments in system messages');
+  });
+
+  it('rejects images nested in native tool results instead of serializing their bytes', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelToolResultPart('call-1', [
+        new vscode.LanguageModelTextPart('result'),
+        new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/png'),
+      ])],
+    } as never;
+
+    expect(() => convertMessages([message], true)).toThrow('cannot encode images inside tool results');
+    expect(() => convertResponsesInput([message], true)).toThrow('cannot encode images inside tool results');
+    expect(() => convertClaudeMessages([message], { supportsImageInput: true }))
+      .toThrow('cannot encode images inside tool results');
+  });
+
+  it('rejects image data nested in tool-call arguments for every protocol', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [new vscode.LanguageModelToolCallPart('call-1', 'inspect', {
+        nested: { image: new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/png') },
+      })],
+    } as never;
+
+    expect(() => convertMessages([message], false)).toThrow('unsupported prototype');
+    expect(() => convertResponsesInput([message], false)).toThrow('unsupported prototype');
+    expect(() => convertClaudeMessages([message], { supportsImageInput: false }))
+      .toThrow('unsupported prototype');
+  });
+
+  it('rejects image data hidden inside unsupported tool-result containers', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelToolResultPart('call-1', [{
+        value: { image: { mimeType: 'image/png', data: new Uint8Array([9]) } },
+      }])],
+    } as never;
+
+    expect(() => convertMessages([message], false)).toThrow('unsupported tool-result container');
+    expect(() => convertResponsesInput([message], false)).toThrow('unsupported tool-result container');
+    expect(() => convertClaudeMessages([message], { supportsImageInput: false }))
+      .toThrow('unsupported tool-result container');
+  });
+
+  it('rejects direct images for non-visual Claude targets', () => {
+    const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    } as never;
+
+    expect(() => convertClaudeMessages([message], { supportsImageInput: false }))
+      .toThrow('target does not support image input');
+  });
+
+  it('rejects cyclic, over-wide, and custom-serialized message containers', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const wide = Object.fromEntries(Array.from({ length: 65_537 }, (_, index) => [`p${index}`, null]));
+    const custom = { toJSON: () => ({ mimeType: 'image/png', data: new Uint8Array([1]) }) };
+    const toolCall = (input: object) => ({
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [new vscode.LanguageModelToolCallPart('call-1', 'inspect', input)],
+    }) as never;
+
+    expect(() => convertMessages([toolCall(cyclic)], false)).toThrow('cyclic tool input');
+    expect(() => convertMessages([toolCall(wide)], false)).toThrow('too large or complex');
+    expect(() => convertMessages([toolCall(custom)], false)).toThrow('not strict JSON data');
+  });
+
+  it('rejects unknown message roles rather than mapping them to user', () => {
+    const message = { role: 99, content: [new vscode.LanguageModelTextPart('text')] } as never;
+    expect(() => convertMessages([message], false)).toThrow('message role is not supported');
+    expect(() => convertResponsesInput([message], false)).toThrow('message role is not supported');
+    expect(() => convertClaudeMessages([message], { supportsImageInput: false }))
+      .toThrow('message role is not supported');
+  });
+
+  it('rejects role/part combinations that each wire protocol cannot represent', () => {
+    const cases = [
+      { role: vscode.LanguageModelChatMessageRole.User, part: new vscode.LanguageModelToolCallPart('call', 'tool', {}) },
+      { role: 3, part: new vscode.LanguageModelToolCallPart('call', 'tool', {}) },
+      { role: vscode.LanguageModelChatMessageRole.Assistant, part: new vscode.LanguageModelToolResultPart('call', [new vscode.LanguageModelTextPart('result')]) },
+      { role: 3, part: new vscode.LanguageModelToolResultPart('call', [new vscode.LanguageModelTextPart('result')]) },
+      { role: vscode.LanguageModelChatMessageRole.User, part: new vscode.LanguageModelThinkingPart('thought') },
+      { role: 3, part: new vscode.LanguageModelThinkingPart('thought') },
+    ];
+
+    for (const testCase of cases) {
+      const message = [{ role: testCase.role, content: [testCase.part] }] as never;
+      expect(() => convertMessages(message, false)).toThrow('cannot encode');
+      expect(() => convertResponsesInput(message, false)).toThrow('cannot encode');
+      expect(() => convertClaudeMessages(message, { supportsImageInput: false })).toThrow('cannot encode');
+    }
   });
 
   it('places cache breakpoints on only the latest two user messages', () => {
