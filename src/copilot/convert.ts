@@ -472,7 +472,8 @@ export function convertClaudeMessages(
     for (const part of message.content) {
       if (part.kind === 'text') {
         textContent += part.value;
-        blocks.push({ type: 'text', text: part.value });
+        // Anthropic rejects empty text blocks.
+        if (part.value) blocks.push({ type: 'text', text: part.value });
         interruptsToolChain = role === 'user';
       } else if (part.kind === 'toolCall') {
         blocks.push({ type: 'tool_use', id: part.callId, name: part.name, input: canonicalToolInput(part) });

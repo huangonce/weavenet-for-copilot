@@ -470,6 +470,31 @@ describe('responses input conversion', () => {
 });
 
 describe('Claude conversion helpers', () => {
+  it('drops empty text blocks that Anthropic rejects', () => {
+    const messages = [{
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelTextPart(''),
+        new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
+      ],
+    }, {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [
+        new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('done')]),
+        new vscode.LanguageModelTextPart(''),
+      ],
+    }] as never[];
+
+    const { messages: converted } = convertClaudeMessages(messages, { supportsImageInput: false });
+    expect(converted).toEqual([{
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'call-1', name: 'search', input: { query: 'relay' } }],
+    }, {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'done' }],
+    }]);
+  });
+
   it('allows only Anthropic-supported image MIME types', () => {
     expect(normalizeClaudeImageMediaType('image/jpg')).toBe('image/jpeg');
     expect(normalizeClaudeImageMediaType('image/webp')).toBe('image/webp');

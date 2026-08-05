@@ -140,6 +140,17 @@ describe('canonical chat request snapshot', () => {
     }] as never)).toThrow('sparse entry');
   });
 
+  it('accepts empty and whitespace-only text parts', () => {
+    const snapshot = snapshotChatRequest([
+      assistant(new vscode.LanguageModelTextPart(''), new vscode.LanguageModelToolCallPart('call-1', 'search', {})),
+      user(new vscode.LanguageModelTextPart('   ')),
+      user(new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('')])),
+    ]);
+    expect(snapshot.messages[0].content[0]).toMatchObject({ kind: 'text', value: '' });
+    expect(snapshot.messages[1].content[0]).toMatchObject({ kind: 'text', value: '   ' });
+    expect(snapshot.messages[2].content[0]).toMatchObject({ content: [{ kind: 'text', value: '' }] });
+  });
+
   it('rejects proxies at every raw graph boundary without invoking traps', () => {
     let traps = 0;
     const proxy = (value: object) => new Proxy(value, {

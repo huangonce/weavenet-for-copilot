@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.4 - 2026-08-05
+
+- 修复 canonical 快照拒绝空文本片段导致请求失败并报 “Message 4 part 1 text must be a non-empty string of at most 4194304 UTF-8 bytes.”。空或纯空白的 `LanguageModelTextPart` 是 VS Code API 合法的（例如仅包含工具调用的助手轮次、返回空字符串的工具结果），现已接受；Claude Messages 转换器会跳过空文本块，避免上游拒绝。思考片段的空 `id` 也不再被当作错误。
+
 ## 0.7.3 - 2026-08-05
 
 - 修复 0.7.0 引入、0.7.1 未完全解决的严重回归：canonical 请求快照要求消息、内容片段、工具定义和响应选项的字段必须是「自有数据属性」，而 VS Code 宿主还原出的对象把这些字段实现为原型上的 getter，导致所有聊天请求都失败并报 “Message 1.content must be a direct data property and cannot be sent safely.”。现在宿主提供的容器改为「每个属性只读取一次并立即快照」，允许访问器但杜绝重复读取带来的 TOCTOU 差异；Proxy 仍在触发任何陷阱前被拒绝，嵌套的工具输入 schema、结构化图片等不受信任数据继续保持严格的纯对象与 own-descriptor 校验。

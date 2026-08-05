@@ -236,7 +236,8 @@ function snapshotPart(raw: unknown, state: SnapshotState, subject: string): Cano
 
 function snapshotTextPart(raw: vscode.LanguageModelTextPart, subject: string, state?: SnapshotState): CanonicalTextPart {
   const value = readHostProperty(raw, 'value', subject);
-  assertBoundedString(value, `${subject} text`, MAX_TEXT_BYTES, false);
+  // Empty text parts are API-legal: tool-call-only assistant turns and tools returning '' produce them.
+  assertBoundedString(value, `${subject} text`, MAX_TEXT_BYTES, true);
   if (state) consumeTextBudget(state, value);
   return Object.freeze({ kind: 'text' as const, value });
 }
@@ -350,7 +351,7 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
   const metadata = readHostProperty(raw, 'metadata', subject);
   assertBoundedString(value, `${subject} thinking text`, MAX_TEXT_BYTES, true);
   consumeTextBudget(state, value);
-  if (id !== undefined) assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
+  if (id !== undefined && id !== '') assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
   let encryptedContent: string | undefined;
   const summary: CanonicalReasoningSummary[] = [];
   if (metadata !== undefined && metadata !== null) {
@@ -384,7 +385,7 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
   return Object.freeze({
     kind: 'thinking' as const,
     value,
-    ...(id === undefined ? {} : { id }),
+    ...(id === undefined || id === '' ? {} : { id }),
     ...(encryptedContent === undefined ? {} : { encryptedContent }),
     summary: Object.freeze(summary),
   });
