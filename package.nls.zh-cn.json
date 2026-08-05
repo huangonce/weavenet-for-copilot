@@ -13,6 +13,7 @@
   "command.manageConnections": "WeaveNet: 管理 Relay 连接",
   "command.refreshModels": "WeaveNet: 刷新模型",
   "command.refreshModelMetadata": "WeaveNet: 刷新模型能力元数据",
+  "command.pickVisionProxyModel": "WeaveNet: 选择视觉代理模型",
   "command.openSettings": "WeaveNet: 打开设置",
   "command.showDebugLog": "WeaveNet: 显示调试日志",
   "configuration.title": "WeaveNet for Copilot",
@@ -51,6 +52,7 @@
   "configuration.disabledImageInputModels.description": "即使公开元数据声称模型支持图片，也强制禁用图片输入的模型 ID 正则表达式。默认为空。",
   "configuration.visionProxyEnabled.description": "允许纯文本 WeaveNet 模型先让明确配置的已安装视觉模型生成文字描述，再处理图片。默认关闭。图片字节、视觉指令及可能包含用户文本和工具结果文本的有界消息布局会发送给该模型所属提供方，可能触发授权或额外计费；原生视觉模型始终绕过代理并直接接收图片。",
   "configuration.visionProxyModel.description": "用于识图的已安装原生视觉模型，必须精确填写 vendor/id（例如 copilot/gpt-4o），不会自动回退到其他模型。请勿选择仅由 WeaveNet 代理获得视觉能力的纯文本模型。",
+  "configuration.visionProxyModel.markdownDescription": "用于识图的已安装原生视觉模型，必须精确填写 `vendor/id`（例如 `copilot/gpt-4o`），不会自动回退到其他模型。请勿选择仅由 WeaveNet 代理获得视觉能力的纯文本模型。运行 [WeaveNet: 选择视觉代理模型](command:weavenet-copilot.pickVisionProxyModel) 可从已安装的模型中选择，无需手动输入 ID。",
   "configuration.visionProxyPrompt.description": "随图片字节和周边消息上下文发送给视觉模型的可选指令。留空时使用 WeaveNet 内置的事实描述与 OCR 指令。描述会通过有界内存缓存短暂用于后续 Agent 工具轮次，绝不持久化；历史图片缓存过期后不会自动重新识别。",
   "configuration.metadataRefreshHours.description": "OpenRouter 模型元数据缓存的刷新间隔，单位为小时。",
   "configuration.requestHeaders.description": "仅供升级迁移使用的旧附加请求头。值保存在普通 VS Code 设置而非 SecretStorage 中，请勿填写任何敏感信息。"

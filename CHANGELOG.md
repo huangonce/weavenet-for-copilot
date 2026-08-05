@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.2 - 2026-08-05
+
+- 新增命令 `WeaveNet: Pick Vision Proxy Model`：从已安装的 VS Code 语言模型中选择视觉代理目标，自动写入 `weavenet-copilot.visionProxyModel`（`vendor/id`），不再需要手动输入模型 ID。列表会排除 WeaveNet 自身的模型，避免误选导致递归。设置项说明新增可点击的命令链接。
+
 ## 0.7.1 - 2026-08-05
 
 - 修复 0.7.0 引入的严重回归：canonical 请求快照会拒绝 VS Code 宿主自身构造的消息与响应选项容器（原型不是 `Object.prototype`/`null`），导致所有聊天请求都失败并报 “Message 1 has an unsupported prototype and cannot be sent safely.”。现在顶层的消息与响应选项容器只校验非 Proxy 且逐属性经 own-descriptor 安全读取，不再要求精确的原型身份；嵌套的工具输入、结构化图片和思考元数据等不受信任数据仍保持原有的严格纯对象校验。

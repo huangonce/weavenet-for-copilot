@@ -9,6 +9,7 @@ import {
   deleteConnection,
   editConnection,
   formatConnectionFailure,
+  pickVisionProxyModel,
   registerConnectionCommands,
   setDefaultConnection,
   testConnection,
@@ -406,6 +407,38 @@ describe('status bar presenter', () => {
   });
 });
 
+describe('pick vision proxy model', () => {
+  it('lists installed non-WeaveNet models and writes the chosen vendor/id to settings', async () => {
+    const update = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ update } as never);
+    vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([
+      { name: 'GPT-4o', id: 'gpt-4o', vendor: 'copilot', family: 'gpt-4o' },
+      { name: 'WeaveNet Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
+    ] as never);
+    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { modelKey: string }[]) => items[0] as never);
+
+    await pickVisionProxyModel();
+
+    const offered = pick.mock.calls[0][0] as readonly { modelKey: string }[];
+    expect(offered).toHaveLength(1);
+    expect(offered[0].modelKey).toBe('copilot/gpt-4o');
+    expect(update).toHaveBeenCalledWith('visionProxyModel', 'copilot/gpt-4o', vscode.ConfigurationTarget.Global);
+  });
+
+  it('informs the user instead of prompting when no other models are installed', async () => {
+    vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([
+      { name: 'WeaveNet Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
+    ] as never);
+    const pick = vi.spyOn(vscode.window, 'showQuickPick');
+    const info = vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue(undefined);
+
+    await pickVisionProxyModel();
+
+    expect(pick).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('No other installed language models were found'));
+  });
+});
+
 describe('command registration', () => {
   it('registers every connection management command against the shared provider', () => {
     const registered: string[] = [];
@@ -417,7 +450,7 @@ describe('command registration', () => {
 
     const disposable = registerConnectionCommands({ subscriptions: [] } as never, provider);
 
-    expect(register).toHaveBeenCalledTimes(16);
+    expect(register).toHaveBeenCalledTimes(17);
     expect(registered).toEqual([
       'weavenet-copilot.setRelayKey',
       'weavenet-copilot.clearRelayKey',
@@ -433,6 +466,7 @@ describe('command registration', () => {
       'weavenet-copilot.manageConnections',
       'weavenet-copilot.refreshModels',
       'weavenet-copilot.refreshModelMetadata',
+      'weavenet-copilot.pickVisionProxyModel',
       'weavenet-copilot.showDebugLog',
       'weavenet-copilot.openSettings',
     ]);

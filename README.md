@@ -83,7 +83,7 @@ src/
 - `weavenet-copilot.imageInputModels`：可选的模型 ID 正则表达式；命中后强制向 Copilot 声明图片输入能力。正常情况下无需配置，插件会优先根据 sub2api 和 OpenRouter 的模型元数据自动识别。
 - `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
 - `weavenet-copilot.visionProxyEnabled`：为不支持图片输入的 WeaveNet 模型启用视觉代理，默认关闭。开启前需确认将图片交给另一模型处理符合你的隐私、安全和费用要求；原生视觉模型仍直接接收图片，不经过代理。
-- `weavenet-copilot.visionProxyModel`：视觉代理使用的已安装 VS Code 语言模型，必须精确填写 `vendor/id`，例如 `copilot/gpt-4o`。扩展不自动挑选其他模型，也不在失败时 fallback；当前目标模型以及仅通过视觉代理声明图片能力的 WeaveNet 模型不能作为代理，以避免递归。
+- `weavenet-copilot.visionProxyModel`：视觉代理使用的已安装 VS Code 语言模型，必须精确填写 `vendor/id`，例如 `copilot/gpt-4o`。扩展不自动挑选其他模型，也不在失败时 fallback；当前目标模型以及仅通过视觉代理声明图片能力的 WeaveNet 模型不能作为代理，以避免递归。不知道要填什么 ID 时，运行命令 `WeaveNet: Pick Vision Proxy Model`（或点击设置项说明中的链接）从已安装模型列表中选择，会自动写入正确的 `vendor/id`。
 - `weavenet-copilot.visionProxyPrompt`：发送给视觉模型的指令；留空使用内置的忠实描述指令。每条当前含图用户消息中的图片会带编号统一识别，并同时发送该消息的有界布局；布局可能包含图片周边用户文本和工具结果文本，以保留必要语境。
 - OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
 - `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。

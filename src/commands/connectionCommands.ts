@@ -6,6 +6,7 @@ import type { ConnectionProbeResult } from '../copilot/connectionDiagnostics';
 import type { ConnectionProfile } from '../config/config';
 import { getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from '../config/config';
 import { configurationSection, errorMessage, restoreProfiles, runConnectionMutation, saveProfiles } from '../config/connectionMutations';
+import { VENDOR } from '../constants';
 import { scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
 import { normalizeRelayBaseUrl } from '../relay/url';
 
@@ -29,6 +30,7 @@ export function registerConnectionCommands(
     vscode.commands.registerCommand('weavenet-copilot.manageConnections', () => manageConnections(provider)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate', true, undefined, true)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata(provider)),
+    vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel()),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),
     vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', configurationSection)),
   );
@@ -311,6 +313,33 @@ async function refreshModelMetadata(provider: WeaveNetChatProvider): Promise<voi
     await (scheduleOpenRouterRefresh(refreshHours * 3_600_000, true) ?? Promise.resolve());
     await provider.refreshModels('invalidate');
   });
+}
+
+export async function pickVisionProxyModel(): Promise<void> {
+  const models = await vscode.lm.selectChatModels();
+  // Exclude WeaveNet's own models so users can't accidentally point the proxy at itself (recursion).
+  const candidates = models.filter((model) => model.vendor !== VENDOR);
+  if (!candidates.length) {
+    void vscode.window.showInformationMessage(
+      'No other installed language models were found. Install or enable an extension that provides a native vision model (for example GitHub Copilot) and try again.',
+    );
+    return;
+  }
+  const items = candidates
+    .map((model) => ({
+      label: model.name,
+      description: `${model.vendor}/${model.id}`,
+      detail: `Family: ${model.family}`,
+      modelKey: `${model.vendor}/${model.id}`,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const selection = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select the installed native vision model WeaveNet should use to describe images',
+    ignoreFocusOut: true,
+  });
+  if (!selection) return;
+  await vscode.workspace.getConfiguration(configurationSection).update('visionProxyModel', selection.modelKey, vscode.ConfigurationTarget.Global);
+  void vscode.window.showInformationMessage(`WeaveNet vision proxy model set to “${selection.modelKey}”. Enable the vision proxy setting to start using it.`);
 }
 
 async function pickProfile(placeHolder: string): Promise<ConnectionProfile | undefined> {

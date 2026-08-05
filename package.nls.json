@@ -13,6 +13,7 @@
   "command.manageConnections": "WeaveNet: Manage Relay Connections",
   "command.refreshModels": "WeaveNet: Refresh Models",
   "command.refreshModelMetadata": "WeaveNet: Refresh Model Metadata",
+  "command.pickVisionProxyModel": "WeaveNet: Pick Vision Proxy Model",
   "command.openSettings": "WeaveNet: Open Settings",
   "command.showDebugLog": "WeaveNet: Show Debug Log",
   "configuration.title": "WeaveNet for Copilot",
@@ -51,6 +52,7 @@
   "configuration.disabledImageInputModels.description": "Regular expressions that disable image input even when public metadata says a model supports it. Empty by default.",
   "configuration.visionProxyEnabled.description": "Allow text-only WeaveNet models to accept images by asking the explicitly configured installed vision model for a text description. Disabled by default. Image bytes, the vision instruction, and a bounded message layout that may include user and tool-result text are sent to that model provider and may require authorization or incur additional charges; native vision models bypass this proxy.",
   "configuration.visionProxyModel.description": "Exact installed native vision model to use, in vendor/id form (for example copilot/gpt-4o). No automatic fallback is used. Do not select a text-only WeaveNet proxy model.",
+  "configuration.visionProxyModel.markdownDescription": "Exact installed native vision model to use, in `vendor/id` form (for example `copilot/gpt-4o`). No automatic fallback is used. Do not select a text-only WeaveNet proxy model. Run [WeaveNet: Pick Vision Proxy Model](command:weavenet-copilot.pickVisionProxyModel) to choose from your installed models instead of typing the ID by hand.",
   "configuration.visionProxyPrompt.description": "Optional instruction sent with image bytes and surrounding message context to the configured vision model. Leave empty for WeaveNet's factual description and OCR prompt. Descriptions are reused briefly from a bounded in-memory cache across Agent tool turns; they are never persisted, and an expired historical image is not automatically reprocessed.",
   "configuration.metadataRefreshHours.description": "How often to refresh cached OpenRouter model metadata, in hours.",
   "configuration.requestHeaders.description": "Legacy headers used only by upgrade migration. Values are regular VS Code settings, not SecretStorage. Do not put secrets here."
