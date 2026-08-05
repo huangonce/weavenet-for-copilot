@@ -331,7 +331,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.visionCacheGeneration += 1;
   }
 
-  private isSafeVisionProxyCandidate(candidate: vscode.LanguageModelChat): boolean {
+  isSafeVisionProxyCandidate(candidate: vscode.LanguageModelChat): boolean {
     if (candidate.vendor !== VENDOR) return true;
     const binding = this.bindingRegistry.get(candidate.id);
     if (!binding) return false;

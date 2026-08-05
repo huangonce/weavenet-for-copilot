@@ -30,7 +30,7 @@ export function registerConnectionCommands(
     vscode.commands.registerCommand('weavenet-copilot.manageConnections', () => manageConnections(provider)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate', true, undefined, true)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel()),
+    vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel(provider)),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),
     vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', configurationSection)),
   );
@@ -315,13 +315,14 @@ async function refreshModelMetadata(provider: WeaveNetChatProvider): Promise<voi
   });
 }
 
-export async function pickVisionProxyModel(): Promise<void> {
+export async function pickVisionProxyModel(provider: WeaveNetChatProvider): Promise<void> {
   const models = await vscode.lm.selectChatModels();
-  // Exclude WeaveNet's own models so users can't accidentally point the proxy at itself (recursion).
-  const candidates = models.filter((model) => model.vendor !== VENDOR);
+  // WeaveNet's own models are usable as the vision proxy only when they have native image input;
+  // that guard (and the target-model identity check in the runtime lookup) prevents recursion.
+  const candidates = models.filter((model) => provider.isSafeVisionProxyCandidate(model));
   if (!candidates.length) {
     void vscode.window.showInformationMessage(
-      'No other installed language models were found. Install or enable an extension that provides a native vision model (for example GitHub Copilot) and try again.',
+      'No vision-capable language models were found. Enable an extension that provides a native vision model (for example GitHub Copilot), or load a WeaveNet model with native image input, and try again.',
     );
     return;
   }
@@ -329,7 +330,7 @@ export async function pickVisionProxyModel(): Promise<void> {
     .map((model) => ({
       label: model.name,
       description: `${model.vendor}/${model.id}`,
-      detail: `Family: ${model.family}`,
+      detail: model.vendor === VENDOR ? 'WeaveNet model with native image input' : `Family: ${model.family}`,
       modelKey: `${model.vendor}/${model.id}`,
     }))
     .sort((a, b) => a.label.localeCompare(b.label));

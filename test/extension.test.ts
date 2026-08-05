@@ -65,6 +65,7 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     logMetadata: vi.fn(),
     refreshModels: vi.fn().mockResolvedValue(undefined),
     refreshConnection: vi.fn().mockResolvedValue(undefined),
+    isSafeVisionProxyCandidate: vi.fn().mockReturnValue(true),
     ...overrides,
   } as never;
 }
@@ -408,34 +409,43 @@ describe('status bar presenter', () => {
 });
 
 describe('pick vision proxy model', () => {
-  it('lists installed non-WeaveNet models and writes the chosen vendor/id to settings', async () => {
+  it('lists vision-capable models, including WeaveNet models with native image input', async () => {
     const update = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ update } as never);
     vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([
       { name: 'GPT-4o', id: 'gpt-4o', vendor: 'copilot', family: 'gpt-4o' },
-      { name: 'WeaveNet Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
+      { name: 'WeaveNet Text Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
+      { name: 'WeaveNet Vision Model', id: 'gpt-4o-vision', vendor: 'weavenet', family: 'weavenet' },
     ] as never);
-    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { modelKey: string }[]) => items[0] as never);
+    const provider = providerFixture({
+      isSafeVisionProxyCandidate: vi.fn().mockImplementation((candidate: { vendor: string; id: string }) =>
+        candidate.vendor !== 'weavenet' || candidate.id === 'gpt-4o-vision',
+      ),
+    });
+    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { modelKey: string }[]) => items[1] as never);
 
-    await pickVisionProxyModel();
+    await pickVisionProxyModel(provider);
 
     const offered = pick.mock.calls[0][0] as readonly { modelKey: string }[];
-    expect(offered).toHaveLength(1);
-    expect(offered[0].modelKey).toBe('copilot/gpt-4o');
-    expect(update).toHaveBeenCalledWith('visionProxyModel', 'copilot/gpt-4o', vscode.ConfigurationTarget.Global);
+    expect(offered).toHaveLength(2);
+    expect(offered.map((item) => item.modelKey)).toEqual(['copilot/gpt-4o', 'weavenet/gpt-4o-vision']);
+    expect(update).toHaveBeenCalledWith('visionProxyModel', 'weavenet/gpt-4o-vision', vscode.ConfigurationTarget.Global);
   });
 
-  it('informs the user instead of prompting when no other models are installed', async () => {
+  it('informs the user instead of prompting when no vision-capable models are installed', async () => {
     vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([
-      { name: 'WeaveNet Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
+      { name: 'WeaveNet Text Model', id: 'some-model', vendor: 'weavenet', family: 'weavenet' },
     ] as never);
+    const provider = providerFixture({
+      isSafeVisionProxyCandidate: vi.fn().mockReturnValue(false),
+    });
     const pick = vi.spyOn(vscode.window, 'showQuickPick');
     const info = vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue(undefined);
 
-    await pickVisionProxyModel();
+    await pickVisionProxyModel(provider);
 
     expect(pick).not.toHaveBeenCalled();
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('No other installed language models were found'));
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('No vision-capable language models were found'));
   });
 });
 

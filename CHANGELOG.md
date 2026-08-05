@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.5 - 2026-08-05
+
+- 视觉代理现在可以选择 WeaveNet 自己加载的、具备原生图片输入的模型（例如 `weavenet/gpt-4o`）：命令 `WeaveNet: Pick Vision Proxy Model` 的列表不再排除 WeaveNet 模型，而是通过运行时同款安全检查只展示真正支持图片的候选；运行时查找也使用同一检查，因此“用自己加载的 GPT 给无视觉的 DeepSeek 描述图片”可以直接配置实现。仅靠视觉代理声明图片能力的模型仍不能作为代理，以避免递归。
+
 ## 0.7.4 - 2026-08-05
 
 - 修复 canonical 快照拒绝空文本片段导致请求失败并报 “Message 4 part 1 text must be a non-empty string of at most 4194304 UTF-8 bytes.”。空或纯空白的 `LanguageModelTextPart` 是 VS Code API 合法的（例如仅包含工具调用的助手轮次、返回空字符串的工具结果），现已接受；Claude Messages 转换器会跳过空文本块，避免上游拒绝。思考片段的空 `id` 也不再被当作错误。
