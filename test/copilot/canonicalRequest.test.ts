@@ -49,35 +49,95 @@ describe('canonical chat request snapshot', () => {
     });
   });
 
-  it('rejects accessors without invoking message, array, or part getters', () => {
-    let calls = 0;
-    const getter = () => { calls += 1; return undefined; };
+  it('accepts host-revived messages whose fields are prototype getters', () => {
+    // Mirrors the extension host, which revives request objects as class instances backed by
+    // prototype accessors rather than own data properties.
+    class RevivedMessage {
+      constructor(private readonly state: { role: number; content: unknown[]; name?: string }) {}
+      get role(): number { return this.state.role; }
+      get content(): unknown[] { return this.state.content; }
+      get name(): string | undefined { return this.state.name; }
+    }
+    class RevivedTextPart {
+      constructor(private readonly text: string) {}
+      get value(): string { return this.text; }
+    }
+    Object.setPrototypeOf(RevivedTextPart.prototype, vscode.LanguageModelTextPart.prototype);
+
+    const message = new RevivedMessage({
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new RevivedTextPart('hello')],
+      name: 'user-1',
+    });
+    const snapshot = snapshotChatRequest([message as never]);
+    expect(snapshot.messages).toMatchObject([{
+      role: 'user',
+      name: 'user-1',
+      content: [{ kind: 'text', value: 'hello' }],
+    }]);
+
+    class RevivedOptions {
+      get tools(): unknown { return undefined; }
+      get toolMode(): vscode.LanguageModelChatToolMode { return vscode.LanguageModelChatToolMode.Required; }
+    }
+    expect(snapshotChatResponseOptions(new RevivedOptions() as never)).toMatchObject({
+      toolMode: vscode.LanguageModelChatToolMode.Required,
+    });
+  });
+
+  it('reads accessor-backed message, array, and part properties exactly once', () => {
+    const reads: string[] = [];
+    let flip = false;
     const message = {};
     Object.defineProperties(message, {
-      role: { get: getter, enumerable: true },
-      content: { get: getter, enumerable: true },
-      name: { get: getter, enumerable: true },
+      role: { get: () => { reads.push('role'); return vscode.LanguageModelChatMessageRole.User; }, enumerable: true },
+      content: {
+        get: () => {
+          reads.push('content');
+          const parts: unknown[] = [];
+          Object.defineProperty(parts, '0', {
+            get: () => {
+              reads.push('content[0]');
+              return new vscode.LanguageModelTextPart(flip ? 'mutated' : 'stable');
+            },
+            enumerable: true,
+            configurable: true,
+          });
+          parts.length = 1;
+          return parts;
+        },
+        enumerable: true,
+      },
+      name: { get: () => { reads.push('name'); return 'agent'; }, enumerable: true },
     });
-    expect(() => snapshotChatRequest([message] as never)).toThrow('direct data property');
 
+    const snapshot = snapshotChatRequest([message] as never);
+    flip = true;
+
+    expect(snapshot.messages).toMatchObject([{
+      role: 'user',
+      name: 'agent',
+      content: [{ kind: 'text', value: 'stable' }],
+    }]);
+    expect(reads).toEqual(['role', 'content', 'name', 'content[0]']);
+
+    for (const [prototype, properties, expected] of [
+      [vscode.LanguageModelTextPart.prototype, ['value'], { kind: 'text', value: 'stable' }],
+      [vscode.LanguageModelToolCallPart.prototype, ['callId', 'name', 'input'], { kind: 'toolCall' }],
+    ] as const) {
+      const part = accessorRecord(prototype, properties, () => 'stable');
+      const partSnapshot = snapshotChatRequest([user(part as never)]);
+      expect(partSnapshot.messages[0].content[0]).toMatchObject(expected);
+    }
+  });
+
+  it('rejects sparse content entries', () => {
     const content: unknown[] = [];
     content.length = 1;
-    Object.defineProperty(content, '0', { get: getter, enumerable: true });
     expect(() => snapshotChatRequest([{
       role: vscode.LanguageModelChatMessageRole.User,
       content,
-    }] as never)).toThrow('sparse or dynamic entry');
-
-    for (const [prototype, properties] of [
-      [vscode.LanguageModelTextPart.prototype, ['value']],
-      [vscode.LanguageModelDataPart.prototype, ['data', 'mimeType']],
-      [vscode.LanguageModelToolCallPart.prototype, ['callId', 'name', 'input']],
-      [vscode.LanguageModelToolResultPart.prototype, ['callId', 'content']],
-    ] as const) {
-      const part = accessorRecord(prototype, properties, getter);
-      expect(() => snapshotChatRequest([user(part as never)])).toThrow('direct data property');
-    }
-    expect(calls).toBe(0);
+    }] as never)).toThrow('sparse entry');
   });
 
   it('rejects proxies at every raw graph boundary without invoking traps', () => {
@@ -230,16 +290,20 @@ describe('canonical response options snapshot', () => {
     expect(Object.isFrozen(snapshot.tools?.[0].inputSchema)).toBe(true);
   });
 
-  it('rejects dynamic and cyclic option graphs without invoking accessors or proxy traps', () => {
+  it('reads accessor-backed options once and rejects dynamic or cyclic schema graphs', () => {
     let calls = 0;
     const options = Object.create(null);
     Object.defineProperty(options, 'tools', { get() { calls += 1; return []; } });
-    expect(() => snapshotChatResponseOptions(options)).toThrow('direct data property');
+    expect(snapshotChatResponseOptions(options)).toMatchObject({
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+    });
+    expect(calls).toBe(1);
 
+    let traps = 0;
     const proxy = new Proxy({ type: 'object' }, {
-      get() { calls += 1; throw new Error('must not run'); },
-      getOwnPropertyDescriptor() { calls += 1; throw new Error('must not run'); },
-      getPrototypeOf() { calls += 1; throw new Error('must not run'); },
+      get() { traps += 1; throw new Error('must not run'); },
+      getOwnPropertyDescriptor() { traps += 1; throw new Error('must not run'); },
+      getPrototypeOf() { traps += 1; throw new Error('must not run'); },
     });
     expect(() => snapshotChatResponseOptions({
       tools: [{ name: 'search', description: 'Search', inputSchema: proxy }],
@@ -252,7 +316,7 @@ describe('canonical response options snapshot', () => {
       tools: [{ name: 'search', description: 'Search', inputSchema: cyclic }],
       toolMode: vscode.LanguageModelChatToolMode.Auto,
     })).toThrow('cyclic tool input schema');
-    expect(calls).toBe(0);
+    expect(traps).toBe(0);
   });
 
   it('enforces pre-serialization string and aggregate tool-definition budgets', () => {

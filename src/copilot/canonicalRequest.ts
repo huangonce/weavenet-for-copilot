@@ -135,13 +135,14 @@ export function snapshotChatResponseOptions(
   },
 ): CanonicalChatResponseOptions {
   assertHostRecord(rawOptions, 'The response options');
-  const rawTools = readOptionalOwnData(rawOptions, 'tools', 'The response options');
-  const rawToolMode = readOptionalOwnData(rawOptions, 'toolMode', 'The response options');
-  const tools = rawTools === undefined
+  const rawTools = readHostProperty(rawOptions, 'tools', 'The response options');
+  const rawToolMode = readHostProperty(rawOptions, 'toolMode', 'The response options');
+  const tools = rawTools === undefined || rawTools === null
     ? undefined
     : snapshotTools(rawTools);
   if (
     rawToolMode !== undefined
+    && rawToolMode !== null
     && rawToolMode !== vscode.LanguageModelChatToolMode.Auto
     && rawToolMode !== vscode.LanguageModelChatToolMode.Required
   ) {
@@ -157,7 +158,7 @@ export function snapshotChatResponseOptions(
     });
   return Object.freeze({
     ...(tools === undefined ? {} : { tools }),
-    toolMode: rawToolMode ?? vscode.LanguageModelChatToolMode.Auto,
+    toolMode: (rawToolMode ?? vscode.LanguageModelChatToolMode.Auto) as vscode.LanguageModelChatToolMode,
     ...(modelOptions === undefined ? {} : { modelOptions }),
   });
 }
@@ -199,9 +200,9 @@ export function canonicalToolInput(part: CanonicalToolCallPart): unknown {
 
 function snapshotMessage(raw: unknown, index: number, state: SnapshotState): CanonicalChatMessage {
   assertHostRecord(raw, `Message ${index + 1}`);
-  const roleValue = readOwnData(raw, 'role', `Message ${index + 1}`);
-  const contentValue = readOwnData(raw, 'content', `Message ${index + 1}`);
-  const nameValue = readOptionalOwnData(raw, 'name', `Message ${index + 1}`);
+  const roleValue = readHostProperty(raw, 'role', `Message ${index + 1}`);
+  const contentValue = readHostProperty(raw, 'content', `Message ${index + 1}`);
+  const nameValue = readHostProperty(raw, 'name', `Message ${index + 1}`);
   const role = snapshotRole(roleValue);
   if (nameValue !== undefined) assertBoundedString(nameValue, 'Message name', MAX_MESSAGE_NAME_BYTES, true);
   assertNotProxy(contentValue, `Message ${index + 1} content`);
@@ -234,7 +235,7 @@ function snapshotPart(raw: unknown, state: SnapshotState, subject: string): Cano
 }
 
 function snapshotTextPart(raw: vscode.LanguageModelTextPart, subject: string, state?: SnapshotState): CanonicalTextPart {
-  const value = readOwnData(raw, 'value', subject);
+  const value = readHostProperty(raw, 'value', subject);
   assertBoundedString(value, `${subject} text`, MAX_TEXT_BYTES, false);
   if (state) consumeTextBudget(state, value);
   return Object.freeze({ kind: 'text' as const, value });
@@ -242,8 +243,8 @@ function snapshotTextPart(raw: vscode.LanguageModelTextPart, subject: string, st
 
 function snapshotDataPart(raw: vscode.LanguageModelDataPart, state: SnapshotState, subject: string): CanonicalDataPart {
   return snapshotDataValues(
-    readOwnData(raw, 'data', subject),
-    readOwnData(raw, 'mimeType', subject),
+    readHostProperty(raw, 'data', subject),
+    readHostProperty(raw, 'mimeType', subject),
     state,
     subject,
   );
@@ -298,9 +299,9 @@ function snapshotToolCallPart(
   state: SnapshotState,
   subject: string,
 ): CanonicalToolCallPart {
-  const callId = readOwnData(raw, 'callId', subject);
-  const name = readOwnData(raw, 'name', subject);
-  const input = readOwnData(raw, 'input', subject);
+  const callId = readHostProperty(raw, 'callId', subject);
+  const name = readHostProperty(raw, 'name', subject);
+  const input = readHostProperty(raw, 'input', subject);
   assertBoundedString(callId, `${subject} call ID`, MAX_CALL_ID_BYTES, false);
   assertBoundedString(name, `${subject} tool name`, MAX_TOOL_NAME_BYTES, false);
   const inputJson = canonicalizeToolJson(input, state, `${subject} input`);
@@ -312,8 +313,8 @@ function snapshotToolResultPart(
   state: SnapshotState,
   subject: string,
 ): CanonicalToolResultPart {
-  const callId = readOwnData(raw, 'callId', subject);
-  const contentValue = readOwnData(raw, 'content', subject);
+  const callId = readHostProperty(raw, 'callId', subject);
+  const contentValue = readHostProperty(raw, 'content', subject);
   assertBoundedString(callId, `${subject} call ID`, MAX_CALL_ID_BYTES, false);
   assertNotProxy(contentValue, `${subject} content`);
   const rawContent = readDenseArray(contentValue, `${subject} content`, MAX_PARTS - state.parts);
@@ -344,33 +345,33 @@ function snapshotToolResultPart(
 }
 
 function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string): CanonicalThinkingPart {
-  const value = readOwnData(raw, 'value', subject);
-  const id = readOptionalOwnData(raw, 'id', subject);
-  const metadata = readOptionalOwnData(raw, 'metadata', subject);
+  const value = readHostProperty(raw, 'value', subject);
+  const id = readHostProperty(raw, 'id', subject);
+  const metadata = readHostProperty(raw, 'metadata', subject);
   assertBoundedString(value, `${subject} thinking text`, MAX_TEXT_BYTES, true);
   consumeTextBudget(state, value);
   if (id !== undefined) assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
   let encryptedContent: string | undefined;
   const summary: CanonicalReasoningSummary[] = [];
-  if (metadata !== undefined) {
-    assertPlainRecord(metadata, `${subject} metadata`);
-    const carried = readOptionalOwnData(metadata, RESPONSES_REASONING_METADATA_KEY, `${subject} metadata`);
-    if (carried !== undefined) {
-      assertPlainRecord(carried, `${subject} reasoning metadata`);
-      const encrypted = readOptionalOwnData(carried, 'encryptedContent', `${subject} reasoning metadata`);
+  if (metadata !== undefined && metadata !== null) {
+    assertHostRecord(metadata, `${subject} metadata`);
+    const carried = readHostProperty(metadata, RESPONSES_REASONING_METADATA_KEY, `${subject} metadata`);
+    if (carried !== undefined && carried !== null) {
+      assertHostRecord(carried, `${subject} reasoning metadata`);
+      const encrypted = readHostProperty(carried, 'encryptedContent', `${subject} reasoning metadata`);
       if (typeof encrypted === 'string' && encrypted) {
         assertBoundedString(encrypted, `${subject} encrypted reasoning`, MAX_TEXT_BYTES, false);
         consumeTextBudget(state, encrypted);
         encryptedContent = encrypted;
       }
-      const rawSummary = readOptionalOwnData(carried, 'summary', `${subject} reasoning metadata`);
-      if (rawSummary !== undefined) {
+      const rawSummary = readHostProperty(carried, 'summary', `${subject} reasoning metadata`);
+      if (rawSummary !== undefined && rawSummary !== null) {
         assertNotProxy(rawSummary, `${subject} reasoning summary`);
         const entries = readDenseArray(rawSummary, `${subject} reasoning summary`, MAX_REASONING_SUMMARIES);
         for (const entry of entries) {
-          assertPlainRecord(entry, `${subject} reasoning summary entry`);
-          const type = readOptionalOwnData(entry, 'type', `${subject} reasoning summary entry`);
-          const text = readOptionalOwnData(entry, 'text', `${subject} reasoning summary entry`);
+          assertHostRecord(entry, `${subject} reasoning summary entry`);
+          const type = readHostProperty(entry, 'type', `${subject} reasoning summary entry`);
+          const text = readHostProperty(entry, 'text', `${subject} reasoning summary entry`);
           if (type === 'summary_text' && typeof text === 'string') {
             assertBoundedString(text, `${subject} reasoning summary text`, MAX_TEXT_BYTES, true);
             consumeTextBudget(state, text);
@@ -482,15 +483,15 @@ function snapshotTools(value: unknown): readonly vscode.LanguageModelChatTool[] 
   let definitionBytes = 2 + Math.max(0, values.length - 1);
   return Object.freeze(values.map((raw, index) => {
     const subject = `Tool definition ${index + 1}`;
-    assertPlainRecord(raw, subject);
-    const name = readOwnData(raw, 'name', subject);
-    const description = readOptionalOwnData(raw, 'description', subject) ?? '';
-    const inputSchema = readOptionalOwnData(raw, 'inputSchema', subject);
+    assertHostRecord(raw, subject);
+    const name = readHostProperty(raw, 'name', subject);
+    const description = readHostProperty(raw, 'description', subject) ?? '';
+    const inputSchema = readHostProperty(raw, 'inputSchema', subject);
     assertBoundedString(name, `${subject} name`, MAX_TOOL_NAME_BYTES, false);
     assertBoundedString(description, `${subject} description`, MAX_TOOL_DESCRIPTION_BYTES, true);
     definitionBytes += jsonStringBytes(name) + jsonStringBytes(description) + 64;
     let canonicalSchema: object | undefined;
-    if (inputSchema !== undefined) {
+    if (inputSchema !== undefined && inputSchema !== null) {
       const result = snapshotStrictJson(
         inputSchema,
         state,
@@ -521,10 +522,10 @@ function snapshotSelectedModelOption(
   key: 'reasoningEffort' | 'contextWindow',
 ): unknown {
   for (const containerKey of ['modelOptions', 'modelConfiguration', 'configuration'] as const) {
-    const container = readOptionalOwnData(options, containerKey, 'The response options');
+    const container = readHostProperty(options, containerKey, 'The response options');
     if (container === undefined || container === null) continue;
-    assertPlainRecord(container, `The response options.${containerKey}`);
-    const value = readOptionalOwnData(container, key, `The response options.${containerKey}`);
+    assertHostRecord(container, `The response options.${containerKey}`);
+    const value = readHostProperty(container, key, `The response options.${containerKey}`);
     if (value === undefined || value === null) continue;
     // Only strings are consumed by the provider. An inert primitive preserves
     // the precedence of an invalid non-null value without retaining caller data.
@@ -574,15 +575,14 @@ function readSingleAlias(record: object, names: readonly string[], subject: stri
 function readDenseArray(value: unknown, subject: string, maxLength: number): unknown[] {
   if (!Array.isArray(value)) throw new vscode.LanguageModelError(`${subject} must be an array and cannot be sent safely.`);
   assertNotProxy(value, subject);
-  const length = readOwnData(value, 'length', subject);
-  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > maxLength) throw snapshotLimitError();
+  const length = (value as unknown[]).length;
+  if (!Number.isSafeInteger(length) || length < 0 || length > maxLength) throw snapshotLimitError();
   const result: unknown[] = [];
-  for (let index = 0; index < (length as number); index += 1) {
-    const descriptor = safeDescriptor(value, String(index), subject);
-    if (!descriptor || !('value' in descriptor)) {
-      throw new vscode.LanguageModelError(`${subject} contains a sparse or dynamic entry and cannot be sent safely.`);
+  for (let index = 0; index < length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new vscode.LanguageModelError(`${subject} contains a sparse entry and cannot be sent safely.`);
     }
-    result.push(descriptor.value);
+    result.push(readHostProperty(value, String(index), subject));
   }
   return result;
 }
@@ -639,14 +639,17 @@ function readOwnData(record: unknown, key: string, subject: string): unknown {
   return descriptor.value;
 }
 
-function readOptionalOwnData(record: object, key: string, subject: string): unknown {
+// The extension host revives request objects as class instances whose fields are prototype
+// accessors, so each property is read exactly once here and immediately snapshotted; that single
+// read is what prevents a later value from differing, and Proxies are still rejected outright.
+function readHostProperty(record: unknown, key: string, subject: string): unknown {
+  if (!record || typeof record !== 'object') throw new vscode.LanguageModelError(`${subject} is invalid and cannot be sent safely.`);
   assertNotProxy(record, subject);
-  const descriptor = safeDescriptor(record, key, subject);
-  if (!descriptor) return undefined;
-  if (!('value' in descriptor)) {
-    throw new vscode.LanguageModelError(`${subject}.${key} must be a direct data property and cannot be sent safely.`);
+  try {
+    return (record as Record<string, unknown>)[key];
+  } catch {
+    throw new vscode.LanguageModelError(`${subject}.${key} cannot be read safely.`);
   }
-  return descriptor.value;
 }
 
 function safeDescriptor(record: object, key: string, subject: string): PropertyDescriptor | undefined {
