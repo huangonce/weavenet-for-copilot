@@ -32,6 +32,23 @@ function accessorRecord<T extends object>(prototype: object | null, properties: 
 }
 
 describe('canonical chat request snapshot', () => {
+  it('accepts host-revived message and options containers with non-Object prototypes', () => {
+    class HostMessage {
+      role = vscode.LanguageModelChatMessageRole.User;
+      content = [new vscode.LanguageModelTextPart('hello')];
+      name: string | undefined = undefined;
+    }
+    const snapshot = snapshotChatRequest([new HostMessage() as never]);
+    expect(snapshot.messages).toMatchObject([{ role: 'user', content: [{ kind: 'text', value: 'hello' }] }]);
+
+    class HostOptions {
+      toolMode = vscode.LanguageModelChatToolMode.Auto;
+    }
+    expect(snapshotChatResponseOptions(new HostOptions() as never)).toMatchObject({
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+    });
+  });
+
   it('rejects accessors without invoking message, array, or part getters', () => {
     let calls = 0;
     const getter = () => { calls += 1; return undefined; };

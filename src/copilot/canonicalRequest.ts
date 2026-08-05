@@ -134,7 +134,7 @@ export function snapshotChatResponseOptions(
     readonly configuration?: Record<string, unknown>;
   },
 ): CanonicalChatResponseOptions {
-  assertRecordPrototype(rawOptions, 'The response options');
+  assertHostRecord(rawOptions, 'The response options');
   const rawTools = readOptionalOwnData(rawOptions, 'tools', 'The response options');
   const rawToolMode = readOptionalOwnData(rawOptions, 'toolMode', 'The response options');
   const tools = rawTools === undefined
@@ -198,7 +198,7 @@ export function canonicalToolInput(part: CanonicalToolCallPart): unknown {
 }
 
 function snapshotMessage(raw: unknown, index: number, state: SnapshotState): CanonicalChatMessage {
-  assertRecordPrototype(raw, `Message ${index + 1}`);
+  assertHostRecord(raw, `Message ${index + 1}`);
   const roleValue = readOwnData(raw, 'role', `Message ${index + 1}`);
   const contentValue = readOwnData(raw, 'content', `Message ${index + 1}`);
   const nameValue = readOptionalOwnData(raw, 'name', `Message ${index + 1}`);
@@ -669,6 +669,14 @@ function assertRecordPrototype(value: unknown, subject: string): asserts value i
   if (prototype !== Object.prototype && prototype !== null) {
     throw new vscode.LanguageModelError(`${subject} has an unsupported prototype and cannot be sent safely.`);
   }
+}
+
+// Host-supplied top-level containers (the request message array, response options) may legitimately
+// be class instances from the extension host's own RPC revival, so only Proxies are rejected here;
+// every property is still read via own-descriptor lookups, never through the prototype chain.
+function assertHostRecord(value: unknown, subject: string): asserts value is object {
+  if (!value || typeof value !== 'object') throw new vscode.LanguageModelError(`${subject} is invalid and cannot be sent safely.`);
+  assertNotProxy(value, subject);
 }
 
 function assertPlainRecord(value: unknown, subject: string): asserts value is object {
