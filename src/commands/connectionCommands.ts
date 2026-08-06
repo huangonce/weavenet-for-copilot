@@ -372,15 +372,12 @@ async function promptConnectionDraft(oldProfile: ConnectionProfile): Promise<Con
     validateInput: (value) => normalizeRelayBaseUrl(value) ? undefined : 'Enter an http(s) URL without credentials, query parameters, or fragments.',
   });
   if (!baseUrlValue) return undefined;
-  const headers = await promptDraftJson<Record<string, string>>(
-    'Extra request headers JSON (regular settings; do not enter secrets)',
-    oldProfile.requestHeaders ?? {},
-    (value) => {
-      if (!isJsonRecord(value) || Object.values(value).some((entry) => typeof entry !== 'string')) throw new Error('Invalid request headers.');
-      return normalizeConnectionProfiles([{ id: oldProfile.id, name: name.trim(), baseUrl: baseUrlValue, requestHeaders: value }])[0]?.requestHeaders ?? {};
-    },
-  );
-  if (headers === undefined) return undefined;
+  // The extra request headers step was removed from the wizard: prompting for a
+  // JSON object here was confusing (it looked like the API key step) and
+  // awkward to fill in. Editing keeps the connection's existing requestHeaders
+  // untouched; users who need custom headers can still edit settings.json or
+  // delete and recreate the connection.
+  const headers = oldProfile.requestHeaders;
   const filters = await promptDraftJson<{ includeModels?: string[]; excludeModels?: string[] }>(
     'Model filters JSON: {"includeModels":[],"excludeModels":[]}',
     { includeModels: oldProfile.includeModels, excludeModels: oldProfile.excludeModels },

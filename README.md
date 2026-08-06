@@ -36,7 +36,7 @@ src/
 
 - `WeaveNet: Add Relay Connection`：新建并启用 Relay 连接，收集地址和 API Key。
 - `WeaveNet: Manage Relay Connections`：打开连接管理菜单。
-- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、额外请求头、模型过滤规则和固定模型。改名不影响基于 UUID 存储的 API Key。
+- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、模型过滤规则和固定模型；现有额外请求头保持不变（需要修改时可直接编辑 settings.json）。改名不影响基于 UUID 存储的 API Key。
 - `WeaveNet: Copy Relay Connection`：复制不含 API Key 的连接配置。
 - `WeaveNet: Test Relay Connection`：由用户显式触发 `/models` 与最小 OpenAI/Claude 流式及非流式请求；结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。最小模型请求可能产生极少量服务费用；扩展不会在后台自动执行这些付费探测。
 - `WeaveNet: Delete Relay Connection`：删除连接及对应 API Key。

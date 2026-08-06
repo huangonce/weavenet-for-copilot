@@ -247,7 +247,6 @@ describe('connection mutation queue', () => {
     vi.spyOn(vscode.window, 'showInputBox')
       .mockResolvedValueOnce('Company')
       .mockResolvedValueOnce('https://company.example.test/v1')
-      .mockResolvedValueOnce('{"X-Tenant":"team-a"}')
       .mockResolvedValueOnce('{"includeModels":["gpt"],"excludeModels":["legacy"]}')
       .mockResolvedValueOnce('[{"id":"gpt-test","route":"openai"}]');
 
@@ -257,13 +256,34 @@ describe('connection mutation queue', () => {
       id: WORK_ID,
       name: 'Company',
       baseUrl: 'https://company.example.test/v1',
-      requestHeaders: { 'X-Tenant': 'team-a' },
       includeModels: ['gpt'],
       excludeModels: ['legacy'],
       models: [{ id: 'gpt-test', route: 'openai' }],
     }]);
     expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(WORK_PROFILE);
     expect(provider.refreshModels).toHaveBeenCalledOnce();
+  });
+
+  it('edits a connection without prompting for or changing its request headers', async () => {
+    const headerProfile: ConnectionProfile = { ...WORK_PROFILE, requestHeaders: { 'X-Tenant': 'team-a' } };
+    const config = configurationFixture([headerProfile]);
+    const provider = providerFixture();
+    pickProfile(headerProfile);
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Company')
+      .mockResolvedValueOnce('https://company.example.test/v1')
+      .mockResolvedValueOnce('{}')
+      .mockResolvedValueOnce('[]');
+
+    await editConnection(provider);
+
+    expect(config.profiles).toEqual([{
+      id: WORK_ID,
+      name: 'Company',
+      baseUrl: 'https://company.example.test/v1',
+      requestHeaders: { 'X-Tenant': 'team-a' },
+      models: [],
+    }]);
   });
 
   it('copies settings under a new UUID without copying or probing an API key', async () => {
