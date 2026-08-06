@@ -3,7 +3,7 @@ import { AuthManager } from '../auth/auth';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile } from '../config/config';
 import { CONFIG_SECTION, VENDOR } from '../constants';
-import { safeHost } from './connection';
+import { safeHost, sanitizeLanguageModelError } from './connection';
 import { supportsImageInputForRoutedModel, toChatInformation } from '../relay/models';
 import { provideClaudeResponse } from './claudeResponse';
 import {
@@ -38,6 +38,7 @@ export {
   describeConnectionTestError,
   safeEndpoint,
   safeHost,
+  sanitizeLanguageModelError,
   toLanguageModelError,
 } from './connection';
 export type { ConnectionTestFailure } from './connection';
@@ -205,6 +206,23 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   async provideLanguageModelChatResponse(
+    model: vscode.LanguageModelChatInformation,
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    options: ModelOptions,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    try {
+      await this.provideLanguageModelChatResponseInner(model, messages, options, progress, token);
+    } catch (error) {
+      // Errors cross the extension-host RPC boundary before Chat renders them.
+      // Sanitize here so the user only ever sees the clean message text, never
+      // the internal extension-host stack (`at i.tryDeserialize (...)` frames).
+      throw sanitizeLanguageModelError(error);
+    }
+  }
+
+  private async provideLanguageModelChatResponseInner(
     model: vscode.LanguageModelChatInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     options: ModelOptions,

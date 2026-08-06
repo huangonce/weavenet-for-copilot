@@ -102,6 +102,37 @@ export function toLanguageModelError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+/**
+ * Strips internal details from an error that will cross the extension-host RPC
+ * boundary and may be rendered verbatim inside Chat.
+ *
+ * Two things make the user-facing message noisy:
+ * - `error.stack` is captured lazily by V8 and then serialized by
+ *   `transformErrorForSerialization`. VS Code surfaces (e.g. the Copilot
+ *   extension) render it as `message: stack`, exposing frames like
+ *   `at i.tryDeserialize (...extensionHostProcess.js...)`.
+ * - When the serialized `name` is `LanguageModelError`,
+ *   `LanguageModelError.tryDeserialize` rebuilds the error from
+ *   `message`/`code`/`cause` and the rebuilt instance captures a fresh stack
+ *   full of internal RPC frames, which we cannot control afterwards.
+ *
+ * Overwriting `stack` with `undefined` drops it from the serialized payload,
+ * and renaming to `Error` routes deserialization through
+ * `transformErrorFromSerialization`, which adopts the sanitized (undefined)
+ * stack value. The error still keeps its message, code, and prototype, so
+ * `instanceof` checks and `code`-based handling keep working.
+ */
+export function sanitizeLanguageModelError(error: unknown): unknown {
+  if (error instanceof vscode.CancellationError) return error;
+  if (error instanceof Error) {
+    Object.defineProperty(error, 'stack', { value: undefined, configurable: true, writable: true });
+    if (error instanceof vscode.LanguageModelError) {
+      error.name = 'Error';
+    }
+  }
+  return error;
+}
+
 function relayRequestDisplayMessage(error: RelayRequestError): string {
   const zh = usesSimplifiedChinese();
   if (error.message.startsWith("The request exceeds this model's context window.")) {

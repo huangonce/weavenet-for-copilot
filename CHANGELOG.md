@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.6 - 2026-08-06
+
+- 彻底清除聊天错误气泡中的扩展宿主内部信息：此前错误的 `stack` 会随 RPC 序列化跨进程传递，VS Code 的 `LanguageModelError.tryDeserialize` 又会重建出充满内部帧（如 `at i.tryDeserialize (...extensionHostProcess.js...)`）的新实例，聊天界面因此显示大量无关调用栈。现在错误在离开扩展前统一清洗：剥离 `stack` 并把名称改为 `Error`，使反序列化走干净路径；用户只会看到简短的错误说明（如 `[503] 模型服务暂时过载或不可用。请稍后重试。`），消息、错误码和 `instanceof` 语义不受影响，取消操作（CancellationError）原样透传。
+
 ## 0.7.5 - 2026-08-05
 
 - 视觉代理现在可以选择 WeaveNet 自己加载的、具备原生图片输入的模型（例如 `weavenet/gpt-4o`）：命令 `WeaveNet: Pick Vision Proxy Model` 的列表不再排除 WeaveNet 模型，而是通过运行时同款安全检查只展示真正支持图片的候选；运行时查找也使用同一检查，因此“用自己加载的 GPT 给无视觉的 DeepSeek 描述图片”可以直接配置实现。仅靠视觉代理声明图片能力的模型仍不能作为代理，以避免递归。

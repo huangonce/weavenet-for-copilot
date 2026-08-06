@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import * as vscode from 'vscode';
 import { createRelayRequestError, createRelayStreamError } from '../../src/relay/errors';
-import { describeConnectionTestError, toLanguageModelError } from '../../src/copilot/provider';
+import {
+  describeConnectionTestError,
+  sanitizeLanguageModelError,
+  toLanguageModelError,
+} from '../../src/copilot/provider';
 
 describe('relay error mapping', () => {
   it('preserves safe structured SSE error fields and maps rate limits', () => {
@@ -137,5 +142,56 @@ describe('relay error mapping', () => {
   ])('classifies HTTP %i connection test diagnostics', (status, category) => {
     const relayError = createRelayRequestError(status, '', 'application/json', '{"error":{"message":"failed"}}', 'req_test');
     expect(describeConnectionTestError(relayError)).toMatchObject({ category, status, responseType: 'json', requestId: 'req_test' });
+  });
+});
+
+describe('sanitizeLanguageModelError', () => {
+  it('strips the stack and renames LanguageModelError so RPC deserialization cannot rebuild a noisy stack', () => {
+    const error = vscode.LanguageModelError.NoPermissions('身份验证失败。请检查此连接的 API Key。');
+    // The real VS Code LanguageModelError constructor sets this name; the mock
+    // does not, so simulate it to lock in the sanitizer behavior.
+    error.name = 'LanguageModelError';
+    expect(error.stack).toBeDefined();
+
+    sanitizeLanguageModelError(error);
+
+    expect(error).toBeInstanceOf(vscode.LanguageModelError);
+    expect(error.name).toBe('Error');
+    expect(error.message).toBe('身份验证失败。请检查此连接的 API Key。');
+    expect(error.code).toBe('NoPermissions');
+    expect(error.stack).toBeUndefined();
+  });
+
+  it('drops the stack of plain errors but keeps their name and message', () => {
+    const error = new Error('boom');
+    expect(error.stack).toBeDefined();
+    sanitizeLanguageModelError(error);
+    expect(error.name).toBe('Error');
+    expect(error.message).toBe('boom');
+    expect(error.stack).toBeUndefined();
+  });
+
+  it('passes cancellation errors through untouched', () => {
+    const cancelled = new vscode.CancellationError();
+    sanitizeLanguageModelError(cancelled);
+    expect(cancelled).toBeInstanceOf(vscode.CancellationError);
+    expect(cancelled.stack).toBeDefined();
+  });
+
+  it('passes non-Error values through untouched', () => {
+    expect(sanitizeLanguageModelError('oops')).toBe('oops');
+    expect(sanitizeLanguageModelError(undefined)).toBeUndefined();
+  });
+
+  it('sanitizes the relay display error end to end', () => {
+    const relayError = createRelayRequestError(
+      503,
+      'Service Unavailable',
+      'application/json',
+      '{"error":{"message":"overloaded"}}',
+    );
+    const sanitized = sanitizeLanguageModelError(toLanguageModelError(relayError)) as Error;
+    expect(sanitized.message).toBe('[503] The model service is temporarily overloaded or unavailable. Please try again shortly.');
+    expect(sanitized.stack).toBeUndefined();
   });
 });
