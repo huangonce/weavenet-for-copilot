@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.7 - 2026-08-06
+
+- 编辑连接的向导不再包含“额外请求头 JSON”输入步骤：该步骤紧跟在地址之后，容易让人误以为是 API Key 输入框，而且直接手写 JSON 并不方便。现在编辑连接时只依次询问名称、地址、模型过滤规则和固定模型路由；连接已有的额外请求头保持不变，需要修改时可直接编辑 `settings.json` 中该连接的 `requestHeaders`。
+
 ## 0.7.6 - 2026-08-06
 
 - 彻底清除聊天错误气泡中的扩展宿主内部信息：此前错误的 `stack` 会随 RPC 序列化跨进程传递，VS Code 的 `LanguageModelError.tryDeserialize` 又会重建出充满内部帧（如 `at i.tryDeserialize (...extensionHostProcess.js...)`）的新实例，聊天界面因此显示大量无关调用栈。现在错误在离开扩展前统一清洗：剥离 `stack` 并把名称改为 `Error`，使反序列化走干净路径；用户只会看到简短的错误说明（如 `[503] 模型服务暂时过载或不可用。请稍后重试。`），消息、错误码和 `instanceof` 语义不受影响，取消操作（CancellationError）原样透传。
