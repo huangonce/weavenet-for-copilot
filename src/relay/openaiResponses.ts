@@ -89,6 +89,9 @@ export async function streamOpenAIResponses(
 
   const outcome = await processResponsesStream(response, callbacks, options.streamIdleTimeoutMs, token);
   if (outcome.terminal) {
+    if (outcome.parts === 0) {
+      throw createIncompleteStreamError('Responses', 'empty-response');
+    }
     callbacks.onStreamEnd?.('Responses', outcome.termination ?? 'completed');
     return;
   }
@@ -121,7 +124,7 @@ export async function processResponsesStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processResponsesSseLine(line, pendingFunctionCalls, callbacks, state),
+        (data) => processResponsesSseData(data, pendingFunctionCalls, callbacks, state),
         () => createRelayStreamError('Responses', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
@@ -133,16 +136,12 @@ export async function processResponsesStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processResponsesSseLine(line, pendingFunctionCalls, callbacks, state),
+        (data) => processResponsesSseData(data, pendingFunctionCalls, callbacks, state),
         () => createRelayStreamError('Responses', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
       terminal = consumed.stopped;
     }
-    if (!terminal && buffer.trim()) {
-      terminal = processResponsesSseLine(buffer, pendingFunctionCalls, callbacks, state);
-    }
-    state.parts += flushFunctionCalls(pendingFunctionCalls, callbacks);
     return { ...state, terminal };
   } finally {
     await reader.cancel().catch(() => undefined);
@@ -158,6 +157,15 @@ export function processResponsesSseLine(
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return false;
   const data = trimmed.slice('data:'.length).trim();
+  return processResponsesSseData(data, pendingFunctionCalls, callbacks, state);
+}
+
+function processResponsesSseData(
+  data: string,
+  pendingFunctionCalls: Map<number, ToolCall>,
+  callbacks: StreamCallbacks,
+  state: ResponsesStreamState,
+): boolean {
   if (!data) return false;
   const event = parseResponsesEvent(data);
   switch (event.type) {

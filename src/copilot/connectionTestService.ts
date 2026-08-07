@@ -5,6 +5,7 @@ import { RelayClient } from '../relay/client';
 import type { RelayEndpointTestResult } from '../relay/client';
 import { isClaudeModelId } from '../relay/models';
 import type { ModelsResponse } from '../relay/types';
+import { normalizeRelayBaseUrl } from '../relay/url';
 import { ConnectionTestError, describeConnectionTestError, safeHost } from './connection';
 import type { ConnectionTestFailure } from './connection';
 import { deriveConnectionCapabilities, deriveDiagnosticsOverall } from './connectionDiagnostics';
@@ -65,9 +66,10 @@ export class ConnectionTestService {
   }
 
   private async runConnectionTest(profile: ConnectionProfile, fingerprint: string): Promise<ConnectionTestResult> {
-    const host = safeHost(profile.baseUrl) ?? 'unknown host';
-    if (!safeHost(profile.baseUrl)) {
-      throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must be a valid http(s) URL.' });
+    const normalizedBaseUrl = normalizeRelayBaseUrl(profile.baseUrl);
+    const host = safeHost(normalizedBaseUrl ?? profile.baseUrl) ?? 'unknown host';
+    if (!normalizedBaseUrl) {
+      throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must use HTTPS, or HTTP on a loopback host.' });
     }
     const apiKey = await this.options.auth.getApiKey(profile);
     if (!apiKey) {

@@ -42,6 +42,23 @@ describe('connection profiles', () => {
     }]);
   });
 
+  it('rejects remote HTTP profiles but keeps local HTTP development profiles', () => {
+    expect(normalizeConnectionProfiles([
+      { id: WORK_ID, name: 'Remote', baseUrl: 'http://relay.example.com/v1' },
+    ])).toEqual([]);
+    expect(normalizeConnectionProfiles([
+      { id: PERSONAL_ID, name: 'Local', baseUrl: 'http://127.0.0.1:8080/v1/' },
+    ])).toEqual([{
+      id: PERSONAL_ID,
+      name: 'Local',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      requestHeaders: undefined,
+      includeModels: undefined,
+      excludeModels: undefined,
+      models: undefined,
+    }]);
+  });
+
   it('normalizes the openaiApi protocol of fixed models', () => {
     const profiles = normalizeConnectionProfiles([
       {

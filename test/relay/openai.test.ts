@@ -16,6 +16,17 @@ function callbacks() {
   } satisfies StreamCallbacks;
 }
 
+function completedStreamResponse(headers?: HeadersInit): Response {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set('content-type', 'text/event-stream');
+  return new Response([
+    'data: {"choices":[{"delta":{"content":"ok"}}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n'), { headers: responseHeaders });
+}
+
 describe('OpenAI response parsing', () => {
   it('accepts data without a space and reports reasoning, usage, and terminal finish', () => {
     const cb = callbacks();
@@ -154,14 +165,17 @@ describe('OpenAI response parsing', () => {
     expect(cb.onReasoning).toHaveBeenCalledWith('reason');
   });
 
-  it('reports refusal and length finish reasons without treating them as empty responses', async () => {
+  it('reports refusal before rejecting a content-filtered response', async () => {
     const cb = callbacks();
-    await processOpenAIFullResponse(new Response(JSON.stringify({
+    await expect(processOpenAIFullResponse(new Response(JSON.stringify({
       choices: [{ message: { refusal: 'cannot comply' }, finish_reason: 'content_filter' }],
-    })), cb);
+    })), cb)).rejects.toThrow('blocked by content filtering');
     expect(cb.onRefusal).toHaveBeenCalledWith('cannot comply');
     expect(cb.onOpenAIFinishReason).toHaveBeenCalledWith('content_filter');
+  });
 
+  it('records a streamed length finish reason for the request-level validator', () => {
+    const cb = callbacks();
     const state = { responseParts: 0, started: false, sawFinishReason: false };
     processOpenAISseLine(
       'data: {"choices":[{"delta":{"refusal":"blocked"},"finish_reason":"length"}]}',
@@ -169,6 +183,77 @@ describe('OpenAI response parsing', () => {
     );
     expect(cb.onRefusal).toHaveBeenCalledWith('blocked');
     expect(cb.onOpenAIFinishReason).toHaveBeenCalledWith('length');
+  });
+
+  it('rejects token-limit truncation after preserving partial streamed output', async () => {
+    const cb = callbacks();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response([
+      'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }));
+
+    await expect(streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb)).rejects.toThrow('output token limit');
+    expect(cb.onContent).toHaveBeenCalledWith('partial');
+  });
+
+  it('parses a standard SSE event with metadata and multiple data fields', async () => {
+    const cb = callbacks();
+    const response = new Response([
+      'event: message',
+      'id: evt_1',
+      'data: {"choices":[',
+      'data: {"delta":{"content":"joined"},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } });
+
+    await expect(processOpenAIStream(response, cb, 1_000)).resolves.toMatchObject({
+      terminal: true,
+      finishReason: 'stop',
+    });
+    expect(cb.onContent).toHaveBeenCalledWith('joined');
+  });
+
+  it('does not publish a pending tool call when the stream ends before a terminal signal', async () => {
+    const cb = callbacks();
+    const response = new Response(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\\"q\\":"}}]}}]}\n\n',
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+
+    await expect(processOpenAIStream(response, cb, 1_000)).resolves.toMatchObject({
+      terminal: false,
+      toolCalls: 0,
+    });
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('validates every completed tool call before publishing any of them', async () => {
+    const cb = callbacks();
+    const toolChunk = JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [
+            { index: 0, id: 'call_1', function: { name: 'valid', arguments: '{}' } },
+            { index: 1, id: 'call_2', function: { name: 'broken', arguments: '{' } },
+          ],
+        },
+      }],
+    });
+    const response = new Response([
+      `data: ${toolChunk}`,
+      '',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } });
+
+    await expect(processOpenAIStream(response, cb, 1_000)).rejects.toThrow('invalid tool call arguments');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
   });
 
   it('treats a terminal-only stream as completed upstream processing', async () => {
@@ -241,13 +326,10 @@ describe('OpenAI response parsing', () => {
 
   it('reports safe successful-response diagnostics metadata', async () => {
     const cb = { ...callbacks(), onResponse: vi.fn() };
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
-      headers: {
-        'content-type': 'text/event-stream',
-        'x-request-id': 'req-safe',
-        'openai-processing-ms': '42',
-        'x-ratelimit-remaining-tokens': '900',
-      },
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(completedStreamResponse({
+      'x-request-id': 'req-safe',
+      'openai-processing-ms': '42',
+      'x-ratelimit-remaining-tokens': '900',
     }));
 
     await streamOpenAIChatCompletion({
@@ -262,9 +344,7 @@ describe('OpenAI response parsing', () => {
 
   it('omits processingMs when the upstream omits openai-processing-ms', async () => {
     const cb = { ...callbacks(), onResponse: vi.fn() };
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
-      headers: { 'content-type': 'text/event-stream' },
-    }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(completedStreamResponse());
 
     await streamOpenAIChatCompletion({
       baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
@@ -276,7 +356,7 @@ describe('OpenAI response parsing', () => {
 
   it('sends a client request ID only when explicitly enabled', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockImplementation(async () => new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }));
+      .mockImplementation(async () => completedStreamResponse());
     const options = {
       baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
     };
@@ -322,9 +402,7 @@ describe('OpenAI response parsing', () => {
   });
 
   it('uses the same local request ID in diagnostics and the optional header', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
-      headers: { 'content-type': 'text/event-stream' },
-    }));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(completedStreamResponse());
     const cb = { ...callbacks(), onRequest: vi.fn() };
 
     await streamOpenAIChatCompletion({
@@ -337,9 +415,7 @@ describe('OpenAI response parsing', () => {
   });
 
   it('retains a local request ID when the optional header is disabled', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
-      headers: { 'content-type': 'text/event-stream' },
-    }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(completedStreamResponse());
     const cb = { ...callbacks(), onRequest: vi.fn() };
 
     await streamOpenAIChatCompletion({
@@ -375,5 +451,16 @@ describe('OpenAI response parsing', () => {
     await expect(streamOpenAIChatCompletion({
       baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
     }, { model: 'gpt-test', messages: [], stream: true }, callbacks())).rejects.toThrow('before its terminal event');
+  });
+
+  it('rejects a terminal-only stream instead of silently completing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    await expect(streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, callbacks()))
+      .rejects.toThrow('without any text, reasoning, or tool calls');
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

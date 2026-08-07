@@ -93,32 +93,60 @@ export function consumeSseChunk(
   decoder: TextDecoder,
   initialBuffer: string,
   maxEventBytes: number,
-  onLine: (line: string) => boolean,
+  onEventData: (data: string) => boolean,
   oversizedError: () => Error,
 ): SseChunkResult {
   let buffer = initialBuffer;
-  const consumeDecoded = (decoded: string): boolean => {
+  const consumeDecoded = (decoded: string, flush = false): boolean => {
     buffer += decoded;
-    let newline = buffer.indexOf('\n');
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline).replace(/\r$/, '');
-      buffer = buffer.slice(newline + 1);
-      if (Buffer.byteLength(line) > maxEventBytes) throw oversizedError();
-      if (onLine(line)) return true;
-      newline = buffer.indexOf('\n');
+    let boundary = findSseEventBoundary(buffer);
+    while (boundary) {
+      const event = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.length);
+      if (Buffer.byteLength(event) > maxEventBytes) throw oversizedError();
+      const data = sseEventData(event);
+      if (data !== undefined && onEventData(data)) return true;
+      boundary = findSseEventBoundary(buffer);
+    }
+    if (flush && buffer) {
+      if (Buffer.byteLength(buffer) > maxEventBytes) throw oversizedError();
+      const data = sseEventData(buffer);
+      buffer = '';
+      if (data !== undefined && onEventData(data)) return true;
     }
     if (Buffer.byteLength(buffer) > maxEventBytes) throw oversizedError();
     return false;
   };
 
   if (!value) {
-    return { buffer, stopped: consumeDecoded(decoder.decode()) };
+    const stopped = consumeDecoded(decoder.decode(), true);
+    return { buffer, stopped };
   }
   for (let offset = 0; offset < value.byteLength; offset += SSE_DECODE_SLICE_BYTES) {
     const slice = value.subarray(offset, Math.min(offset + SSE_DECODE_SLICE_BYTES, value.byteLength));
     if (consumeDecoded(decoder.decode(slice, { stream: true }))) return { buffer, stopped: true };
   }
   return { buffer, stopped: false };
+}
+
+function findSseEventBoundary(value: string): { index: number; length: number } | undefined {
+  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/u.exec(value);
+  return match?.index === undefined ? undefined : { index: match.index, length: match[0].length };
+}
+
+/** Implements SSE field folding: every data field is joined with a newline. */
+function sseEventData(event: string): string | undefined {
+  const data: string[] = [];
+  for (const line of event.split(/\r\n|\r|\n/u)) {
+    if (!line || line.startsWith(':')) continue;
+    const colon = line.indexOf(':');
+    const field = colon < 0 ? line : line.slice(0, colon);
+    if (field !== 'data') continue;
+    let value = colon < 0 ? '' : line.slice(colon + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    data.push(value);
+  }
+  return data.length > 0 ? data.join('\n') : undefined;
 }
 
 export async function throwIfNotOk(
