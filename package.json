@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -144,7 +144,8 @@
                 "type": "string"
               },
               "baseUrl": {
-                "type": "string"
+                "type": "string",
+                "description": "Relay API base URL. Remote relays require HTTPS; HTTP is allowed only for localhost and IP loopback addresses."
               },
               "requestHeaders": {
                 "type": "object"

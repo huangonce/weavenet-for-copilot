@@ -18,6 +18,7 @@ interface OpenAIStreamState {
   started: boolean;
   sawFinishReason: boolean;
   finishReason?: string;
+  toolCalls?: number;
 }
 
 const MAX_SSE_EVENT_BYTES = 1024 * 1024;
@@ -60,6 +61,10 @@ export async function streamOpenAIChatCompletion(
 
     const outcome = await processOpenAIStream(response, callbacks, options.streamIdleTimeoutMs, token);
     if (outcome.terminal || (outcome.responseParts > 0 && outcome.sawFinishReason)) {
+      validateOpenAIFinishReason(outcome.finishReason, outcome.toolCalls);
+      if (outcome.responseParts === 0) {
+        throw createIncompleteStreamError('OpenAI', 'empty-response');
+      }
       callbacks.onStreamEnd?.('OpenAI', outcome.terminal ? '[DONE]' : 'finish_reason');
       return;
     }
@@ -114,7 +119,14 @@ export async function processOpenAIStream(
   idleTimeoutMs: number,
   token?: CancellationToken,
   maxEventBytes = MAX_SSE_EVENT_BYTES,
-): Promise<{ responseParts: number; started: boolean; sawFinishReason: boolean; terminal: boolean }> {
+): Promise<{
+  responseParts: number;
+  started: boolean;
+  sawFinishReason: boolean;
+  finishReason?: string;
+  toolCalls: number;
+  terminal: boolean;
+}> {
   if (!response.body) throw new Error('Relay returned an empty response body.');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -132,7 +144,7 @@ export async function processOpenAIStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processOpenAISseLine(line, pendingToolCalls, callbacks, state),
+        (data) => processOpenAISseData(data, pendingToolCalls, callbacks, state),
         () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
@@ -144,17 +156,23 @@ export async function processOpenAIStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processOpenAISseLine(line, pendingToolCalls, callbacks, state),
+        (data) => processOpenAISseData(data, pendingToolCalls, callbacks, state),
         () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
       terminal = consumed.stopped;
     }
-    if (!terminal && buffer.trim()) {
-      terminal = processOpenAISseLine(buffer, pendingToolCalls, callbacks, state);
+    if (terminal && !state.sawFinishReason) {
+      const flushed = flushToolCalls(pendingToolCalls, callbacks);
+      state.responseParts += flushed;
+      state.toolCalls = (state.toolCalls ?? 0) + flushed;
+    } else if ((terminal || state.sawFinishReason) && pendingToolCalls.size > 0) {
+      throw createRelayStreamError(
+        'OpenAI',
+        `finish_reason=${state.finishReason ?? 'unknown'} was received with unfinished tool calls`,
+      );
     }
-    state.responseParts += flushToolCalls(pendingToolCalls, callbacks);
-    return { ...state, terminal };
+    return { ...state, toolCalls: state.toolCalls ?? 0, terminal };
   } finally {
     await reader.cancel().catch(() => undefined);
   }
@@ -169,6 +187,15 @@ export function processOpenAISseLine(
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return false;
   const data = trimmed.slice('data:'.length).trim();
+  return processOpenAISseData(data, pendingToolCalls, callbacks, state);
+}
+
+function processOpenAISseData(
+  data: string,
+  pendingToolCalls: Map<number, ToolCall>,
+  callbacks: StreamCallbacks,
+  state: OpenAIStreamState,
+): boolean {
   if (data === '[DONE]') return true;
   if (!data) return false;
   const chunk = parseOpenAIStreamJson(data);
@@ -206,7 +233,11 @@ export function processOpenAISseLine(
     state.sawFinishReason = true;
     state.finishReason = choice.finish_reason;
     callbacks.onOpenAIFinishReason?.(choice.finish_reason);
-    state.responseParts += flushToolCalls(pendingToolCalls, callbacks);
+    if (choice.finish_reason === 'tool_calls') {
+      const flushed = flushToolCalls(pendingToolCalls, callbacks);
+      state.responseParts += flushed;
+      state.toolCalls = (state.toolCalls ?? 0) + flushed;
+    }
   }
   return false;
 }
@@ -235,11 +266,13 @@ export async function processOpenAIFullResponse(
   if (reasoning) { callbacks.onReasoning(reasoning); parts++; }
   if (text) { callbacks.onContent(text); parts++; }
   if (message?.refusal) { callbacks.onRefusal?.(message.refusal); parts++; }
-  for (const toolCall of message?.tool_calls ?? []) {
-    callbacks.onToolCall(toolCall);
-    parts++;
-  }
+  const completedToolCalls = message?.tool_calls ?? [];
+  validateToolCalls(completedToolCalls);
+  const toolCalls = completedToolCalls.length;
   if (choice?.finish_reason) callbacks.onOpenAIFinishReason?.(choice.finish_reason);
+  validateOpenAIFinishReason(choice?.finish_reason ?? undefined, toolCalls);
+  for (const toolCall of completedToolCalls) callbacks.onToolCall(toolCall);
+  parts += toolCalls;
   if (parts === 0) throw createIncompleteStreamError('OpenAI', 'empty-response');
 }
 
@@ -295,14 +328,52 @@ function isCompleteJsonObject(value: string): boolean {
 }
 
 function flushToolCalls(pending: Map<number, ToolCall>, callbacks: StreamCallbacks): number {
-  let count = 0;
-  for (const [, toolCall] of [...pending].sort(([a], [b]) => a - b)) {
-    if (!toolCall.function.name) continue;
-    callbacks.onToolCall(toolCall);
-    count++;
-  }
+  const toolCalls = [...pending].sort(([a], [b]) => a - b).map(([, toolCall]) => toolCall);
+  emitValidatedToolCalls(toolCalls, callbacks);
   pending.clear();
-  return count;
+  return toolCalls.length;
+}
+
+function emitValidatedToolCalls(toolCalls: readonly ToolCall[], callbacks: StreamCallbacks): void {
+  validateToolCalls(toolCalls);
+  for (const toolCall of toolCalls) callbacks.onToolCall(toolCall);
+}
+
+function validateToolCalls(toolCalls: readonly ToolCall[]): void {
+  for (const toolCall of toolCalls) validateToolCall(toolCall);
+}
+
+function validateToolCall(toolCall: ToolCall): void {
+  if (!toolCall.id.trim() || !toolCall.function.name.trim()) {
+    throw createRelayStreamError('OpenAI', 'received an incomplete tool call');
+  }
+  const argumentsValue = toolCall.function.arguments.trim();
+  if (!argumentsValue) return;
+  try {
+    const parsed: unknown = JSON.parse(argumentsValue);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+  } catch {
+    throw createRelayStreamError('OpenAI', 'received invalid tool call arguments');
+  }
+}
+
+function validateOpenAIFinishReason(reason: string | undefined, toolCalls: number): void {
+  if (reason === undefined) return;
+  if (reason === 'stop') {
+    if (toolCalls === 0) return;
+    throw createRelayStreamError('OpenAI', 'finish_reason=stop was received with tool calls');
+  }
+  if (reason === 'tool_calls') {
+    if (toolCalls > 0) return;
+    throw createRelayStreamError('OpenAI', 'finish_reason=tool_calls was received without a valid tool call');
+  }
+  if (reason === 'length') {
+    throw createRelayStreamError('OpenAI', 'the response reached its output token limit and may be incomplete');
+  }
+  if (reason === 'content_filter') {
+    throw createRelayStreamError('OpenAI', 'the response was blocked by content filtering');
+  }
+  throw createRelayStreamError('OpenAI', `received unsupported finish_reason=${reason}`);
 }
 
 function parseOpenAIStreamJson(value: string): StreamChunk {
@@ -323,4 +394,3 @@ function isStreamingUnsupported(status: number, statusText: string, body: string
   return /\b(stream|streaming|sse|event-stream)\b/.test(detail) &&
     /\b(unsupported|not supported|invalid|disabled|not allowed|unrecognized|unknown)\b/.test(detail);
 }
-

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   processClaudeFullResponse,
   processClaudeSseLine,
@@ -6,6 +6,8 @@ import {
   streamClaudeMessages,
 } from '../../src/relay/claude';
 import type { StreamCallbacks, ToolCall } from '../../src/relay/types';
+
+afterEach(() => vi.restoreAllMocks());
 
 function callbacks() {
   return {
@@ -170,5 +172,19 @@ describe('Claude stream fallback', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ stream: false });
     expect(cb.onContent).toHaveBeenCalledWith('fallback');
+  });
+
+  it('rejects a terminal-only stream instead of silently completing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response([
+      'data: {"type":"message_start","message":{"id":"msg_1"}}',
+      '',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }));
+    await expect(streamClaudeMessages({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'claude-test', max_tokens: 16, messages: [], stream: true }, callbacks()))
+      .rejects.toThrow('without any text, reasoning, or tool calls');
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

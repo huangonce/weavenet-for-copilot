@@ -68,7 +68,7 @@ src/
 ## 常用设置
 
 - `weavenet-copilot.activeProfile`：仅为从 `0.3.x` 升级保留的废弃字段；首次迁移排序后自动清空，不再控制路由。
-- `weavenet-copilot.profiles`：全局保存且同时启用的 Relay 连接池。每项包含扩展管理的 `id`、`name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
+- `weavenet-copilot.profiles`：全局保存且同时启用的 Relay 连接池。每项包含扩展管理的 `id`、`name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；远程 Relay 必须使用 HTTPS，只有 `localhost`、`127.0.0.0/8` 与 `::1` 允许 HTTP；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
 - `weavenet-copilot.openaiApiStrategy`：应用级 OpenAI 请求协议策略，默认 `chat`。`chat` 强制全部 OpenAI 兼容模型使用 Chat Completions，兼容性最好，也避免切换协议带来的 Prompt 缓存冷启动；`responses` 强制未被固定模型显式 `chat` 否决的模型使用 Responses；`auto` 遵循固定模型声明，并只对未声明模型执行能力探测。优先级为：任一处显式 `chat` > 任一处显式 `responses` > 自动探测。修改设置会自动清除旧目录快照并刷新模型；协议切换后建议新开对话，避免不同协议的工具调用或 reasoning 历史不兼容。
 - `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。

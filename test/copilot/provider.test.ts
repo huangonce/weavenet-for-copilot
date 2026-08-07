@@ -2190,6 +2190,12 @@ describe('Provider chat responses', () => {
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockRejectedValue(new RelayRequestError('denied', 401, 'json'));
     await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, token))
       .rejects.toMatchObject({ code: 'NoPermissions' });
+    stream.mockRejectedValueOnce(new RelayStreamError(
+      'Relay OpenAI stream completed without any text, reasoning, or tool calls.',
+      'OpenAI',
+    ));
+    await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, token))
+      .rejects.toMatchObject({ message: expect.stringContaining('Please try again') });
     stream.mockRejectedValueOnce(new Error('cancelled'));
     await expect(provider.provideLanguageModelChatResponse(model, [], {} as never, progress() as never, { isCancellationRequested: true } as never))
       .rejects.toBeInstanceOf(vscode.CancellationError);

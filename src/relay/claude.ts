@@ -34,6 +34,9 @@ export async function streamClaudeMessages(
     }
     const outcome = await processClaudeStream(response, callbacks, options.streamIdleTimeoutMs, token);
     if (outcome.terminal) {
+      if (outcome.parts === 0) {
+        throw createIncompleteStreamError('Claude', 'empty-response');
+      }
       callbacks.onStreamEnd?.('Claude', 'message_stop');
       return;
     }
@@ -89,7 +92,7 @@ export async function processClaudeStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processClaudeSseLine(line, tools, callbacks, state),
+        (data) => processClaudeSseData(data, tools, callbacks, state),
         () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
@@ -101,14 +104,13 @@ export async function processClaudeStream(
         decoder,
         buffer,
         maxEventBytes,
-        (line) => processClaudeSseLine(line, tools, callbacks, state),
+        (data) => processClaudeSseData(data, tools, callbacks, state),
         () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
       );
       buffer = consumed.buffer;
       terminal = consumed.stopped;
     }
-    if (!terminal && buffer.trim()) terminal = processClaudeSseLine(buffer, tools, callbacks, state);
-    state.parts += flushToolCalls(tools, callbacks);
+    if (terminal) state.parts += flushToolCalls(tools, callbacks);
     return { ...state, terminal };
   } finally {
     await reader.cancel().catch(() => undefined);
@@ -124,6 +126,15 @@ export function processClaudeSseLine(
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return false;
   const data = trimmed.slice('data:'.length).trim();
+  return processClaudeSseData(data, tools, callbacks, state);
+}
+
+function processClaudeSseData(
+  data: string,
+  tools: Map<number, ToolCall>,
+  callbacks: StreamCallbacks,
+  state: { parts: number; started: boolean },
+): boolean {
   if (!data || data === '[DONE]') return data === '[DONE]';
   const event = parseClaudeJson(data);
   if (event.type === 'error' || event.error) throw createRelayStreamError('Claude', event.error ?? event);
@@ -248,4 +259,3 @@ function parseClaudeJson(value: string): ClaudeStreamEvent {
     throw createRelayStreamError('Claude', 'received malformed JSON from the relay');
   }
 }
-

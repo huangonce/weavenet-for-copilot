@@ -357,7 +357,7 @@ export function validateProfileName(value: string, profiles = getProfileConfigur
 }
 
 async function promptBaseUrl(): Promise<string | undefined> {
-  const value = await vscode.window.showInputBox({ prompt: 'Relay API base URL', placeHolder: 'https://relay.example.com/v1', ignoreFocusOut: true, validateInput: (input) => normalizeRelayBaseUrl(input) ? undefined : 'Enter an http(s) URL without credentials, query parameters, or fragments.' });
+  const value = await vscode.window.showInputBox({ prompt: 'Relay API base URL', placeHolder: 'https://relay.example.com/v1', ignoreFocusOut: true, validateInput: (input) => normalizeRelayBaseUrl(input) ? undefined : 'Use HTTPS, or HTTP for localhost, without credentials, query parameters, or fragments.' });
   return value ? normalizeRelayBaseUrl(value) : undefined;
 }
 
@@ -369,7 +369,7 @@ async function promptConnectionDraft(oldProfile: ConnectionProfile): Promise<Con
   if (!name) return undefined;
   const baseUrlValue = await vscode.window.showInputBox({
     prompt: 'Relay API base URL', value: oldProfile.baseUrl, ignoreFocusOut: true,
-    validateInput: (value) => normalizeRelayBaseUrl(value) ? undefined : 'Enter an http(s) URL without credentials, query parameters, or fragments.',
+    validateInput: (value) => normalizeRelayBaseUrl(value) ? undefined : 'Use HTTPS, or HTTP for localhost, without credentials, query parameters, or fragments.',
   });
   if (!baseUrlValue) return undefined;
   // The extra request headers step was removed from the wizard: prompting for a

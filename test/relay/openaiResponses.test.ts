@@ -325,6 +325,17 @@ describe('streamOpenAIResponses', () => {
     expect(cb.onResponse).toHaveBeenCalledWith('Responses', 200, expect.stringContaining('text/event-stream'), expect.objectContaining({ clientRequestId: expect.any(String) }));
   });
 
+  it('rejects a terminal-only stream instead of silently completing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sseResponse([
+      'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
+    ]));
+    await expect(streamOpenAIResponses({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, responsesRequest(), callbacks())).rejects.toThrow('without any text, reasoning, or tool calls');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('reports an incomplete terminal event when the upstream truncates the response', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sseResponse([
       'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n',
@@ -408,6 +419,7 @@ describe('streamOpenAIResponses', () => {
 
   it('uses the responses endpoint exactly once', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sseResponse([
+      'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"ok"}\n\n',
       'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n',
     ]));
     const cb = callbacks();
