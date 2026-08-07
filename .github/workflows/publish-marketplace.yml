@@ -43,6 +43,9 @@ jobs:
       - name: Lint source
         run: npm run lint
 
+      - name: Type-check source and tests
+        run: npm run typecheck
+
       - name: Compile extension
         run: npm run compile
 
