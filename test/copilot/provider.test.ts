@@ -1067,6 +1067,569 @@ describe('Provider chat responses', () => {
     expect(stream).toHaveBeenCalledOnce();
   });
 
+  it('promotes native tool-result images after their tool outputs', async () => {
+    const { provider, model } = await readyProvider(openAIModel, {
+      supportsImageInput: true,
+      visionProxyEnabled: true,
+      visionProxyModel: 'copilot/gpt-4o',
+    });
+    const select = vi.spyOn(vscode.lm, 'selectChatModels');
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+      expect(request.messages).toEqual([
+        expect.objectContaining({
+          role: 'assistant',
+          tool_calls: [expect.objectContaining({ id: 'call-1' })],
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'call-1',
+          content: expect.stringContaining('Screenshot:'),
+        }),
+        expect.objectContaining({
+          role: 'user',
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'image_url',
+              image_url: expect.objectContaining({ url: 'data:image/png;base64,AQ==' }),
+            }),
+          ]),
+        }),
+      ]);
+      expect(request.messages[1].content).not.toContain('AQ==');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'screenshot', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [new vscode.LanguageModelToolResultPart('call-1', [
+            new vscode.LanguageModelTextPart('Screenshot:'),
+            new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png'),
+          ])],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(select).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it('promotes native tool-result images after Responses function outputs', async () => {
+    const profile = {
+      ...WORK_PROFILE,
+      models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+    };
+    const { provider, model } = await readyProvider(openAIModel, {
+      openaiApiStrategy: 'responses',
+      supportsImageInput: true,
+    }, profile);
+    const select = vi.spyOn(vscode.lm, 'selectChatModels');
+    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+      expect(request.input).toEqual([
+        expect.objectContaining({ type: 'function_call', call_id: 'call-1' }),
+        expect.objectContaining({ type: 'function_call_output', call_id: 'call-1', output: 'Screenshot:' }),
+        expect.objectContaining({
+          role: 'user',
+          content: [expect.objectContaining({ type: 'input_image', image_url: 'data:image/png;base64,AQ==' })],
+        }),
+      ]);
+      expect(JSON.stringify(request.input[1])).not.toContain('AQ==');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'screenshot', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [new vscode.LanguageModelToolResultPart('call-1', [
+            new vscode.LanguageModelTextPart('Screenshot:'),
+            new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png'),
+          ])],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(select).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it('promotes native tool-result images after Claude tool results', async () => {
+    const { provider, model } = await readyProvider(claudeModel, { supportsImageInput: true });
+    const select = vi.spyOn(vscode.lm, 'selectChatModels');
+    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+      expect(request.messages).toEqual([
+        expect.objectContaining({
+          role: 'assistant',
+          content: [expect.objectContaining({ type: 'tool_use', id: 'call-1' })],
+        }),
+        expect.objectContaining({
+          role: 'user',
+          content: [
+            expect.objectContaining({ type: 'tool_result', tool_use_id: 'call-1', content: 'Screenshot:' }),
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({ media_type: 'image/png', data: 'AQ==' }),
+            }),
+          ],
+        }),
+      ]);
+      expect(JSON.stringify(request.messages[1].content[0])).not.toContain('AQ==');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'screenshot', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [new vscode.LanguageModelToolResultPart('call-1', [
+            new vscode.LanguageModelTextPart('Screenshot:'),
+            new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png'),
+          ])],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(select).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      protocol: 'OpenAI Chat Completions',
+      modelInfo: openAIModel,
+      configValues: { supportsImageInput: true },
+      profile: WORK_PROFILE,
+      capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamChatCompletion')
+        .mockImplementation(async (request) => assertRequest(request.messages)),
+      assertWire: (wire: unknown[]) => {
+        const messages = wire as Array<Record<string, unknown>>;
+        expect(messages.map((message) => message.role)).toEqual(['assistant', 'tool', 'tool', 'user']);
+        expect(messages.slice(1, 3).map((message) => message.tool_call_id)).toEqual(['call-1', 'call-2']);
+        expect(JSON.stringify(messages.slice(1, 3))).not.toContain('base64');
+        expect(JSON.stringify(messages[3])).toMatch(/Context after tools[\s\S]*CQ==[\s\S]*AQ==[\s\S]*Ag==/u);
+      },
+    },
+    {
+      protocol: 'OpenAI Responses',
+      modelInfo: openAIModel,
+      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      profile: {
+        ...WORK_PROFILE,
+        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      },
+      capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamResponses')
+        .mockImplementation(async (request) => assertRequest(request.input)),
+      assertWire: (wire: unknown[]) => {
+        const items = wire as Array<Record<string, unknown>>;
+        expect(items.map((item) => item.type ?? item.role)).toEqual([
+          'function_call',
+          'function_call',
+          'function_call_output',
+          'function_call_output',
+          'user',
+        ]);
+        expect(items.slice(2, 4).map((item) => item.call_id)).toEqual(['call-1', 'call-2']);
+        expect(JSON.stringify(items.slice(2, 4))).not.toContain('base64');
+        expect(JSON.stringify(items[4])).toMatch(/Context after tools[\s\S]*CQ==[\s\S]*AQ==[\s\S]*Ag==/u);
+      },
+    },
+    {
+      protocol: 'Claude Messages',
+      modelInfo: claudeModel,
+      configValues: { supportsImageInput: true },
+      profile: WORK_PROFILE,
+      capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages')
+        .mockImplementation(async (request) => assertRequest(request.messages)),
+      assertWire: (wire: unknown[]) => {
+        const messages = wire as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+        expect(messages.map((message) => message.role)).toEqual(['assistant', 'user']);
+        expect(messages[1].content.map((part) => part.type)).toEqual([
+          'tool_result',
+          'tool_result',
+          'text',
+          'image',
+          'image',
+          'image',
+        ]);
+        expect(messages[1].content.slice(0, 2).map((part) => part.tool_use_id)).toEqual(['call-1', 'call-2']);
+        expect(JSON.stringify(messages[1].content.slice(0, 2))).not.toContain('base64');
+        expect(JSON.stringify(messages[1].content.slice(2))).toMatch(/Context after tools[\s\S]*CQ==[\s\S]*AQ==[\s\S]*Ag==/u);
+      },
+    },
+  ])('keeps every parallel tool output before mixed native images for $protocol', async ({
+    modelInfo,
+    configValues,
+    profile,
+    capture,
+    assertWire,
+  }) => {
+    const { provider, model } = await readyProvider(modelInfo, configValues, profile);
+    const select = vi.spyOn(vscode.lm, 'selectChatModels');
+    const stream = capture(assertWire);
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [
+            new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
+            new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
+          ],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [
+            new vscode.LanguageModelTextPart('Context after tools'),
+            new vscode.LanguageModelDataPart(new Uint8Array([9]), 'image/png'),
+            new vscode.LanguageModelToolResultPart('call-1', [
+              new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png'),
+            ]),
+            new vscode.LanguageModelToolResultPart('call-2', [
+              new vscode.LanguageModelTextPart('done'),
+              new vscode.LanguageModelDataPart(new Uint8Array([2]), 'image/png'),
+            ]),
+          ],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(select).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      protocol: 'OpenAI Chat Completions',
+      modelInfo: openAIModel,
+      configValues: { supportsImageInput: true },
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+        expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'tool', 'user']);
+        expect(JSON.stringify(request.messages[1])).not.toContain('CQ==');
+        expect(JSON.stringify(request.messages[2])).toContain('CQ==');
+      }),
+    },
+    {
+      protocol: 'OpenAI Responses',
+      modelInfo: openAIModel,
+      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      profile: {
+        ...WORK_PROFILE,
+        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      },
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+        expect(request.input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
+          'function_call',
+          'function_call_output',
+          'user',
+        ]);
+        expect(JSON.stringify(request.input[1])).not.toContain('CQ==');
+        expect(JSON.stringify(request.input[2])).toContain('CQ==');
+      }),
+    },
+    {
+      protocol: 'Claude Messages',
+      modelInfo: claudeModel,
+      configValues: { supportsImageInput: true },
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+        expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'user']);
+        const content = request.messages[1].content;
+        if (typeof content === 'string') throw new Error('Expected Claude content blocks');
+        expect(content.map((part) => part.type)).toEqual(['tool_result', 'image']);
+        expect(JSON.stringify(content[0])).not.toContain('CQ==');
+        expect(JSON.stringify(content[1])).toContain('CQ==');
+      }),
+    },
+  ])('puts a top-level native image after its tool output for $protocol', async ({
+    modelInfo,
+    configValues,
+    profile,
+    capture,
+  }) => {
+    const { provider, model } = await readyProvider(modelInfo, configValues, profile);
+    const stream = capture();
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [
+            new vscode.LanguageModelDataPart(new Uint8Array([9]), 'image/png'),
+            new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('done')]),
+          ],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      protocol: 'OpenAI Chat Completions',
+      configValues: { supportsImageInput: true },
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+        expect(request.messages).toHaveLength(3);
+        expect(request.messages[0]).toMatchObject({
+          role: 'assistant',
+          tool_calls: [expect.objectContaining({ id: 'call-1' })],
+        });
+        expect(JSON.stringify(request.messages)).not.toContain('call-2');
+        expect(request.messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call-1' });
+        expect(JSON.stringify(request.messages[2])).toContain('AQ==');
+      }),
+    },
+    {
+      protocol: 'OpenAI Responses',
+      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      profile: {
+        ...WORK_PROFILE,
+        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      },
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+        expect(request.input).toHaveLength(3);
+        expect(request.input[0]).toMatchObject({ type: 'function_call', call_id: 'call-1' });
+        expect(JSON.stringify(request.input)).not.toContain('call-2');
+        expect(request.input[1]).toMatchObject({ type: 'function_call_output', call_id: 'call-1' });
+        expect(JSON.stringify(request.input[2])).toContain('AQ==');
+      }),
+    },
+  ])('drops unanswered parallel calls before replaying native images for $protocol', async ({
+    configValues,
+    profile,
+    capture,
+  }) => {
+    const { provider, model } = await readyProvider(openAIModel, configValues, profile);
+    const stream = capture();
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [
+            new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
+            new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
+          ],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [new vscode.LanguageModelToolResultPart('call-1', [
+            new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png'),
+          ])],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      protocol: 'OpenAI Chat Completions',
+      modelInfo: openAIModel,
+      configValues: {},
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+        expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'tool', 'user']);
+        expect(JSON.stringify(request.messages[1])).toContain('done');
+        expect(JSON.stringify(request.messages[2])).toContain('Context after tools');
+      }),
+    },
+    {
+      protocol: 'OpenAI Responses',
+      modelInfo: openAIModel,
+      configValues: { openaiApiStrategy: 'responses' },
+      profile: {
+        ...WORK_PROFILE,
+        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      },
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+        expect(request.input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
+          'function_call',
+          'function_call_output',
+          'user',
+        ]);
+        expect(JSON.stringify(request.input[1])).toContain('done');
+        expect(JSON.stringify(request.input[2])).toContain('Context after tools');
+      }),
+    },
+    {
+      protocol: 'Claude Messages',
+      modelInfo: claudeModel,
+      configValues: {},
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+        expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'user']);
+        const content = request.messages[1].content;
+        if (typeof content === 'string') throw new Error('Expected Claude content blocks');
+        expect(content.map((part) => part.type)).toEqual(['tool_result', 'text']);
+        expect(JSON.stringify(content[0])).toContain('done');
+        expect(JSON.stringify(content[1])).toContain('Context after tools');
+      }),
+    },
+  ])('puts plain user text after its tool output for $protocol', async ({
+    modelInfo,
+    configValues,
+    profile,
+    capture,
+  }) => {
+    const { provider, model } = await readyProvider(modelInfo, configValues, profile);
+    const stream = capture();
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [
+            new vscode.LanguageModelTextPart('Context after tools'),
+            new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('done')]),
+          ],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      protocol: 'OpenAI Chat Completions',
+      configValues: {},
+      profile: WORK_PROFILE,
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+        expect(JSON.stringify(request.messages)).not.toContain('call-2');
+      }),
+    },
+    {
+      protocol: 'OpenAI Responses',
+      configValues: { openaiApiStrategy: 'responses' },
+      profile: {
+        ...WORK_PROFILE,
+        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      },
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+        expect(JSON.stringify(request.input)).not.toContain('call-2');
+      }),
+    },
+  ])('drops unanswered parallel calls without images for $protocol', async ({ configValues, profile, capture }) => {
+    const { provider, model } = await readyProvider(openAIModel, configValues, profile);
+    const stream = capture();
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [
+            new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
+            new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
+          ],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('done')])],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it('orders vision-proxy descriptions after matching tool outputs', async () => {
+    const { provider, model } = await readyProvider(openAIModel, {
+      visionProxyEnabled: true,
+      visionProxyModel: 'copilot/gpt-4o',
+    });
+    vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([{
+      vendor: 'copilot',
+      id: 'gpt-4o',
+      capabilities: { imageInput: true },
+      sendRequest: vi.fn().mockResolvedValue({
+        stream: (async function* () {
+          yield new vscode.LanguageModelTextPart('A screenshot description.');
+        }()),
+      }),
+    } as never]);
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
+      expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'tool', 'user']);
+      expect(JSON.stringify(request.messages[1])).toContain('done');
+      expect(JSON.stringify(request.messages[2])).toContain('A screenshot description.');
+    });
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscode.LanguageModelChatMessageRole.Assistant,
+          content: [new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})],
+        },
+        {
+          role: vscode.LanguageModelChatMessageRole.User,
+          content: [
+            new vscode.LanguageModelDataPart(new Uint8Array([9]), 'image/png'),
+            new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('done')]),
+          ],
+        },
+      ] as never,
+      {} as never,
+      progress() as never,
+      token,
+    );
+
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
   it('rejects an unbound WeaveNet model as a recursive vision proxy candidate', async () => {
     const { provider, model } = await readyProvider(openAIModel, {
       visionProxyEnabled: true,

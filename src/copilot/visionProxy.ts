@@ -67,6 +67,11 @@ interface VisionRequestBudget {
   imageBytes: number;
 }
 
+interface VisionValidationOptions {
+  readonly enforceSingleOwner: boolean;
+  readonly context: 'native image request' | 'vision proxy';
+}
+
 interface VisionImageFingerprint {
   readonly mimeType: string;
   readonly sha256: string;
@@ -609,7 +614,10 @@ export async function resolveVisionProxyMessages(
   ) => Promise<VisionDescriber | undefined>,
 ): Promise<VisionResolutionResult> {
   const messages = snapshot.messages;
-  const preparedMessages = analyzeVisionMessages(messages);
+  const preparedMessages = analyzeVisionMessages(messages, {
+    enforceSingleOwner: true,
+    context: 'vision proxy',
+  });
   if (!preparedMessages.some((prepared) => prepared.images.length > 0)) {
     return { messages: snapshot, pendingCacheWrites: [], generatedImageMessages: 0, replayedImageMessages: 0 };
   }
@@ -734,7 +742,10 @@ export async function resolveVisionProxyMessages(
 export function validateVisionImageRequest(
   request: CanonicalChatRequestSnapshot,
 ): void {
-  analyzeVisionMessages(request.messages);
+  analyzeVisionMessages(request.messages, {
+    enforceSingleOwner: false,
+    context: 'native image request',
+  });
 }
 
 function parseVisionModelKey(value: string): VisionModelIdentity | undefined {
@@ -765,12 +776,17 @@ function findCurrentImageMessageIndexes(
 
 function analyzeVisionMessages(
   messages: readonly CanonicalChatMessage[],
+  options: VisionValidationOptions,
 ): PreparedVisionImages[] {
   const pendingToolCalls = new Map<string, true>();
   const allToolCallIds = new Set<string>();
   const budget: VisionRequestBudget = { imageCount: 0, imageBytes: 0 };
   const prepared: PreparedVisionImages[] = [];
   for (const message of messages) {
+    // A new assistant turn ends the preceding tool-result batch. Keep the
+    // global ID set for replay-safety, but do not let a later image result
+    // claim provenance from an abandoned call in an older assistant turn.
+    if (message.role === 'assistant') pendingToolCalls.clear();
     for (const part of message.content) {
       if (part.kind !== 'toolCall') continue;
       const callId = assertValidVisionCallId(part.callId, 'tool call');
@@ -789,17 +805,24 @@ function analyzeVisionMessages(
       part: Extract<CanonicalInputPart, { kind: 'toolResult' }>;
       images: Array<{ image: CanonicalDataPart; path: readonly number[] }>;
     }> = [];
+    const allImages: Array<{ image: CanonicalDataPart; path: readonly number[] }> = [];
     for (const [partIndex, part] of message.content.entries()) {
-      const direct = snapshotImage(part, budget);
+      const direct = snapshotImage(part, budget, options.context);
       if (direct) {
-        topLevelImages.push({ image: direct, path: [partIndex] });
+        const entry = { image: direct, path: [partIndex] };
+        topLevelImages.push(entry);
+        allImages.push(entry);
         continue;
       }
       if (part.kind === 'toolResult') {
         const nestedImages: Array<{ image: CanonicalDataPart; path: readonly number[] }> = [];
         for (const [nestedIndex, nested] of part.content.entries()) {
-          const image = snapshotImage(nested, budget);
-          if (image) nestedImages.push({ image, path: [partIndex, nestedIndex] });
+          const image = snapshotImage(nested, budget, options.context);
+          if (image) {
+            const entry = { image, path: [partIndex, nestedIndex] };
+            nestedImages.push(entry);
+            allImages.push(entry);
+          }
         }
         if (nestedImages.length > 0) imageToolResults.push({ part, images: nestedImages });
         else if (
@@ -818,12 +841,15 @@ function analyzeVisionMessages(
     }
     if (message.role !== 'user') {
       throw new VisionProxyError(
-        'The vision proxy accepts image attachments only in user messages. '
+        'Image attachments are accepted only in user messages. '
         + 'Attach the image to the current user message and try again.',
       );
     }
 
-    if (imageToolResults.length > 1 || (topLevelImages.length > 0 && imageToolResults.length > 0)) {
+    if (
+      options.enforceSingleOwner
+      && (imageToolResults.length > 1 || (topLevelImages.length > 0 && imageToolResults.length > 0))
+    ) {
       throw new VisionProxyError(
         'One message cannot safely combine images from multiple owners. '
         + 'Send top-level images or one image-bearing tool result per message.',
@@ -831,17 +857,23 @@ function analyzeVisionMessages(
     }
     let provenance: VisionImageProvenance = { role: 'user', owner: 'message' };
     let ownedImages = topLevelImages;
-    if (imageToolResults.length === 1) {
+    if (imageToolResults.length > 0) {
+      for (const toolResult of imageToolResults) {
+        const callId = assertValidVisionCallId(toolResult.part.callId, 'image tool result');
+        if (!pendingToolCalls.delete(callId)) {
+          throw new VisionProxyError(
+            'An image tool result must match one earlier, unique, unconsumed assistant tool call.',
+          );
+        }
+      }
       const toolResult = imageToolResults[0];
       const callId = assertValidVisionCallId(toolResult.part.callId, 'image tool result');
-      if (!pendingToolCalls.delete(callId)) {
-        throw new VisionProxyError(
-          'An image tool result must match one earlier, unique, unconsumed assistant tool call.',
-        );
-      }
       provenance = { role: 'user', owner: 'toolResult', callId };
-      ownedImages = toolResult.images;
+      ownedImages = options.enforceSingleOwner
+        ? toolResult.images
+        : allImages;
     }
+    if (!options.enforceSingleOwner) ownedImages = allImages;
     prepared.push({
       images: ownedImages.map((entry) => entry.image),
       fingerprints: ownedImages.map((entry) => ({
@@ -865,30 +897,32 @@ function assertValidVisionCallId(value: unknown, subject: string): string {
 function snapshotImage(
   part: CanonicalInputPart | CanonicalToolResultContentPart,
   budget: VisionRequestBudget,
+  context: VisionValidationOptions['context'],
 ): CanonicalDataPart | undefined {
   if (!isCanonicalImagePart(part)) return undefined;
   const image = part;
   const mimeType = normalizeVisionProxyImageType(image.mimeType);
   if (!mimeType) {
     throw new VisionProxyError(
-      'The vision proxy accepts only JPEG, PNG, GIF, or WebP images. Convert the image to a supported format and try again.',
+      `${context === 'vision proxy' ? 'The vision proxy' : 'This image request'} accepts only JPEG, PNG, GIF, or WebP images. `
+      + 'Convert the image to a supported format and try again.',
     );
   }
   budget.imageCount += 1;
   if (budget.imageCount > MAX_VISION_IMAGES_PER_MESSAGE) {
     throw new VisionProxyError(
-      `A vision proxy request can contain at most ${MAX_VISION_IMAGES_PER_MESSAGE} images. Reduce the number of images and try again.`,
+      `An image request can contain at most ${MAX_VISION_IMAGES_PER_MESSAGE} images. Reduce the number of images and try again.`,
     );
   }
   if (image.byteLength > MAX_VISION_IMAGE_BYTES) {
     throw new VisionProxyError(
-      `Each vision proxy image must be at most ${formatMiB(MAX_VISION_IMAGE_BYTES)} MiB. Resize the image and try again.`,
+      `Each image must be at most ${formatMiB(MAX_VISION_IMAGE_BYTES)} MiB. Resize the image and try again.`,
     );
   }
   budget.imageBytes += image.byteLength;
   if (budget.imageBytes > MAX_VISION_TOTAL_IMAGE_BYTES) {
     throw new VisionProxyError(
-      `Images in one vision proxy request must total at most ${formatMiB(MAX_VISION_TOTAL_IMAGE_BYTES)} MiB. Reduce the attachments and try again.`,
+      `Images in one request must total at most ${formatMiB(MAX_VISION_TOTAL_IMAGE_BYTES)} MiB. Reduce the attachments and try again.`,
     );
   }
   return mimeType === image.mimeType

@@ -25,6 +25,7 @@ import { provideOpenAIResponse, provideResponsesResponse } from './openaiRespons
 import { formatLogError } from './requestDiagnostics';
 import { resolveOpenAIApiVariant } from '../relay/models';
 import { snapshotChatRequest, snapshotChatResponseOptions } from './canonicalRequest';
+import { normalizeToolResultBatches } from './toolResultImageNormalization';
 import {
   resolveVisionProxyMessages,
   selectVisionDescriber,
@@ -231,7 +232,6 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   ): Promise<void> {
     const messageSnapshot = snapshotChatRequest(messages);
     const optionsSnapshot = snapshotChatResponseOptions(options);
-    if (messageSnapshot.hasImages) validateVisionImageRequest(messageSnapshot);
     const binding = this.bindingRegistry.get(model.id);
     if (!binding) {
       throw new vscode.LanguageModelError(`Unknown WeaveNet model route: ${model.id}`);
@@ -256,7 +256,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     let resolvedMessages = messageSnapshot;
     let pendingVisionCacheWrites: readonly VisionDescriptionCacheWrite[] = [];
     try {
-      if (!nativeImageInput && messageSnapshot.hasImages) {
+      if (nativeImageInput && messageSnapshot.hasImages) {
+        validateVisionImageRequest(messageSnapshot);
+      } else if (messageSnapshot.hasImages) {
         if (!config.visionProxyEnabled) {
           throw new vscode.LanguageModelError(
             'This WeaveNet model does not support native image input. Enable the WeaveNet vision proxy and select an installed native vision model, or choose a native vision model directly.',
@@ -287,6 +289,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
             + `model=${vision.visionModel ? `${vision.visionModel.vendor}/${vision.visionModel.id}` : 'none'}`,
         );
       }
+      resolvedMessages = normalizeToolResultBatches(resolvedMessages);
       const context = {
         config,
         routedModel,

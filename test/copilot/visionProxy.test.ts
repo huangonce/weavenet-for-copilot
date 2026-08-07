@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
   resolveVisionProxyMessages,
   selectVisionDescriber,
+  validateVisionImageRequest,
   VisionDescriptionCache,
   VisionProxyError,
   VSCodeLanguageModelVisionDescriber,
@@ -269,6 +270,42 @@ describe('vision proxy resolution', () => {
       assistant(new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})),
       user(image(1), new vscode.LanguageModelToolResultPart('call-1', [image(2)])),
     ])).rejects.toMatchObject({ message: expect.stringContaining('multiple owners') });
+  });
+
+  it('allows multiple valid owners for native image input while preserving provenance checks', () => {
+    const native = snapshotChatRequest([
+      assistant(
+        new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
+        new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
+      ),
+      user(
+        image(9),
+        new vscode.LanguageModelToolResultPart('call-1', [image(1)]),
+        new vscode.LanguageModelToolResultPart('call-2', [image(2)]),
+      ),
+    ]);
+
+    expect(() => validateVisionImageRequest(native)).not.toThrow();
+    expect(() => validateVisionImageRequest(snapshotChatRequest([
+      user(new vscode.LanguageModelToolResultPart('orphan', [image()])),
+    ]))).toThrow('must match one earlier');
+  });
+
+  it('accepts native image tool-result owners across messages but not across a new assistant turn', () => {
+    expect(() => validateVisionImageRequest(snapshotChatRequest([
+      assistant(
+        new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
+        new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
+      ),
+      user(new vscode.LanguageModelToolResultPart('call-1', [image(1)])),
+      user(new vscode.LanguageModelToolResultPart('call-2', [image(2)])),
+    ]))).not.toThrow();
+
+    expect(() => validateVisionImageRequest(snapshotChatRequest([
+      assistant(new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})),
+      assistant(new vscode.LanguageModelTextPart('The tool batch was abandoned.')),
+      user(new vscode.LanguageModelToolResultPart('call-1', [image(1)])),
+    ]))).toThrow('must match one earlier');
   });
 
   it('rejects image attachments in assistant messages even on a warm cache', async () => {
