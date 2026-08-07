@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 import * as vscode from 'vscode';
 import {
   ConnectionTestError,
@@ -13,18 +14,25 @@ import {
   toLanguageModelError,
   WeaveNetChatProvider,
 } from '../../src/copilot/provider';
-import { RELAY_API_KEY_SECRET } from '../../src/constants';
-import { MODEL_SNAPSHOT_KEY_PREFIX } from '../../src/constants';
+import { catalogArtifactRevision } from '../../src/copilot/catalogIdentity';
+import { getConfig } from '../../src/config/config';
+import {
+  CATALOG_ARTIFACT_PEPPER_SECRET,
+  MODEL_SNAPSHOT_KEY_PREFIX,
+  MODEL_SNAPSHOT_SCHEMA_VERSION,
+  RELAY_API_KEY_SECRET,
+} from '../../src/constants';
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
 import { responsesProbeCache } from '../../src/relay/responsesProbeCache';
 import { formatLogError } from '../../src/copilot/requestDiagnostics';
-import type { ResponsesRequest } from '../../src/relay/types';
+import type { ResponsesRequest, RoutedModel } from '../../src/relay/types';
 import { InMemoryMemento } from '../support/memento';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
 const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
+const TEST_ARTIFACT_PEPPER = 'p'.repeat(43);
 const WORK_PROFILE = { id: WORK_ID, name: 'work', baseUrl: 'https://work.example.test/v1' };
 const PERSONAL_PROFILE = { id: PERSONAL_ID, name: 'personal', baseUrl: 'https://personal.example.test/v1' };
 
@@ -73,6 +81,9 @@ function providerFixture(options: {
   } as never);
   const secrets = options.secrets ?? new InMemorySecrets();
   for (const [profileId, value] of Object.entries(options.keys ?? {})) secrets.values.set(keyFor(profileId), value);
+  if (!secrets.values.has(CATALOG_ARTIFACT_PEPPER_SECRET)) {
+    secrets.values.set(CATALOG_ARTIFACT_PEPPER_SECRET, TEST_ARTIFACT_PEPPER);
+  }
   secrets.notificationsEnabled = false;
   const provider = new WeaveNetChatProvider({
     secrets,
@@ -87,16 +98,21 @@ function keyFor(profileId: string): string {
   return `${RELAY_API_KEY_SECRET}.profileId.${profileId}`;
 }
 
-function relayModelRequestCount(fetchMock: ReturnType<typeof vi.spyOn>): number {
+function relayModelRequestCount(fetchMock: MockInstance<typeof fetch>): number {
   return fetchMock.mock.calls
     .filter(([input]) => String(input).includes('.example.test') && String(input).includes('/models'))
     .length;
 }
 
+function responsesInputItems(
+  input: ResponsesRequest['input'],
+): Exclude<ResponsesRequest['input'], string> {
+  if (typeof input === 'string') throw new Error('Expected structured Responses input');
+  return input;
+}
+
 async function flushAsyncWork(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let turn = 0; turn < 6; turn++) await Promise.resolve();
 }
 
 function framedDescription(value: string): string {
@@ -260,17 +276,19 @@ describe('connection pool model refresh', () => {
   it('persists the last successful model snapshot into global state', async () => {
     const globalState = new InMemoryMemento();
     const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'gpt-work' }] }), {
       headers: { 'content-type': 'application/json' },
     }));
 
     await provider.refreshModels();
 
-    const stored = globalState.get(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`);
+    const stored = globalState.get(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`);
     expect(stored).toBeDefined();
     expect(stored).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
       profileId: WORK_ID,
+      catalogRevision: revision,
       snapshots: { openai: [expect.objectContaining({ id: 'gpt-work' })] },
     });
     // The snapshot is JSON-safe: no functions or class instances.
@@ -279,9 +297,12 @@ describe('connection pool model refresh', () => {
 
   it('restores a persisted snapshot so the picker stays populated while the relay is offline', async () => {
     const globalState = new InMemoryMemento();
-    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`, {
-      schemaVersion: 1,
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`, {
+      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
       profileId: WORK_ID,
+      catalogRevision: revision,
       savedAt: Date.now(),
       snapshots: {
         openai: [{
@@ -296,7 +317,6 @@ describe('connection pool model refresh', () => {
         protocol: 'openai', route: 'openai', toolCalling: true,
       }],
     });
-    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
     // The relay is completely unreachable on startup.
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
 
@@ -308,20 +328,46 @@ describe('connection pool model refresh', () => {
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
   });
 
+  it('does not restore a persisted snapshot from a different catalog revision while offline', async () => {
+    const globalState = new InMemoryMemento();
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    const staleRevision = 'f'.repeat(64);
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${staleRevision}`, {
+      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
+      profileId: WORK_ID,
+      catalogRevision: staleRevision,
+      savedAt: Date.now(),
+      snapshots: { openai: [], chatgpt: [], claude: [] },
+      models: [{
+        id: 'gpt-stale', pickerId: 'gpt-stale', upstreamId: 'gpt-stale',
+        protocol: 'openai', route: 'openai',
+      }],
+    });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(information).toEqual([]);
+    expect(provider.getConnectionStatus()).toMatchObject({ phase: 'error', modelCount: 0, warningCount: 1 });
+  });
+
   it('clears persisted model snapshots when the API key is removed', async () => {
     const globalState = new InMemoryMemento();
-    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`, {
-      schemaVersion: 1,
+    const { provider, secrets } = providerFixture({ globalState, secrets: new InMemorySecrets() });
+    const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
+    const snapshotKey = `${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`;
+    globalState.values.set(snapshotKey, {
+      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
       profileId: WORK_ID,
+      catalogRevision: revision,
       savedAt: Date.now(),
       snapshots: { openai: [], chatgpt: [], claude: [] },
       models: [{ id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot', protocol: 'openai', route: 'openai' }],
     });
-    const { provider, secrets } = providerFixture({ globalState, secrets: new InMemorySecrets() });
     secrets.values.delete(keyFor(WORK_ID));
     await provider.refreshModels();
 
-    expect(globalState.get(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}`)).toBeUndefined();
+    expect(globalState.get(snapshotKey)).toBeUndefined();
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'keyMissing', modelCount: 0 });
   });
   it('limits aggregate model refreshes to three concurrent connections', async () => {
@@ -457,7 +503,7 @@ describe('connection pool model refresh', () => {
     expect(describeConnectionTestError(unauthorized)).toMatchObject({
       category: 'authentication', status: 401, requestId: 'req-1',
     });
-    expect(describeConnectionTestError(new RelayTimeoutError())).toMatchObject({ category: 'timeout' });
+    expect(describeConnectionTestError(new RelayTimeoutError('response', 100))).toMatchObject({ category: 'timeout' });
     expect(describeConnectionTestError(new TypeError('fetch failed'))).toMatchObject({ category: 'network' });
     expect(describeConnectionTestError(new ConnectionTestError({ category: 'server', message: 'already classified' })))
       .toEqual({ category: 'server', message: 'already classified' });
@@ -491,9 +537,10 @@ describe('Provider request helpers', () => {
     upstreamId: 'reasoning-model',
     protocol: 'openai',
     route: 'openai',
+    catalogSource: 'discovery',
     thinking: true,
     contextWindows: [200_000, 400_000],
-  } as never;
+  } satisfies RoutedModel;
 
   it('normalizes safe relay hosts and endpoint paths without leaking URL credentials', () => {
     expect(safeHost('https://user:pass@relay.example.test/v1?secret=yes')).toBe('relay.example.test');
@@ -547,7 +594,7 @@ describe('Provider chat responses', () => {
   const token = {
     isCancellationRequested: false,
     onCancellationRequested: () => ({ dispose: () => {} }),
-  } as never;
+  } as vscode.CancellationToken;
   const progress = () => ({ report: vi.fn() });
   const openAIModel = { id: 'gpt-test', capabilities: { tool_calling: true, reasoning: true }, context_length: 128_000 };
   const claudeModel = { id: 'claude-test', capabilities: { tool_calling: true, reasoning: true } };
@@ -1240,7 +1287,7 @@ describe('Provider chat responses', () => {
         models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
       },
       capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamResponses')
-        .mockImplementation(async (request) => assertRequest(request.input)),
+        .mockImplementation(async (request) => assertRequest(responsesInputItems(request.input))),
       assertWire: (wire: unknown[]) => {
         const items = wire as Array<Record<string, unknown>>;
         expect(items.map((item) => item.type ?? item.role)).toEqual([
@@ -1344,13 +1391,14 @@ describe('Provider chat responses', () => {
         models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
-        expect(request.input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
+        const input = responsesInputItems(request.input);
+        expect(input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
           'function_call',
           'function_call_output',
           'user',
         ]);
-        expect(JSON.stringify(request.input[1])).not.toContain('CQ==');
-        expect(JSON.stringify(request.input[2])).toContain('CQ==');
+        expect(JSON.stringify(input[1])).not.toContain('CQ==');
+        expect(JSON.stringify(input[2])).toContain('CQ==');
       }),
     },
     {
@@ -1484,13 +1532,14 @@ describe('Provider chat responses', () => {
         models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
-        expect(request.input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
+        const input = responsesInputItems(request.input);
+        expect(input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
           'function_call',
           'function_call_output',
           'user',
         ]);
-        expect(JSON.stringify(request.input[1])).toContain('done');
-        expect(JSON.stringify(request.input[2])).toContain('Context after tools');
+        expect(JSON.stringify(input[1])).toContain('done');
+        expect(JSON.stringify(input[2])).toContain('Context after tools');
       }),
     },
     {
@@ -2080,7 +2129,7 @@ describe('Provider chat responses', () => {
     vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('unsupported');
     const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
     const selected = information.find((model) => model.id.includes(PERSONAL_ID));
-    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async function (request) {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async function (this: RelayClient, request) {
       expect(request.model).toBe('gpt-test');
       expect(this).toMatchObject({
         options: {

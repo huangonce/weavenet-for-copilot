@@ -1,10 +1,10 @@
 import { defineConfig } from 'vitest/config';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 export default defineConfig({
   resolve: {
     alias: {
-      vscode: fileURLToPath(new URL('./test/support/vscode.mock.ts', import.meta.url)),
+      vscode: resolve(__dirname, 'test/support/vscode.mock.ts'),
     },
   },
   test: {

@@ -5,8 +5,7 @@ import {
   processClaudeStream,
   streamClaudeMessages,
 } from '../../src/relay/claude';
-import type { StreamCallbacks } from '../../src/relay/client';
-import type { ToolCall } from '../../src/relay/types';
+import type { StreamCallbacks, ToolCall } from '../../src/relay/types';
 
 function callbacks() {
   return {

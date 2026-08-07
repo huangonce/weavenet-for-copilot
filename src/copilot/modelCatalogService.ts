@@ -22,15 +22,16 @@ export class ModelCatalogService {
   load(
     config: ExtensionConfig,
     apiKey: string | undefined,
+    catalogRevision: string,
     previousSnapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]>,
     token?: vscode.CancellationToken,
     forceProbe = false,
   ): Promise<ModelLoadResult> {
-    return loadAllModels(config, apiKey, this.debug, previousSnapshots, token, forceProbe);
+    return loadAllModels(config, apiKey, catalogRevision, this.debug, previousSnapshots, token, forceProbe);
   }
 
-  restore(profileId: string): ModelSnapshotRecord | undefined {
-    return this.snapshotStore.get(profileId);
+  restore(profileId: string, catalogRevision: string): ModelSnapshotRecord | undefined {
+    return this.snapshotStore.get(profileId, catalogRevision);
   }
 
   snapshotMap(record: ModelSnapshotRecord): Map<RoutedModel['route'], RoutedModel[]> {
@@ -44,11 +45,12 @@ export class ModelCatalogService {
   /** Persists the successful catalog; storage failures never affect refresh. */
   async persistSnapshot(
     profileId: string,
+    catalogRevision: string,
     snapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]>,
     models: readonly RoutedModel[],
   ): Promise<void> {
     try {
-      await this.snapshotStore.update(profileId, snapshots, models);
+      await this.snapshotStore.update(profileId, catalogRevision, snapshots, models);
     } catch (error) {
       this.debug(getConfig(), `[models] connection=${profileId}, snapshot persist failed: ${formatLogError(error)}`);
     }

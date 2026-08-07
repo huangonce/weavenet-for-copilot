@@ -1,7 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type * as vscode from 'vscode';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from '../../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
+
+function controlledCancellationToken(): { token: vscode.CancellationToken; cancel(): void } {
+  let cancellationRequested = false;
+  let notifyCancellation: (() => void) | undefined;
+  const token: vscode.CancellationToken = {
+    get isCancellationRequested() { return cancellationRequested; },
+    onCancellationRequested: (listener, thisArgs, disposables) => {
+      const disposable = { dispose: () => { notifyCancellation = undefined; } };
+      notifyCancellation = () => listener.call(thisArgs, undefined);
+      disposables?.push(disposable);
+      return disposable;
+    },
+  };
+  return {
+    token,
+    cancel: () => {
+      cancellationRequested = true;
+      notifyCancellation?.();
+    },
+  };
+}
 
 describe('relay HTTP safety', () => {
   it('refuses redirects for authenticated Relay requests', async () => {
@@ -29,22 +51,14 @@ describe('relay HTTP safety', () => {
   });
 
   it('reports VS Code cancellation as the fetch abort source', async () => {
-    let cancelListener: (() => void) | undefined;
-    const token = {
-      isCancellationRequested: false,
-      onCancellationRequested: (listener: () => void) => {
-        cancelListener = listener;
-        return { dispose() {} };
-      },
-    };
+    const cancellation = controlledCancellationToken();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => new Promise((_, reject) => {
       init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
     }));
     const onSettled = vi.fn();
-    const pending = fetchWithResponseTimeout('https://example.test', {}, 1_000, token, onSettled);
+    const pending = fetchWithResponseTimeout('https://example.test', {}, 1_000, cancellation.token, onSettled);
 
-    token.isCancellationRequested = true;
-    cancelListener?.();
+    cancellation.cancel();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(onSettled).toHaveBeenCalledWith({
       responseReceived: false,
@@ -126,19 +140,12 @@ describe('relay HTTP safety', () => {
   });
 
   it('cancels while reading a JSON body without retrying', async () => {
-    let cancelListener: (() => void) | undefined;
-    const token = {
-      isCancellationRequested: false,
-      onCancellationRequested: (listener: () => void) => {
-        cancelListener = listener;
-        return { dispose() {} };
-      },
-    };
+    const cancellation = controlledCancellationToken();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
       new ReadableStream<Uint8Array>({ start() {} }),
     ));
-    const pending = fetchJsonWithRetry('https://example.test/models', {}, 1_000, token);
-    cancelListener?.();
+    const pending = fetchJsonWithRetry('https://example.test/models', {}, 1_000, cancellation.token);
+    cancellation.cancel();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -152,21 +159,14 @@ describe('relay HTTP safety', () => {
   });
 
   it('cancels a stream reader when the cancellation token fires', async () => {
-    let cancelListener: (() => void) | undefined;
-    const token = {
-      isCancellationRequested: false,
-      onCancellationRequested: (listener: () => void) => {
-        cancelListener = listener;
-        return { dispose() {} };
-      },
-    };
+    const cancellation = controlledCancellationToken();
     const cancel = vi.fn();
     const reader = {
       read: () => new Promise<never>(() => undefined),
       cancel,
     } as unknown as ReadableStreamDefaultReader<Uint8Array>;
-    const pending = readWithIdleTimeout(reader, 1_000, token);
-    cancelListener?.();
+    const pending = readWithIdleTimeout(reader, 1_000, cancellation.token);
+    cancellation.cancel();
     await expect(pending).rejects.toMatchObject({ name: 'CancellationError' });
     expect(cancel).toHaveBeenCalledOnce();
   });
@@ -190,20 +190,13 @@ describe('relay HTTP safety', () => {
   });
 
   it('preserves cancellation while reading an error response body', async () => {
-    let cancelListener: (() => void) | undefined;
-    const token = {
-      isCancellationRequested: false,
-      onCancellationRequested: (listener: () => void) => {
-        cancelListener = listener;
-        return { dispose() {} };
-      },
-    };
+    const cancellation = controlledCancellationToken();
     const pending = throwIfNotOk(new Response(
       new ReadableStream<Uint8Array>({ start() {} }),
       { status: 500 },
-    ), 1_000, token);
+    ), 1_000, cancellation.token);
 
-    cancelListener?.();
+    cancellation.cancel();
     await expect(pending).rejects.toMatchObject({ name: 'CancellationError' });
   });
 

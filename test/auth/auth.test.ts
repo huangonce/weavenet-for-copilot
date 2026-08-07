@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AuthManager, profileSecretKey } from '../../src/auth/auth';
 import {
+  CATALOG_ARTIFACT_PEPPER_SECRET,
   CHATGPT_API_KEY_SECRET,
   CLAUDE_API_KEY_SECRET,
   LEGACY_API_KEY_SECRET,
@@ -39,6 +40,30 @@ function legacyProfileKey(name: string): string {
 }
 
 describe('Relay API key storage', () => {
+  it('creates one installation-local catalog artifact pepper in SecretStorage', async () => {
+    const secrets = new InMemorySecrets();
+    const first = new AuthManager(secrets as never);
+
+    const pepper = await first.getCatalogArtifactPepper();
+
+    expect(pepper).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(secrets.values.get(CATALOG_ARTIFACT_PEPPER_SECRET)).toBe(pepper);
+    await expect(first.getCatalogArtifactPepper()).resolves.toBe(pepper);
+    await expect(new AuthManager(secrets as never).getCatalogArtifactPepper()).resolves.toBe(pepper);
+  });
+
+  it('uses a stable process-local pepper when SecretStorage cannot persist it', async () => {
+    const secrets = new FailingSecrets();
+    secrets.failStoreKey = CATALOG_ARTIFACT_PEPPER_SECRET;
+    const auth = new AuthManager(secrets as never);
+
+    const pepper = await auth.getCatalogArtifactPepper();
+
+    expect(pepper).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(secrets.values.has(CATALOG_ARTIFACT_PEPPER_SECRET)).toBe(false);
+    await expect(auth.getCatalogArtifactPepper()).resolves.toBe(pepper);
+  });
+
   it('isolates API keys by stable profile UUID and prefers the UUID key', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);

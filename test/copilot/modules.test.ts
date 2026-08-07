@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import type { ConnectionProfile } from '../../src/config/config';
 import type { RoutedModel } from '../../src/relay/types';
 import {
+  CATALOG_ARTIFACT_PEPPER_SECRET,
   RELAY_API_KEY_SECRET,
   LEGACY_API_KEY_SECRET,
   OPENAI_API_KEY_SECRET,
@@ -19,10 +20,12 @@ import {
 } from '../../src/copilot/connectionRuntimeManager';
 import { ModelCatalogService } from '../../src/copilot/modelCatalogService';
 import { ModelSnapshotStore } from '../../src/copilot/modelSnapshotStore';
+import type { ModelSnapshotRecord } from '../../src/copilot/modelSnapshotStore';
 import { currentProfileFingerprint, diagnosticsOptions } from '../../src/copilot/connectionDiagnosticsStore';
 import { InMemoryMemento } from '../support/memento';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
+const CATALOG_REVISION = 'a'.repeat(64);
 const WORK_PROFILE: ConnectionProfile = {
   id: WORK_ID,
   name: 'work',
@@ -92,8 +95,9 @@ describe('modelCatalogService', () => {
   it('maps non-empty snapshot routes into a map', () => {
     const service = new ModelCatalogService(new ModelSnapshotStore(new InMemoryMemento()), debug);
     const map = service.snapshotMap({
-      schemaVersion: 1,
+      schemaVersion: 2,
       profileId: WORK_ID,
+      catalogRevision: CATALOG_REVISION,
       savedAt: 1,
       snapshots: { openai: [routedModel()], chatgpt: [], claude: [] },
       models: [routedModel()],
@@ -106,10 +110,12 @@ describe('modelCatalogService', () => {
   it('restores a stored snapshot and persists new ones', async () => {
     const store = new ModelSnapshotStore(new InMemoryMemento());
     const service = new ModelCatalogService(store, debug);
-    expect(service.restore(WORK_ID)).toBeUndefined();
-    const snapshots = new Map([['openai', [routedModel()]] as const]);
-    await service.persistSnapshot(WORK_ID, snapshots, [routedModel()]);
-    expect(service.restore(WORK_ID)?.models).toHaveLength(1);
+    expect(service.restore(WORK_ID, CATALOG_REVISION)).toBeUndefined();
+    const snapshots = new Map<RoutedModel['route'], RoutedModel[]>([
+      ['openai', [routedModel()]],
+    ]);
+    await service.persistSnapshot(WORK_ID, CATALOG_REVISION, snapshots, [routedModel()]);
+    expect(service.restore(WORK_ID, CATALOG_REVISION)?.models).toHaveLength(1);
   });
 
   it('swallows snapshot store failures instead of breaking refresh', async () => {
@@ -119,7 +125,7 @@ describe('modelCatalogService', () => {
     const memento = new InMemoryMemento();
     memento.failUpdates = true;
     const service = new ModelCatalogService(new ModelSnapshotStore(memento), debug);
-    await expect(service.persistSnapshot(WORK_ID, new Map(), [])).resolves.toBeUndefined();
+    await expect(service.persistSnapshot(WORK_ID, CATALOG_REVISION, new Map(), [])).resolves.toBeUndefined();
     await expect(service.clearSnapshot(WORK_PROFILE)).resolves.toBeUndefined();
     await expect(service.deleteProfile(WORK_ID)).resolves.toBeUndefined();
     await expect(service.clearAll()).resolves.toBeUndefined();
@@ -160,18 +166,101 @@ describe('connectionRuntimeManager helpers', () => {
     expect(order).toEqual(['bindings', 'status', 'catalog']);
   });
 
+  it('publishes a restored catalog before refresh completes and settles cancellation as degraded', async () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: <T>(_key: string) => undefined as T,
+      inspect: <T>(key: string) => key === 'profiles'
+        ? { globalValue: [WORK_PROFILE] as T }
+        : undefined,
+    } as never);
+    const restoredModel = routedModel({
+      id: 'gpt-restored',
+      pickerId: 'gpt-restored',
+      upstreamId: 'gpt-restored',
+    });
+    const restore = vi.fn((_profileId: string, catalogRevision: string): ModelSnapshotRecord => ({
+      schemaVersion: 2,
+      profileId: WORK_ID,
+      catalogRevision,
+      savedAt: Date.now(),
+      snapshots: { openai: [restoredModel], chatgpt: [], claude: [] },
+      models: [restoredModel],
+    }));
+    let rejectLoad!: (reason?: unknown) => void;
+    let markLoadStarted!: () => void;
+    const loadStarted = new Promise<void>((resolve) => { markLoadStarted = resolve; });
+    const pendingLoad = new Promise<never>((_resolve, reject) => { rejectLoad = reject; });
+    const load = vi.fn(() => {
+      markLoadStarted();
+      return pendingLoad;
+    });
+    const publishedModelCounts: number[] = [];
+    const manager = new ConnectionRuntimeManager({
+      auth: {
+        getApiKey: vi.fn().mockResolvedValue('key'),
+        getCatalogArtifactPepper: vi.fn().mockResolvedValue('p'.repeat(43)),
+      } as never,
+      diagnosticsStore: { get: vi.fn() } as never,
+      catalog: {
+        restore,
+        snapshotMap: (record: ModelSnapshotRecord) => new Map([
+          ['openai', record.snapshots.openai],
+        ]),
+        load,
+      } as never,
+      debug: vi.fn(),
+      rebuildBindings: () => {
+        publishedModelCounts.push(manager.getRuntimes()
+          .reduce((count, runtime) => count + runtime.models.length, 0));
+      },
+      onStatusChanged: vi.fn(),
+      onCatalogChanged: vi.fn(),
+    });
+    let refreshSettled = false;
+
+    const refresh = manager.refreshAll(false).finally(() => { refreshSettled = true; });
+    await loadStarted;
+
+    expect(refreshSettled).toBe(false);
+    expect(restore).toHaveBeenCalledWith(WORK_ID, expect.stringMatching(/^[a-f0-9]{64}$/u));
+    expect(manager.getRuntime(WORK_ID)?.models).toEqual([restoredModel]);
+    expect(publishedModelCounts).toContain(1);
+
+    rejectLoad(new vscode.CancellationError());
+    await expect(refresh).resolves.toBeUndefined();
+
+    expect(manager.getRuntime(WORK_ID)).toMatchObject({
+      phase: 'degraded',
+      resolved: false,
+      models: [restoredModel],
+    });
+  });
+
   it('computes a stable catalog revision from profile settings', () => {
     const values: Record<string, unknown> = {};
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
       get: <T>(key: string) => values[key] as T | undefined,
     } as never);
-    const first = catalogRevision(WORK_PROFILE);
-    const second = catalogRevision(WORK_PROFILE);
+    const profile = {
+      ...WORK_PROFILE,
+      requestHeaders: { 'X-Tenant': 'team-a', 'X-Region': 'west' },
+    };
+    const first = catalogRevision(profile);
+    const second = catalogRevision(profile);
+    expect(first).toMatch(/^[a-f0-9]{64}$/u);
     expect(first).toBe(second);
-    expect(catalogRevision({ ...WORK_PROFILE, baseUrl: 'https://other.example.test/v1' })).not.toBe(first);
+    expect(catalogRevision({
+      ...profile,
+      requestHeaders: { 'x-region': 'west', 'x-tenant': 'team-a' },
+    })).toBe(first);
+    expect(catalogRevision({
+      ...profile,
+      requestHeaders: { 'X-Tenant': 'team-b', 'X-Region': 'west' },
+    })).not.toBe(first);
+    expect(catalogRevision({ ...profile, baseUrl: 'https://other.example.test/v1' })).not.toBe(first);
 
     values.openaiApiStrategy = 'responses';
-    expect(catalogRevision(WORK_PROFILE)).not.toBe(first);
+    expect(catalogRevision(profile)).not.toBe(first);
   });
 
   it('detects cancellation errors by instance and by name', () => {
@@ -194,6 +283,7 @@ describe('connectionRuntimeManager helpers', () => {
     expect(isWeaveNetSecretKey(OPENAI_API_KEY_SECRET)).toBe(true);
     expect(isWeaveNetSecretKey(CHATGPT_API_KEY_SECRET)).toBe(true);
     expect(isWeaveNetSecretKey(CLAUDE_API_KEY_SECRET)).toBe(true);
+    expect(isWeaveNetSecretKey(CATALOG_ARTIFACT_PEPPER_SECRET)).toBe(false);
     expect(isWeaveNetSecretKey('weavenet.somethingElse')).toBe(false);
   });
 });

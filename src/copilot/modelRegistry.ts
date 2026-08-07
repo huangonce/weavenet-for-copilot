@@ -27,6 +27,7 @@ export interface ModelLoadResult {
 export async function loadAllModels(
   config: ExtensionConfig,
   apiKey: string | undefined,
+  catalogRevision: string,
   debug: DebugLogger,
   previousSnapshots: ReadonlyMap<RoutedModel['route'], RoutedModel[]> = new Map(),
   token?: vscode.CancellationToken,
@@ -40,7 +41,7 @@ export async function loadAllModels(
     routes.push({
       name: 'openai',
       task: loadModelsForProtocol(
-        'openai', 'openai', apiKey, config, configuredOpenAIApis, debug, token, forceProbe,
+        'openai', 'openai', apiKey, config, catalogRevision, configuredOpenAIApis, debug, token, forceProbe,
       ),
     });
   }
@@ -83,6 +84,7 @@ async function loadModelsForProtocol(
   route: RoutedModel['route'],
   apiKey: string,
   config: ExtensionConfig,
+  catalogRevision: string,
   configuredOpenAIApis: ReadonlyMap<string, OpenAIApiVariant>,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
@@ -105,7 +107,7 @@ async function loadModelsForProtocol(
   // Claude models. Route selection happens per model ID above.
   const filtered = filterModels(enrichModelsWithOpenRouter(routed), config);
   const withResponsesProbe = await applyResponsesProtocolProbes(
-    client, filtered, config, configuredOpenAIApis, debug, token, forceProbe,
+    client, filtered, config, catalogRevision, configuredOpenAIApis, debug, token, forceProbe,
   );
   debug(config, `[models] loaded: protocol=${protocol}, count=${withResponsesProbe.length}, elapsedMs=${Date.now() - startedAt}`);
   return withResponsesProbe;
@@ -128,12 +130,17 @@ async function applyResponsesProtocolProbes(
   client: RelayClient,
   models: RoutedModel[],
   config: ExtensionConfig,
+  catalogRevision: string,
   configuredOpenAIApis: ReadonlyMap<string, OpenAIApiVariant>,
   debug: DebugLogger,
   token?: vscode.CancellationToken,
   forceProbe = false,
 ): Promise<RoutedModel[]> {
-  if (forceProbe) responsesProbeCache.clearProfile(config.profileId);
+  if (forceProbe) await responsesProbeCache.clearProfile(config.profileId);
+  const probeScope = {
+    profileId: config.profileId,
+    catalogRevision,
+  };
 
   const openaiModels = models.filter((model) => model.protocol === 'openai');
   if (openaiModels.length === 0) return models;
@@ -166,18 +173,18 @@ async function applyResponsesProtocolProbes(
   // id so one model never pays for parallel duplicate POSTs.
   const uniqueModels = [...new Map(probeCandidates.map((model) => [model.upstreamId, model])).values()];
   const uncached = uniqueModels.filter(
-    (model) => responsesProbeCache.get(config.profileId, model.upstreamId) === undefined,
+    (model) => responsesProbeCache.get(probeScope, model.upstreamId) === undefined,
   );
   const probed = new Map<string, 'chat' | 'responses'>();
   await mapWithConcurrency(uncached, RESPONSES_PROBE_CONCURRENCY, async (model) => {
     try {
       await client.testOpenAIResponses(model.upstreamId, false, token);
       probed.set(model.upstreamId, 'responses');
-      responsesProbeCache.set(config.profileId, model.upstreamId, 'responses', ttlMs);
+      responsesProbeCache.set(probeScope, model.upstreamId, 'responses', ttlMs);
     } catch (error) {
       if (isDefinitiveProbeFailure(error)) {
         probed.set(model.upstreamId, 'chat');
-        responsesProbeCache.set(config.profileId, model.upstreamId, 'chat', ttlMs);
+        responsesProbeCache.set(probeScope, model.upstreamId, 'chat', ttlMs);
         debug(config, `[models] model=${model.upstreamId} does not support /responses: ${formatLogError(error)}`);
       } else {
         // Transient failures (timeouts, 429/5xx, network, cancellation) are
@@ -196,7 +203,7 @@ async function applyResponsesProtocolProbes(
     );
     if (selection !== 'auto') return withOpenAIApi(model, selection);
     if (!probeKeys.has(modelCatalogKey(model))) return model;
-    const verdict = responsesProbeCache.get(config.profileId, model.upstreamId) ?? probed.get(model.upstreamId) ?? 'chat';
+    const verdict = responsesProbeCache.get(probeScope, model.upstreamId) ?? probed.get(model.upstreamId) ?? 'chat';
     if (verdict !== 'responses') return model;
     responsesCount++;
     return { ...model, openaiApi: 'responses' as const };

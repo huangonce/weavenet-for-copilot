@@ -32,7 +32,7 @@ describe('sanitizeJsonSchema', () => {
     Object.defineProperty(properties, '__proto__', {
       value: { type: 'string' }, enumerable: true, writable: true, configurable: true,
     });
-    properties.constructor = { type: 'number' };
+    properties['constructor'] = { type: 'number' };
     properties.prototype = { type: 'boolean' };
     const schema = { type: 'object', properties, required: ['__proto__', 'constructor', 'prototype'], additionalProperties: false };
 
