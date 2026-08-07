@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExtensionConfig } from '../../src/config/config';
 import { RelayRequestError } from '../../src/relay/errors';
 import type { RoutedModel } from '../../src/relay/types';
@@ -21,11 +21,15 @@ vi.mock('../../src/relay/client', () => ({
 }));
 
 vi.mock('../../src/metadata/openrouterFallback', async (importOriginal) => {
-  const actual = await importOriginal<OpenRouterFallbackModule>();
+  const actual = await importOriginal<typeof OpenRouterFallbackModule>();
   return { ...actual, scheduleOpenRouterRefresh: vi.fn() };
 });
 
 import { loadAllModels } from '../../src/copilot/modelRegistry';
+import { responsesProbeCache } from '../../src/relay/responsesProbeCache';
+
+const REV_A = 'a'.repeat(64);
+const REV_B = 'b'.repeat(64);
 
 const baseConfig = {
   profileId: 'profile-0',
@@ -76,11 +80,15 @@ beforeEach(() => {
   clientMocks.testOpenAIResponses.mockResolvedValue(undefined);
 });
 
+afterEach(() => {
+  responsesProbeCache.clear();
+});
+
 describe('Responses endpoint probing during model load', () => {
   it('forces chat globally and skips both Responses probes', async () => {
     config = { ...config, openaiApiStrategy: 'chat' };
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).every((model) => model.openaiApi === 'chat')).toBe(true);
     expect(models.find((model) => model.upstreamId === 'claude-x')?.openaiApi).toBeUndefined();
@@ -95,7 +103,7 @@ describe('Responses endpoint probing during model load', () => {
       models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'chat' }],
     };
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
@@ -111,7 +119,7 @@ describe('Responses endpoint probing during model load', () => {
       models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'responses' }],
     };
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).every((model) => model.openaiApi === 'chat')).toBe(true);
     expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
@@ -124,7 +132,7 @@ describe('Responses endpoint probing during model load', () => {
       models: [{ id: 'gpt-a', route: 'openai', openaiApi: 'chat' }],
     };
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
@@ -142,7 +150,7 @@ describe('Responses endpoint probing during model load', () => {
       ],
     };
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-a')?.openaiApi).toBe('chat');
     expect(openaiModels(models).find((model) => model.upstreamId === 'gpt-b')?.openaiApi).toBe('responses');
@@ -153,7 +161,7 @@ describe('Responses endpoint probing during model load', () => {
   it('short-circuits with zero POST probes when the endpoint is unsupported', async () => {
     clientMocks.probeResponsesEndpoint.mockResolvedValue('unsupported');
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.probeResponsesEndpoint).toHaveBeenCalledOnce();
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
@@ -161,7 +169,7 @@ describe('Responses endpoint probing during model load', () => {
   });
 
   it('probes each uncached OpenAI model and marks supported ones as responses', async () => {
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     const openai = openaiModels(models);
     expect(openai).toHaveLength(2);
@@ -172,7 +180,7 @@ describe('Responses endpoint probing during model load', () => {
   });
 
   it('keeps Claude models untouched by probing', async () => {
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     const claude = models.filter((model) => model.upstreamId.startsWith('claude-'));
     expect(claude).toHaveLength(1);
@@ -183,27 +191,46 @@ describe('Responses endpoint probing during model load', () => {
   it('falls back to chat when a per-model probe fails', async () => {
     clientMocks.testOpenAIResponses.mockRejectedValue(new Error('unsupported model'));
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(openaiModels(models).every((model) => model.openaiApi === undefined)).toBe(true);
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
   });
 
   it('reuses cached verdicts and skips POST probes on refresh', async () => {
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     clientMocks.testOpenAIResponses.mockClear();
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
     expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
   });
 
+  it('re-probes the same profile and model after the API key identity changes', async () => {
+    clientMocks.listModels.mockResolvedValue({ data: [{ id: 'gpt-a' }] });
+
+    const first = await loadAllModels(config, 'identity-a-key', REV_A, () => {});
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledOnce();
+    expect(openaiModels(first.models)[0]?.openaiApi).toBe('responses');
+
+    clientMocks.testOpenAIResponses.mockClear();
+    clientMocks.testOpenAIResponses.mockRejectedValue(
+      new RelayRequestError('unsupported model', 400, 'json'),
+    );
+
+    const second = await loadAllModels(config, 'identity-b-key', REV_B, () => {});
+
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledOnce();
+    expect(clientMocks.testOpenAIResponses).toHaveBeenCalledWith('gpt-a', false, undefined);
+    expect(openaiModels(second.models)[0]?.openaiApi).not.toBe('responses');
+  });
+
   it('still probes when the endpoint availability is unknown', async () => {
     clientMocks.probeResponsesEndpoint.mockResolvedValue('unknown');
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
@@ -212,11 +239,11 @@ describe('Responses endpoint probing during model load', () => {
   it('retries transient probe failures on the next refresh instead of caching chat', async () => {
     clientMocks.testOpenAIResponses.mockRejectedValue(new TypeError('network down'));
 
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
 
     clientMocks.testOpenAIResponses.mockResolvedValue(undefined);
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     // Nothing was cached, so the retry re-probes and now succeeds.
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(4);
@@ -228,37 +255,37 @@ describe('Responses endpoint probing during model load', () => {
       new RelayRequestError('unsupported model', 400, 'json'),
     );
 
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
 
     clientMocks.testOpenAIResponses.mockClear();
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
   });
 
   it('re-probes when a user-invoked refresh forces cache invalidation', async () => {
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     clientMocks.testOpenAIResponses.mockClear();
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {}, new Map(), undefined, true);
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {}, new Map(), undefined, true);
 
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     expect(openaiModels(models).every((model) => model.openaiApi === 'responses')).toBe(true);
   });
 
   it('clears cached verdicts on a forced refresh even while probing is disabled', async () => {
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
     clientMocks.testOpenAIResponses.mockClear();
 
     config = { ...config, openaiApiStrategy: 'chat' };
-    await loadAllModels(config, 'secret-key', () => {}, new Map(), undefined, true);
+    await loadAllModels(config, 'secret-key', REV_A, () => {}, new Map(), undefined, true);
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
 
     config = { ...config, openaiApiStrategy: 'auto' };
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
   });
 
@@ -268,14 +295,14 @@ describe('Responses endpoint probing during model load', () => {
     const second = { ...config, baseUrl: sharedUrl, profileId: 'profile-b' } as unknown as ExtensionConfig;
     clientMocks.testOpenAIResponses.mockResolvedValue(undefined);
 
-    await loadAllModels(first, 'key-a', () => {});
+    await loadAllModels(first, 'key-a', REV_A, () => {});
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
 
     clientMocks.testOpenAIResponses.mockRejectedValue(
       new RelayRequestError('unsupported model', 400, 'json'),
     );
     clientMocks.testOpenAIResponses.mockClear();
-    const { models } = await loadAllModels(second, 'key-b', () => {});
+    const { models } = await loadAllModels(second, 'key-b', REV_A, () => {});
 
     // profile-a's positive verdict must not leak into profile-b.
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(2);
@@ -287,7 +314,7 @@ describe('Responses endpoint probing during model load', () => {
       data: [{ id: 'gpt-a' }, { id: 'gpt-a' }, { id: 'claude-x' }],
     });
 
-    const { models } = await loadAllModels(config, 'secret-key', () => {});
+    const { models } = await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.testOpenAIResponses).toHaveBeenCalledTimes(1);
     const matched = openaiModels(models).filter((model) => model.openaiApi === 'responses');
@@ -298,7 +325,7 @@ describe('Responses endpoint probing during model load', () => {
   it('skips probing entirely when no OpenAI models are present', async () => {
     clientMocks.listModels.mockResolvedValue({ data: [{ id: 'claude-x' }] });
 
-    await loadAllModels(config, 'secret-key', () => {});
+    await loadAllModels(config, 'secret-key', REV_A, () => {});
 
     expect(clientMocks.probeResponsesEndpoint).not.toHaveBeenCalled();
     expect(clientMocks.testOpenAIResponses).not.toHaveBeenCalled();
@@ -329,7 +356,7 @@ describe('fixed models merged into the discovered catalog', () => {
       models: [{ id: 'gpt-a', route: 'openai', openai: { encryptedReasoning: true } }],
     };
 
-    const model = (await loadAllModels(config, 'secret-key', () => {})).models
+    const model = (await loadAllModels(config, 'secret-key', REV_A, () => {})).models
       .find((entry) => entry.upstreamId === 'gpt-a');
 
     expect(model).toMatchObject({
@@ -362,7 +389,7 @@ describe('fixed models merged into the discovered catalog', () => {
       }],
     };
 
-    const model = (await loadAllModels(config, 'secret-key', () => {})).models
+    const model = (await loadAllModels(config, 'secret-key', REV_A, () => {})).models
       .find((entry) => entry.upstreamId === 'gpt-a');
 
     expect(model).toMatchObject({ name: 'Pinned GPT A', toolCalling: false, imageInput: true });

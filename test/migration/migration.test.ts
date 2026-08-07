@@ -39,16 +39,16 @@ describe('legacy installation reset', () => {
     settings.clear();
     workspaceSettings.clear();
     folderSettings.clear();
-    vi.spyOn(vscode.workspace, 'getConfiguration').mockImplementation((_section?: string, resource?: { toString(): string }) => {
-      const values = resource ? folderSettings : settings;
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockImplementation((_section?: string, scope?: vscode.ConfigurationScope | null) => {
+      const values = scope ? folderSettings : settings;
       return {
-        inspect: <T>(key: string) => resource
+        inspect: <T>(key: string) => scope
           ? ({ workspaceFolderValue: values.get(key) as T | undefined })
           : ({ globalValue: settings.get(key) as T | undefined, workspaceValue: workspaceSettings.get(key) as T | undefined }),
         update: async (key: string, value: unknown, target?: vscode.ConfigurationTarget) => {
           const destination = target === vscode.ConfigurationTarget.Workspace
             ? workspaceSettings
-            : target === vscode.ConfigurationTarget.WorkspaceFolder || resource
+            : target === vscode.ConfigurationTarget.WorkspaceFolder || scope
               ? folderSettings
               : settings;
           if (value === undefined) destination.delete(key);

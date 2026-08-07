@@ -1,5 +1,38 @@
 import { describe, expect, it } from 'vitest';
+import type { ExtensionConfig } from '../../src/config/config';
 import { assignUniquePickerIds, filterModels, fromConfiguredModel, isClaudeModelId, resolveOpenAIApiVariant, supportsImageInputForModel, toChatInformation, toRoutedModel } from '../../src/relay/models';
+
+function extensionConfig(overrides: Partial<ExtensionConfig> = {}): ExtensionConfig {
+  return {
+    baseUrl: 'https://relay.example.test/v1',
+    anthropicVersion: '2023-06-01',
+    openaiApiStrategy: 'chat',
+    openaiPromptCaching: true,
+    openaiPromptCacheKey: '',
+    claudePromptCaching: 'automatic',
+    claudePromptCachingTTL: '5m',
+    requestTimeoutMs: 100,
+    streamIdleTimeoutMs: 100,
+    debug: false,
+    modelNamePrefix: 'WeaveNet',
+    includeModels: [],
+    excludeModels: [],
+    maxInputTokens: 100_000,
+    maxOutputTokens: 8_000,
+    sendMaxTokens: false,
+    supportsToolCalling: true,
+    supportsImageInput: false,
+    imageInputModels: [],
+    disabledImageInputModels: [],
+    visionProxyEnabled: false,
+    visionProxyModel: '',
+    visionProxyPrompt: '',
+    metadataRefreshHours: 6,
+    requestHeaders: {},
+    models: [],
+    ...overrides,
+  };
+}
 
 describe('model routing', () => {
   it('creates unique picker IDs only for colliding upstream IDs', () => {
@@ -97,17 +130,12 @@ describe('model routing', () => {
   });
 
   it('filters, sorts, and formats models for the picker', () => {
-    const config = {
-      modelNamePrefix: 'WeaveNet',
-      maxInputTokens: 100_000,
-      maxOutputTokens: 8_000,
-      supportsToolCalling: true,
-      supportsImageInput: false,
+    const config = extensionConfig({
       imageInputModels: [/vision/],
       disabledImageInputModels: [/disabled/],
       includeModels: [/gpt|vision/],
       excludeModels: [/beta/],
-    } as never;
+    });
     const models = [
       toRoutedModel({ id: 'z-gpt', owned_by: 'relay' }, 'openai'),
       toRoutedModel({ id: 'a-vision', capabilities: { tool_calling: true, vision: true } }, 'openai'),
@@ -130,17 +158,10 @@ describe('model routing', () => {
   });
 
   it('advertises opt-in proxy vision in the picker without changing native model capability', () => {
-    const config = {
-      modelNamePrefix: 'WeaveNet',
-      maxInputTokens: 100_000,
-      maxOutputTokens: 8_000,
-      supportsToolCalling: true,
-      supportsImageInput: false,
-      imageInputModels: [],
-      disabledImageInputModels: [],
+    const config = extensionConfig({
       visionProxyEnabled: true,
       visionProxyModel: 'copilot/gpt-4o',
-    } as never;
+    });
     const model = toRoutedModel({ id: 'deepseek-chat' }, 'openai');
 
     expect(supportsImageInputForModel(model.id, config)).toBe(false);

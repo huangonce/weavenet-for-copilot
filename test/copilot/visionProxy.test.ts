@@ -837,7 +837,7 @@ describe('installed vision model selection and streaming', () => {
       maxInputTokens: 1,
       sendRequest: vi.fn(),
       countTokens: vi.fn(),
-    } as never;
+    } as vscode.LanguageModelChat;
     const select = vi.spyOn(vscode.lm, 'selectChatModels').mockResolvedValue([
       { ...selected, id: 'not-exact' },
       selected,

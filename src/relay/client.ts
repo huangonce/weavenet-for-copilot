@@ -7,7 +7,7 @@ import type {
   StreamCallbacks,
 } from './types';
 import { streamClaudeMessages } from './claude';
-import { isReservedRelayHeader } from './headers';
+import { canonicalRelayHeaders } from './headers';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata } from './http';
 import { streamOpenAIChatCompletion } from './openai';
 import { streamOpenAIResponses } from './openaiResponses';
@@ -149,14 +149,7 @@ export class RelayClient {
 
   private headersFor(authScheme: 'bearer' | 'x-api-key'): Record<string, string> {
     const headers = new Headers();
-    for (const [key, value] of Object.entries(this.options.requestHeaders)) {
-      if (isReservedRelayHeader(key)) continue;
-      try {
-        headers.set(key, value);
-      } catch {
-        // Ignore malformed user-provided headers from manually edited settings.
-      }
-    }
+    for (const [key, value] of canonicalRelayHeaders(this.options.requestHeaders)) headers.set(key, value);
     if (authScheme === 'x-api-key') {
       headers.set('x-api-key', this.options.apiKey);
       return Object.fromEntries(headers.entries());

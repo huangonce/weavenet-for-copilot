@@ -16,7 +16,10 @@ import type { ConnectionDiagnosticsStore } from './connectionDiagnosticsStore';
 import type { ModelCatalogService } from './modelCatalogService';
 import type { RoutedModel } from '../relay/types';
 import { responsesProbeCache } from '../relay/responsesProbeCache';
+import { catalogArtifactRevision, catalogRevision } from './catalogIdentity';
 import { formatLogError } from './requestDiagnostics';
+
+export { catalogRevision } from './catalogIdentity';
 
 export type ModelRefreshIntent = 'passive' | 'invalidate';
 
@@ -44,6 +47,8 @@ export interface ConnectionStatusEntry {
 export interface ConnectionRuntime {
   profile: ConnectionProfile;
   revision: string;
+  /** Credential-bound identity for persisted snapshots and probe verdicts. */
+  artifactRevision?: string;
   models: RoutedModel[];
   snapshots: Map<RoutedModel['route'], RoutedModel[]>;
   generation: number;
@@ -96,7 +101,7 @@ export class ConnectionRuntimeManager {
     let changed = false;
     for (const [id, runtime] of this.runtimes) {
       if (ids.has(id)) continue;
-      responsesProbeCache.clearProfile(id);
+      void responsesProbeCache.clearProfile(id);
       void this.options.catalog.deleteProfile(id);
       runtime.generation++;
       this.runtimes.delete(id);
@@ -106,13 +111,12 @@ export class ConnectionRuntimeManager {
       const revision = catalogRevision(profile);
       const existing = this.runtimes.get(profile.id);
       if (!existing) {
-        // Restore the last successful model catalog so the picker stays
-        // populated even if the relay is unreachable right after a restart.
-        const restored = this.options.catalog.restore(profile.id);
         this.runtimes.set(profile.id, {
           profile, revision,
-          models: restored?.models ?? [],
-          snapshots: restored ? this.options.catalog.snapshotMap(restored) : new Map(),
+          // Snapshot restoration waits until the API key is available so the
+          // store can prove the record belongs to this exact credential.
+          models: [],
+          snapshots: new Map(),
           generation: 0, resolved: false, phase: 'refreshing',
           lastDiagnostics: this.options.diagnosticsStore.get(profile, diagnosticsOptions()),
         });
@@ -120,11 +124,12 @@ export class ConnectionRuntimeManager {
       } else if (existing.revision !== revision) {
         // baseUrl, headers or fixed models changed: prior probe verdicts and
         // model snapshots no longer apply to this profile.
-        responsesProbeCache.clearProfile(profile.id);
+        void responsesProbeCache.clearProfile(profile.id);
         void this.options.catalog.deleteProfile(profile.id);
         existing.generation++;
         existing.profile = profile;
         existing.revision = revision;
+        existing.artifactRevision = undefined;
         existing.models = [];
         existing.snapshots.clear();
         existing.resolved = false;
@@ -166,25 +171,39 @@ export class ConnectionRuntimeManager {
     this.syncProfiles();
     const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
     if (!profileId) {
-      await this.options.diagnosticsStore.clear();
-      await this.options.catalog.clearAll();
-      responsesProbeCache.clear();
       for (const runtime of this.runtimes.values()) {
         runtime.lastDiagnostics = undefined;
         runtime.generation++;
         runtime.resolved = false;
+        runtime.artifactRevision = undefined;
+        runtime.models = [];
+        runtime.snapshots.clear();
+        runtime.phase = 'refreshing';
+        runtime.message = undefined;
       }
+      this.rebuildAggregates();
+      await this.options.diagnosticsStore.clear();
+      await this.options.catalog.clearAll();
+      await responsesProbeCache.clear();
       await this.refreshAll(false);
       return;
     }
+    const runtime = this.runtimes.get(profileId);
+    if (runtime) {
+      runtime.lastDiagnostics = undefined;
+      runtime.generation++;
+      runtime.resolved = false;
+      runtime.artifactRevision = undefined;
+      runtime.models = [];
+      runtime.snapshots.clear();
+      runtime.phase = 'refreshing';
+      runtime.message = undefined;
+      this.rebuildAggregates();
+    }
     await this.options.diagnosticsStore.deleteProfile(profileId);
     await this.options.catalog.deleteProfile(profileId);
-    responsesProbeCache.clearProfile(profileId);
-    const runtime = this.runtimes.get(profileId);
+    await responsesProbeCache.clearProfile(profileId);
     if (!runtime) return;
-    runtime.lastDiagnostics = undefined;
-    runtime.generation++;
-    runtime.resolved = false;
     await this.requestConnectionRefresh(runtime, false);
   }
 
@@ -233,8 +252,10 @@ export class ConnectionRuntimeManager {
     const profile = runtime.profile;
     const revision = runtime.revision;
     let apiKey: string | undefined;
+    let artifactPepper: string | undefined;
     try {
       apiKey = await this.options.auth.getApiKey(profile);
+      if (apiKey) artifactPepper = await this.options.auth.getCatalogArtifactPepper();
     } catch (error) {
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       runtime.resolved = true;
@@ -247,6 +268,7 @@ export class ConnectionRuntimeManager {
     }
     if (!this.isCurrentRuntime(runtime, generation, revision)) return;
     if (!apiKey) {
+      runtime.artifactRevision = undefined;
       runtime.models = [];
       runtime.snapshots.clear();
       await this.options.catalog.clearSnapshot(profile);
@@ -257,12 +279,36 @@ export class ConnectionRuntimeManager {
       this.rebuildAggregates();
       return;
     }
+    if (!artifactPepper) {
+      runtime.resolved = true;
+      runtime.phase = runtime.models.length ? 'degraded' : 'error';
+      runtime.message = 'Could not prepare secure model catalog storage.';
+      runtime.refreshedAt = Date.now();
+      this.rebuildAggregates();
+      return;
+    }
+    const config = getConfig(profile);
+    const artifactRevision = catalogArtifactRevision(config, apiKey, artifactPepper);
+    const artifactChanged = runtime.artifactRevision !== artifactRevision;
+    if (artifactChanged) {
+      const restored = this.options.catalog.restore(profile.id, artifactRevision);
+      runtime.artifactRevision = artifactRevision;
+      runtime.models = restored?.models ?? [];
+      runtime.snapshots = restored ? this.options.catalog.snapshotMap(restored) : new Map();
+    }
     runtime.phase = 'refreshing';
     runtime.message = undefined;
-    this.rebuildStatus();
-    const config = getConfig(profile);
+    if (artifactChanged) this.rebuildAggregates();
+    else this.rebuildStatus();
     try {
-      const result = await this.options.catalog.load(config, apiKey, new Map(runtime.snapshots), token, forceProbe);
+      const result = await this.options.catalog.load(
+        config,
+        apiKey,
+        artifactRevision,
+        new Map(runtime.snapshots),
+        token,
+        forceProbe,
+      );
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       runtime.models = result.models;
       runtime.snapshots = new Map(result.snapshots);
@@ -271,10 +317,18 @@ export class ConnectionRuntimeManager {
       runtime.message = result.partial ? 'Some Relay model routes could not be refreshed.' : undefined;
       runtime.refreshedAt = Date.now();
       for (const failure of result.failedRoutes) this.options.catalog.reportRouteRefreshFailure(config, failure.route, failure.error);
-      await this.options.catalog.persistSnapshot(profile.id, runtime.snapshots, result.models);
+      await this.options.catalog.persistSnapshot(profile.id, artifactRevision, runtime.snapshots, result.models);
     } catch (error) {
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
-      if (isCancellationError(error)) return;
+      if (isCancellationError(error)) {
+        runtime.resolved = false;
+        runtime.phase = runtime.models.length ? 'degraded' : 'error';
+        runtime.message = runtime.models.length
+          ? 'Model refresh was cancelled; using the last saved catalog.'
+          : undefined;
+        this.rebuildAggregates();
+        return;
+      }
       runtime.resolved = true;
       runtime.phase = runtime.models.length ? 'degraded' : 'error';
       runtime.message = connectionErrorMessage(error);
@@ -316,18 +370,6 @@ export class ConnectionRuntimeManager {
     this.connectionStatus = { phase, connectionCount: connections.length, modelCount, warningCount, refreshingCount, connections };
     this.options.onStatusChanged(this.connectionStatus);
   }
-}
-
-export function catalogRevision(profile: ConnectionProfile): string {
-  const config = getConfig(profile);
-  return JSON.stringify({
-    baseUrl: config.baseUrl,
-    openaiApiStrategy: config.openaiApiStrategy,
-    requestHeaders: config.requestHeaders,
-    includeModels: config.includeModels.map((entry) => entry.source),
-    excludeModels: config.excludeModels.map((entry) => entry.source),
-    models: config.models,
-  });
 }
 
 async function mapWithConcurrency<T>(

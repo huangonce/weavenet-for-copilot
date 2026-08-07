@@ -543,6 +543,7 @@
     "vscode:prepublish": "npm run compile",
     "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "compile": "npm run clean && tsc -p ./",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "watch": "npm run clean && tsc -watch -p ./",
     "lint": "eslint src test",
     "lint:fix": "eslint src test --fix",
@@ -550,9 +551,9 @@
     "test:coverage": "vitest run --coverage",
     "test:integration": "npm run compile && node test/integration/run.cjs",
     "test:watch": "vitest",
-    "package:list": "vsce ls",
-    "package": "vsce package",
-    "publish:marketplace": "vsce publish --skip-duplicate"
+    "package:list": "vsce ls --no-dependencies",
+    "package": "vsce package --no-dependencies",
+    "publish:marketplace": "vsce publish --no-dependencies --skip-duplicate"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -14,6 +14,14 @@ import { clampClaudeTemperature } from '../../src/copilot/helpers';
 import { snapshotChatRequest } from '../../src/copilot/canonicalRequest';
 import type { ClaudeMessage } from '../../src/relay/types';
 
+const LanguageModelThinkingPart = (vscode as unknown as {
+  LanguageModelThinkingPart: new (
+    value: string,
+    id?: string,
+    metadata?: Record<string, unknown>,
+  ) => object;
+}).LanguageModelThinkingPart;
+
 function userMessage(...content: vscode.LanguageModelInputPart[]): vscode.LanguageModelChatRequestMessage {
   return { role: vscode.LanguageModelChatMessageRole.User, content, name: undefined };
 }
@@ -218,7 +226,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('Need to look this up.'),
+        new LanguageModelThinkingPart('Need to look this up.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
       ],
     }] as never;
@@ -234,7 +242,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('Need to look this up.'),
+        new LanguageModelThinkingPart('Need to look this up.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
       ],
     }] as never;
@@ -279,7 +287,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('I need to check.'),
+        new LanguageModelThinkingPart('I need to check.'),
         new vscode.LanguageModelTextPart('Checking now.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', { query: 'relay' }),
         new vscode.LanguageModelTextPart('Found the answer.'),
@@ -300,7 +308,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('Thinking first.'),
+        new LanguageModelThinkingPart('Thinking first.'),
         new vscode.LanguageModelTextPart('The answer.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
         new vscode.LanguageModelToolCallPart('call-2', 'read', {}),
@@ -321,7 +329,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('A short thought.'),
+        new LanguageModelThinkingPart('A short thought.'),
         new vscode.LanguageModelTextPart('The answer.'),
       ],
     }] as never;
@@ -338,7 +346,7 @@ describe('responses input conversion', () => {
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
         new vscode.LanguageModelTextPart('Checking now.'),
-        new vscode.LanguageModelThinkingPart('', 'rs_1', {
+        new LanguageModelThinkingPart('', 'rs_1', {
           weavenetResponsesReasoning: {
             encryptedContent: 'gAAAAA-opaque',
             summary: [{ type: 'summary_text', text: 'Looked it up.' }],
@@ -366,7 +374,7 @@ describe('responses input conversion', () => {
     const messages = [{
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: [
-        new vscode.LanguageModelThinkingPart('Plaintext only.'),
+        new LanguageModelThinkingPart('Plaintext only.'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', {}),
       ],
     }] as never;
@@ -628,8 +636,8 @@ describe('Claude conversion helpers', () => {
       { role: 3, part: new vscode.LanguageModelToolCallPart('call', 'tool', {}) },
       { role: vscode.LanguageModelChatMessageRole.Assistant, part: new vscode.LanguageModelToolResultPart('call', [new vscode.LanguageModelTextPart('result')]) },
       { role: 3, part: new vscode.LanguageModelToolResultPart('call', [new vscode.LanguageModelTextPart('result')]) },
-      { role: vscode.LanguageModelChatMessageRole.User, part: new vscode.LanguageModelThinkingPart('thought') },
-      { role: 3, part: new vscode.LanguageModelThinkingPart('thought') },
+      { role: vscode.LanguageModelChatMessageRole.User, part: new LanguageModelThinkingPart('thought') },
+      { role: 3, part: new LanguageModelThinkingPart('thought') },
     ];
 
     for (const testCase of cases) {
@@ -654,14 +662,16 @@ describe('Claude conversion helpers', () => {
   });
 
   it('drops orphan and interrupted Claude tool chains while preserving matched parallel results', () => {
-    const assistant = (parts: unknown[]) => ({
+    const assistant = (parts: unknown[]): vscode.LanguageModelChatRequestMessage => ({
       role: vscode.LanguageModelChatMessageRole.Assistant,
       content: parts,
-    }) as vscode.LanguageModelChatRequestMessage;
-    const user = (parts: unknown[]) => ({
+      name: undefined,
+    });
+    const user = (parts: unknown[]): vscode.LanguageModelChatRequestMessage => ({
       role: vscode.LanguageModelChatMessageRole.User,
       content: parts,
-    }) as vscode.LanguageModelChatRequestMessage;
+      name: undefined,
+    });
     const converted = convertClaudeMessages([
       user([new vscode.LanguageModelToolResultPart('orphan', [new vscode.LanguageModelTextPart('ignored')])]),
       assistant([

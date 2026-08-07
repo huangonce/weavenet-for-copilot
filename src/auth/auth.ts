@@ -1,5 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
+  CATALOG_ARTIFACT_PEPPER_SECRET,
   CHATGPT_API_KEY_SECRET,
   CLAUDE_API_KEY_SECRET,
   LEGACY_API_KEY_SECRET,
@@ -11,6 +13,8 @@ import type { ConnectionProfile } from '../config/config';
 type AuthProfile = Pick<ConnectionProfile, 'id' | 'name'>;
 
 export class AuthManager {
+  private catalogArtifactPepperTask: Promise<string> | undefined;
+
   constructor(private readonly secrets: vscode.SecretStorage) {}
 
   async getApiKey(profile: AuthProfile): Promise<string | undefined> {
@@ -21,6 +25,16 @@ export class AuthManager {
 
   async hasApiKey(profile: AuthProfile): Promise<boolean> {
     return Boolean(await this.getApiKey(profile));
+  }
+
+  /**
+   * Installation-local secret used to key persisted catalog identities. If
+   * SecretStorage is temporarily unavailable, the process-local fallback is
+   * still safe; it merely prevents restoration on the next activation.
+   */
+  getCatalogArtifactPepper(): Promise<string> {
+    this.catalogArtifactPepperTask ??= this.loadOrCreateCatalogArtifactPepper();
+    return this.catalogArtifactPepperTask;
   }
 
   async promptForApiKeyValue(profileName: string): Promise<string | undefined> {
@@ -90,6 +104,23 @@ export class AuthManager {
       throw error;
     }
   }
+
+  private async loadOrCreateCatalogArtifactPepper(): Promise<string> {
+    try {
+      const existing = await this.secrets.get(CATALOG_ARTIFACT_PEPPER_SECRET);
+      if (isCatalogArtifactPepper(existing)) return existing;
+    } catch {
+      return newCatalogArtifactPepper();
+    }
+    const generated = newCatalogArtifactPepper();
+    try {
+      await this.secrets.store(CATALOG_ARTIFACT_PEPPER_SECRET, generated);
+    } catch {
+      // Keep the generated value for this process. Persisted cache entries
+      // will simply become unreadable after restart, never cross credentials.
+    }
+    return generated;
+  }
 }
 
 export function profileSecretKey(profileId: string): string {
@@ -110,4 +141,12 @@ async function restoreSecret(secrets: vscode.SecretStorage, key: string, value: 
   } else {
     await secrets.store(key, value);
   }
+}
+
+function newCatalogArtifactPepper(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function isCatalogArtifactPepper(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value);
 }

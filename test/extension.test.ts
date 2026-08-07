@@ -18,6 +18,7 @@ import {
 import { errorMessage, queueConnectionMutation, saveProfiles } from '../src/config/connectionMutations';
 import { createStatusBarItem, renderStatus } from '../src/ui/statusBarPresenter';
 import type { ConnectionProfile } from '../src/config/config';
+import type { ConnectionStatus, WeaveNetChatProvider } from '../src/copilot/provider';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
 const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
@@ -38,7 +39,7 @@ function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFI
 }
 
 function providerFixture(overrides: Record<string, unknown> = {}) {
-  return {
+  const fixture = {
     promptForRelayKeyValue: vi.fn().mockResolvedValue('new-key'),
     storeRelayKey: vi.fn().mockResolvedValue(undefined),
     clearRelayKeyForProfile: vi.fn().mockResolvedValue(undefined),
@@ -67,7 +68,8 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     refreshConnection: vi.fn().mockResolvedValue(undefined),
     isSafeVisionProxyCandidate: vi.fn().mockReturnValue(true),
     ...overrides,
-  } as never;
+  };
+  return fixture as typeof fixture & WeaveNetChatProvider;
 }
 
 function pickProfile(profile: ConnectionProfile): void {
@@ -109,7 +111,7 @@ describe('connection mutation queue', () => {
   });
 
   it('renders aggregate connection states with per-connection details', () => {
-    const item = { text: '', tooltip: '' } as never;
+    const item = { text: '', tooltip: '' } as unknown as vscode.StatusBarItem;
     renderStatus(item, {
       phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
     });
@@ -305,7 +307,7 @@ describe('connection mutation queue', () => {
   it('shows per-profile connection test diagnostics and structured failures', async () => {
     configurationFixture([WORK_PROFILE]);
     const provider = providerFixture();
-    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { profile: unknown }[]) => items[0] as never);
+    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items) => (await items)[0] as never);
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
 
     await testConnection(provider);
@@ -442,11 +444,11 @@ describe('pick vision proxy model', () => {
         candidate.vendor !== 'weavenet' || candidate.id === 'gpt-4o-vision',
       ),
     });
-    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items: readonly { modelKey: string }[]) => items[1] as never);
+    const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items) => (await items)[1] as never);
 
     await pickVisionProxyModel(provider);
 
-    const offered = pick.mock.calls[0][0] as readonly { modelKey: string }[];
+    const offered = pick.mock.calls[0][0] as unknown as readonly { modelKey: string }[];
     expect(offered).toHaveLength(2);
     expect(offered.map((item) => item.modelKey)).toEqual(['copilot/gpt-4o', 'weavenet/gpt-4o-vision']);
     expect(update).toHaveBeenCalledWith('visionProxyModel', 'weavenet/gpt-4o-vision', vscode.ConfigurationTarget.Global);
@@ -474,7 +476,7 @@ describe('command registration', () => {
     const registered: string[] = [];
     const register = vi.spyOn(vscode.commands, 'registerCommand').mockImplementation((_id: string, _handler: unknown) => {
       registered.push(_id);
-      return new vscode.Disposable();
+      return new vscode.Disposable(() => undefined);
     });
     const provider = providerFixture();
 

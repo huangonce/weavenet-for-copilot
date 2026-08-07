@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type * as vscode from 'vscode';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile } from '../config/config';
+import { canonicalRelayHeaders } from '../relay/headers';
 import { normalizeRelayBaseUrl } from '../relay/url';
 import {
   CONNECTION_DIAGNOSTICS_KEY_PREFIX,
@@ -47,14 +48,11 @@ export function fingerprintConnection(
   profile: ConnectionProfile,
   options: ConnectionFingerprintOptions = {},
 ): string {
-  const headers = Object.entries(profile.requestHeaders ?? {})
-    .map(([name, value]) => [name.trim().toLowerCase(), value] as const)
-    .sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue));
   const identity = {
     profileId: profile.id,
     name: profile.name.trim(),
     baseUrl: normalizeRelayBaseUrl(profile.baseUrl) ?? profile.baseUrl.trim(),
-    requestHeaders: headers,
+    requestHeaders: canonicalRelayHeaders(profile.requestHeaders ?? {}),
     includeModels: profile.includeModels ?? [],
     excludeModels: profile.excludeModels ?? [],
     models: profile.models ?? [],

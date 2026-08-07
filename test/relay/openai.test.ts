@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { processOpenAIFullResponse, processOpenAISseLine, processOpenAIStream, streamOpenAIChatCompletion } from '../../src/relay/openai';
-import type { StreamCallbacks } from '../../src/relay/client';
-import type { ToolCall } from '../../src/relay/types';
+import type { ChatRequest, StreamCallbacks, ToolCall } from '../../src/relay/types';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -298,7 +297,7 @@ describe('OpenAI response parsing', () => {
     });
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(networkError);
     const cb = { ...callbacks(), onRequest: vi.fn(), onRequestSettled: vi.fn() };
-    const request = { model: 'gpt-test', messages: [], stream: true } as const;
+    const request: ChatRequest = { model: 'gpt-test', messages: [], stream: true };
 
     await expect(streamOpenAIChatCompletion({
       baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
