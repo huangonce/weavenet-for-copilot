@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.7.11 - 2026-08-08
+
+- 修复长回复可能让 VS Code Remote Extension Host 内存持续增长并最终退出的问题：OpenAI Chat Completions、OpenAI Responses 与 Claude Messages 现在通过共享的有界缓冲器批量发布流式文本和思考片段，避免每个 token 都产生一次跨进程进度调用。在一次实测回复中约 7,500 次调用会被压缩为少量有界批次，从而避免宿主达到约 4 GiB 后触发 V8 OOM、日志页面退出和模型重新加载。
+- 流式批处理保持文本、思考、元数据与工具调用的原始顺序，并继续及时响应取消；定时发布异常会在当前请求中安全报告，取消后的缓冲内容不会晚到写入。
+
 ## 0.7.10 - 2026-08-08
 
 - 修复 Relay 只返回终止标记时聊天静默结束的问题：OpenAI Chat Completions、OpenAI Responses 与 Claude Messages 现在都会把“零文本、零思考、零工具调用”的完成流识别为错误，并提示用户重试；聊天 POST 不会自动重发，避免重复计费或重复执行工具。

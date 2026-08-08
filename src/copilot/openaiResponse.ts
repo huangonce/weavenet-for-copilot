@@ -18,11 +18,11 @@ import {
   getConfiguredContextWindow,
   getConfiguredReasoningEffort,
   parseToolArguments,
-  reportThinking,
 } from './helpers';
 import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
+import { ResponsePartEmitter } from './responsePartEmitter';
 
 export interface OpenAIResponseContext {
   readonly config: ExtensionConfig;
@@ -87,16 +87,17 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
   };
   logOpenAIRequest(debug, config, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'OpenAI', model.id, request.messages.length, request.tools?.length ?? 0);
+  const output = new ResponsePartEmitter(progress);
 
   try {
     await client.streamChatCompletion(request, {
       onContent: (text) => {
         diagnostics.onContent();
-        progress.report(new vscode.LanguageModelTextPart(text));
+        output.text(text);
       },
       onReasoning: (text) => {
         diagnostics.onReasoning();
-        reportThinking(progress, text);
+        output.thinking(text);
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
@@ -106,24 +107,27 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
       onRefusal: (text) => {
         diagnostics.onRefusal();
-        progress.report(new vscode.LanguageModelTextPart(text));
+        output.text(text);
       },
       onToolCall: (toolCall) => {
         const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
-        progress.report(new vscode.LanguageModelToolCallPart(
+        output.report(new vscode.LanguageModelToolCallPart(
           toolCall.id,
           toolCall.function.name,
           argumentsValue,
         ));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    output.flush();
     diagnostics.complete();
   } catch (error) {
     if (token.isCancellationRequested) {
+      output.discard();
       diagnostics.cancelled();
       throw new vscode.CancellationError();
     }
+    flushPartialOutput(output);
     diagnostics.failed(error);
     throw toLanguageModelError(error);
   }
@@ -191,22 +195,23 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   };
   logResponsesRequest(debug, config, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'Responses', model.id, input.length, request.tools?.length ?? 0);
+  const output = new ResponsePartEmitter(progress);
 
   try {
     await client.streamResponses(request, {
       onContent: (text) => {
         diagnostics.onContent();
-        progress.report(new vscode.LanguageModelTextPart(text));
+        output.text(text);
       },
       onReasoning: (text) => {
         diagnostics.onReasoning();
-        reportThinking(progress, text);
+        output.thinking(text);
       },
       onResponsesReasoningItem: (item) => {
         // Parked on a metadata-only thinking part so the next turn can replay
         // the item verbatim; the payload stays opaque to the extension.
         if (!encryptedReasoning || !item.id || !item.encrypted_content) return;
-        reportThinking(progress, '', item.id, {
+        output.thinking('', item.id, {
           [RESPONSES_REASONING_METADATA_KEY]: {
             encryptedContent: item.encrypted_content,
             summary: item.summary ?? [],
@@ -220,26 +225,38 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
       onStreamEnd: diagnostics.onStreamEnd,
       onRefusal: (text) => {
         diagnostics.onRefusal();
-        progress.report(new vscode.LanguageModelTextPart(text));
+        output.text(text);
       },
       onToolCall: (toolCall) => {
         const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
-        progress.report(new vscode.LanguageModelToolCallPart(
+        output.report(new vscode.LanguageModelToolCallPart(
           toolCall.id,
           toolCall.function.name,
           argumentsValue,
         ));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    output.flush();
     diagnostics.complete();
   } catch (error) {
     if (token.isCancellationRequested) {
+      output.discard();
       diagnostics.cancelled();
       throw new vscode.CancellationError();
     }
+    flushPartialOutput(output);
     diagnostics.failed(error);
     throw toLanguageModelError(error);
+  }
+}
+
+function flushPartialOutput(output: ResponsePartEmitter): void {
+  try {
+    output.flush();
+  } catch {
+    // Preserve the request/transport failure that ended the stream. A progress
+    // failure is already the primary error when it originated from flush().
   }
 }
 
