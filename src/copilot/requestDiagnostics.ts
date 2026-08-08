@@ -19,12 +19,16 @@ export interface RequestDiagnostics {
   onOpenAIFinishReason(reason: string): void;
   onResponse(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
   onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete'): void;
-  complete(): void;
-  cancelled(): void;
-  failed(error: unknown): void;
+  complete(reportCount: number): void;
+  cancelled(reportCount: number): void;
+  failed(error: unknown, reportCount: number): void;
 }
 
-export type DebugLogger = (config: ExtensionConfig, message: string) => void;
+export type DebugLogger = (
+  config: ExtensionConfig,
+  message: string,
+  level?: 'metadata' | 'usage',
+) => void;
 
 export function createRequestDiagnostics(
   debug: DebugLogger,
@@ -47,18 +51,20 @@ export function createRequestDiagnostics(
   let responseMetadata: ResponseDiagnosticsMetadata | undefined;
   let requestMetadata: RequestDiagnosticsMetadata | undefined;
   let transportMetadata: RequestTransportDiagnosticsMetadata | undefined;
+  const startingMemory = config.debug ? process.memoryUsage() : undefined;
 
   const elapsed = (): number => Date.now() - startedAt;
-  const summary = (): string =>
+  const summary = (reportCount: number): string =>
     `protocol=${protocol} model=${model} messages=${messageCount} tools=${toolCount} `
       + `http=${responseStatus ?? 'n/a'} contentType=${responseContentType ?? 'n/a'} `
       + `ttfbMs=${firstOutputAt === undefined ? 'n/a' : firstOutputAt - startedAt} elapsedMs=${elapsed()} `
-      + `parts={content:${contentParts},reasoning:${reasoningParts},tools:${toolCalls},refusals:${refusals}}`
+      + `parts={content:${contentParts},reasoning:${reasoningParts},tools:${toolCalls},refusals:${refusals}} reports=${reportCount}`
       + (terminalEvent ? ` terminal=${terminalEvent}` : '')
       + (finishReason ? ` finishReason=${safeDiagnosticValue(finishReason)}` : '')
       + formatRequestMetadata(requestMetadata)
       + formatTransportMetadata(transportMetadata)
-      + formatResponseMetadata(responseMetadata);
+      + formatResponseMetadata(responseMetadata)
+      + formatMemory(startingMemory, config.debug);
   const markFirstOutput = (): void => {
     firstOutputAt ??= Date.now();
   };
@@ -101,10 +107,21 @@ export function createRequestDiagnostics(
     onStreamEnd: (_responseProtocol, event) => {
       terminalEvent = event;
     },
-    complete: () => debug(config, `${protocol} request completed: ${summary()}`),
-    cancelled: () => debug(config, `${protocol} request cancelled: ${summary()} cancellationSource=vscode tokenCancellationRequested=true`),
-    failed: (error) => debug(config, `${protocol} request failed: ${summary()} error=${formatLogError(error)}`),
+    complete: (reportCount) => debug(config, `${protocol} request completed: ${summary(reportCount)}`),
+    cancelled: (reportCount) => debug(config, `${protocol} request cancelled: ${summary(reportCount)} cancellationSource=vscode tokenCancellationRequested=true`),
+    failed: (error, reportCount) => debug(config, `${protocol} request failed: ${summary(reportCount)} error=${formatLogError(error)}`),
   };
+}
+
+function formatMemory(startingMemory: NodeJS.MemoryUsage | undefined, enabled: boolean): string {
+  if (!enabled || !startingMemory) return '';
+  const current = process.memoryUsage();
+  return ` memory={heapUsedMiB:${mib(current.heapUsed)},heapDeltaMiB:${mib(current.heapUsed - startingMemory.heapUsed)},`
+    + `rssMiB:${mib(current.rss)},rssDeltaMiB:${mib(current.rss - startingMemory.rss)}}`;
+}
+
+function mib(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1);
 }
 
 function formatRequestMetadata(metadata: RequestDiagnosticsMetadata | undefined): string {

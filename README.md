@@ -46,13 +46,15 @@ src/
 - `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。`openaiApiStrategy` 为 `auto` 时，新发现且未显式指定协议的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours` 并持久化到 VS Code `globalState`（重启后无需重新探测）；明确被拒绝（HTTP 400/404/426）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测；强制 `chat` 或 `responses` 时不执行 Responses 探测。
 - `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
 - `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
-- `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
+- `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看 Token 用量和脱敏请求元数据。
+- `WeaveNet: Open Sensitive Request Dumps Folder`：打开仅在 `debugMode=verbose` 时生成的敏感请求 dump 目录；分享日志前不要分享这些文件。
 
 ## 协议路由
 
 插件使用每个 Relay 各自的 API Key 获取模型。每个模型都绑定发现它的连接、配置修订和请求协议，聊天请求始终发送到该来源 Relay：
 
 - OpenAI 兼容模型：按 `openaiApiStrategy`、固定模型声明和自动探测结果选择 `POST /chat/completions` 或 `POST /responses`，使用 `Authorization: Bearer` 认证。
+- DeepSeek Chat：官方 `api.deepseek.com` 会自动识别；自定义 Relay 可在固定模型上设置 `openai.dialect: "deepseek"`。适配器使用 DeepSeek 的 `thinking` 开关，保留多轮 `reasoning_content`，并对标题、分类、设置解析等 Copilot 辅助请求关闭思考。
 - Claude 模型：走 Anthropic-compatible `POST /messages`，使用 `x-api-key` 认证。
 
 同一把密钥只因目标协议不同而采用对应的请求头；这样可避免 Claude 模型被错误地转成 OpenAI 协议，减少缓存或原生能力失效的问题。
@@ -63,7 +65,7 @@ src/
 
 参考价格不是 sub2api 实际扣费价格。实际扣费受你的分组、账号倍率和上游渠道影响，应以 sub2api 的用量日志为准。
 
-支持推理的模型会在聊天输入框旁显示“思考工作量”，可选择 Low、Medium、High、Extra High 或 Max。OpenAI 协议会发送 `reasoning_effort`；Claude 协议会换算为原生 `thinking.budget_tokens`。有上下文窗口元数据的模型也会显示“上下文大小”。
+支持推理的模型会在聊天输入框旁显示“思考工作量”，可选择 Low、Medium、High、Extra High 或 Max。标准 OpenAI 协议发送 `reasoning_effort`；DeepSeek Chat 将它映射为二值 `thinking` 开关；Claude 协议换算为原生 `thinking.budget_tokens`。有上下文窗口元数据的模型也会显示“上下文大小”。
 
 ## 常用设置
 
@@ -74,8 +76,10 @@ src/
 - `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
 - `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
 - `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会为 system、最后一个工具定义和最近两条用户消息设置显式缓存断点，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
-- `weavenet-copilot.debug`：开启后将请求摘要和 Claude 缓存用量写入 VS Code 的 `WeaveNet` 输出通道，不记录 API Key 或 prompt 正文。通过 `WeaveNet: Show Debug Log` 打开。
+- `weavenet-copilot.debugMode`：诊断级别，默认 `minimal`。`minimal` 只记录 Token 用量；`metadata` 额外记录脱敏请求元数据；`verbose` 还会把完整请求写入本机扩展全局存储，可能包含提示词、代码、工具参数和图片数据，但不包含 API Key 或自定义请求头。dump 单文件最多 2 MiB、最多 20 个且总计最多 20 MiB，可通过 `WeaveNet: Open Sensitive Request Dumps Folder` 查看并手工删除。
+  - 旧 `weavenet-copilot.debug` 已废弃；值为 `true` 时兼容映射到 `metadata`。
   - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
+- `weavenet-copilot.experimental.stabilizeToolList`：默认关闭，仅对 DeepSeek Chat 生效。开启后先执行 Copilot 暴露的 `activate_*` 辅助工具，再向模型发送稳定后的工具集合；控制消息不会进入上游历史，最多尝试三轮。仅在确认动态工具列表会影响 DeepSeek Agent 稳定性时开启。
 - `weavenet-copilot.includeModels` / `excludeModels`：仅供从 `0.3.x` 升级迁移使用的废弃顶层模型过滤设置；新配置应写入 `profiles` 中。
 - `weavenet-copilot.maxInputTokens`：向 Copilot 声明的输入 token 硬上限，默认 `128000`。即使模型元数据声明了更大的上下文，也不会超过这个值；OAuth 上游的实际窗口较小时应相应调低。
 - `weavenet-copilot.supportsToolCalling`：是否向 Copilot 声明工具调用能力。
@@ -125,6 +129,21 @@ OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明�
 }
 ```
 
+直连 DeepSeek 的固定模型建议显式使用 Chat 协议和 DeepSeek 方言：
+
+```json
+{
+  "id": "deepseek-chat",
+  "route": "openai",
+  "openaiApi": "chat",
+  "toolCalling": true,
+  "thinking": true,
+  "openai": { "dialect": "deepseek" }
+}
+```
+
+官方 `https://api.deepseek.com` 地址可自动识别，经过自定义域名或网关时应显式声明。该适配只作用于 Chat Completions：请求发送 `thinking.enabled/disabled` 而不是 OpenAI 的 `reasoning_effort`，并把流式思考内容以隐藏会话元数据带回下一轮的 `reasoning_content`，避免工具调用后的多轮推理链被 DeepSeek 拒绝。超过 4 MiB 的思考回放会安全丢弃，不会无限增长。
+
 `openaiApi` 可显式声明固定模型使用 `responses`（Responses API）或 `chat`（Chat Completions）。模型级和全局策略采用安全否决优先级：任一处显式 `chat` 都强制 Chat；没有 `chat` 时，任一处显式 `responses` 都强制 Responses；两处均未指定时才自动探测。`openaiApi` 为 `responses` 时，请确认 Relay 上游确实实现了 `/responses`。
 
 固定模型与自动发现的同名模型（同一 `route` + 模型 id）会合并，固定模型只覆盖它真正写出来的字段：省略 `toolCalling`、`maxInputTokens` 等字段时，发现阶段拿到的值会保留，不会被清空。`openai` 能力对象同样按字段合并，因此只想补一条 `encryptedReasoning` 时无需重复声明其余能力。
@@ -163,21 +182,21 @@ API Key 会存储在 VS Code SecretStorage 中。
 - 自定义 `requestHeaders` 值由 VS Code 配置系统保存，不受 SecretStorage 保护；不得在其中放置 API Key、令牌或其他敏感信息。
 - 对话、代码和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务；原生视觉请求也会发送图片。视觉代理启用时，原始图片、视觉指令和所在用户消息的有界布局（可能包含工具结果文本）会先发送给你明确选择的已安装视觉模型，目标纯文本 Relay 只接收生成的图片描述。
 - 视觉代理默认关闭，不自动选择模型或 fallback。视觉调用可能由不同提供商独立计费，并受其隐私与数据保留政策约束。
-- 插件不会收集遥测数据。开启调试日志时只记录脱敏请求摘要，不记录 API Key 或提示词正文。
+- 插件不会收集遥测数据。`minimal`/`metadata` 日志不记录 API Key 或提示词正文；用户显式选择 `verbose` 时，本机会生成可能含提示词、代码、工具参数和图片数据的有界敏感请求 dump，排障后应删除且不得直接上传。
 - 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)，问题反馈见 [SUPPORT.md](SUPPORT.md)。
 
 ## 发布流程
 
-合并到 `main` 只运行持续集成，不会发布。发布前必须更新 `package.json` 和 `package-lock.json` 的版本号，并同步维护 `CHANGELOG.md`；Marketplace 不允许重复发布同一版本。先等待 `main` 的 CI 全部通过，再单独推送带说明的版本标签：
+合并符合 Conventional Commits 的变更到 `main` 后，Release Please 会创建或更新发布 PR，统一维护 `package.json`、`package-lock.json`、`CHANGELOG.md` 和版本标签。合并该发布 PR 后会自动创建 GitHub Release，并调用同一条可复用发布流水线：
 
 ```bash
-npm version patch --no-git-tag-version
-git commit -am "chore: release x.y.z"
+git commit -m "fix: describe the user-visible correction"
 git push origin main
-git tag -a vx.y.z -m "Release x.y.z"
-git push origin vx.y.z
+# 审核并合并 Release Please 创建的 release PR
 ```
 
-推送形如 `v0.3.3` 的语义化版本标签后，GitHub Actions 会校验标签与 `package.json` 版本一致，再执行 lint、源码与测试类型检查、编译、覆盖率门槛、真实 VS Code 扩展宿主冒烟测试、打包和 Marketplace 发布。流水线使用仓库的 `VSCE_PAT` Actions Secret；重复版本会安全跳过，不会覆盖已发布版本。
+发布流水线会校验标签与 `package.json` 版本一致，再执行高危依赖审计、lint、源码与测试类型检查、编译、覆盖率门槛、真实 VS Code 扩展宿主冒烟测试和包内容检查；同一份 VSIX 随后上传为 Actions artifact、附加到 GitHub Release，并发布到 Visual Studio Marketplace。配置可选的 `OVSX_PAT` 后也会发布到 Open VSX；`VSCE_PAT` 为必需 Secret。重复版本会安全跳过，不会覆盖已发布版本。
+
+旧的 annotated `v*.*.*` 标签入口仍可调用同一流水线；若 Marketplace 或 Open VSX 临时失败，可从 Actions 手动运行 `Rescue publish`，输入已经存在且与包版本一致的标签重试，不需要重新打标签或改版本。

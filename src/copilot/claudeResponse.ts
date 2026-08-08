@@ -15,6 +15,8 @@ import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 import { ResponsePartEmitter } from './responsePartEmitter';
+import type { AdaptiveTokenUsage } from './tokenUsage';
+import type { RequestDumpStore } from './requestDumpStore';
 
 export interface ClaudeResponseContext {
   readonly config: ExtensionConfig;
@@ -26,10 +28,12 @@ export interface ClaudeResponseContext {
   readonly token: vscode.CancellationToken;
   readonly apiKey: string;
   readonly debug: DebugLogger;
+  readonly tokenUsage: AdaptiveTokenUsage;
+  readonly requestDumps: RequestDumpStore;
 }
 
 export async function provideClaudeResponse(context: ClaudeResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, progress, token, apiKey, debug, tokenUsage, requestDumps } = context;
   const converted = convertClaudeMessages(messages, {
     supportsImageInput: supportsImageInputForRoutedModel(routedModel, config),
     promptCaching: config.claudePromptCaching !== 'disabled',
@@ -60,8 +64,10 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     ...thinking,
   };
   logClaudeRequest(debug, config, request);
+  void requestDumps.capture(config.debugMode, 'claude', model.id, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'Claude', model.id, request.messages.length, request.tools?.length ?? 0);
   const output = new ResponsePartEmitter(progress);
+  const usage = tokenUsage.begin(model.id, messages);
   const client = new RelayClient({
     baseUrl: config.baseUrl,
     apiKey,
@@ -82,7 +88,10 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
         diagnostics.onReasoning();
         output.thinking(text);
       },
-      onClaudeUsage: (usage, responseId) => logClaudeUsage(debug, config, usage, responseId),
+      onClaudeUsage: (value, responseId) => {
+        usage.recordClaude(value);
+        logClaudeUsage(debug, config, value, responseId);
+      },
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onToolCall: (toolCall) => {
@@ -94,16 +103,18 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
         ));
       },
     }, token);
+    const usagePart = usage.finish();
+    if (usagePart) output.report(usagePart);
     output.flush();
-    diagnostics.complete();
+    diagnostics.complete(output.reportCount);
   } catch (error) {
     if (token.isCancellationRequested) {
       output.discard();
-      diagnostics.cancelled();
+      diagnostics.cancelled(output.reportCount);
       throw new vscode.CancellationError();
     }
     try { output.flush(); } catch { /* Preserve the stream failure. */ }
-    diagnostics.failed(error);
+    diagnostics.failed(error, output.reportCount);
     throw toLanguageModelError(error);
   }
 }
@@ -135,5 +146,6 @@ function logClaudeUsage(
       + `input=${value(usage.input_tokens)}, cacheRead=${value(usage.cache_read_input_tokens)}, `
       + `cacheWrite=${value(usage.cache_creation_input_tokens)}, output=${value(usage.output_tokens)}, `
       + `usageFields=${fields}`,
+    'usage',
   );
 }

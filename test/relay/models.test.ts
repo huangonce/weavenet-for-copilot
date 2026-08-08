@@ -14,6 +14,8 @@ function extensionConfig(overrides: Partial<ExtensionConfig> = {}): ExtensionCon
     requestTimeoutMs: 100,
     streamIdleTimeoutMs: 100,
     debug: false,
+    debugMode: 'minimal',
+    stabilizeToolList: false,
     modelNamePrefix: 'WeaveNet',
     includeModels: [],
     excludeModels: [],
@@ -113,6 +115,7 @@ describe('model routing', () => {
       id: 'modern-model',
       capabilities: {
         openai: {
+          dialect: 'deepseek',
           tokenLimitField: 'max_completion_tokens',
           contextWindow: true,
           reasoningEfforts: ['minimal', 'high', 'invalid'],
@@ -121,6 +124,7 @@ describe('model routing', () => {
       },
     }, 'openai')).toMatchObject({
       openai: {
+        dialect: 'deepseek',
         tokenLimitField: 'max_completion_tokens',
         contextWindow: true,
         reasoningEfforts: ['minimal', 'high'],

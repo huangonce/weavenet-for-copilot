@@ -1,4 +1,4 @@
-name: Publish Marketplace
+name: Publish tagged release
 
 on:
   push:
@@ -6,69 +6,11 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: read
-
-concurrency:
-  group: visual-studio-marketplace
-  cancel-in-progress: false
+  contents: write
 
 jobs:
   publish:
-    name: Build and publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify tag matches package version
-        run: |
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
-            echo "Tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION."
-            exit 1
-          fi
-
-      - name: Lint source
-        run: npm run lint
-
-      - name: Type-check source and tests
-        run: npm run typecheck
-
-      - name: Compile extension
-        run: npm run compile
-
-      - name: Run tests with coverage
-        run: npm run test:coverage
-
-      - name: Run VS Code extension host smoke test
-        run: xvfb-run -a npm run test:integration
-
-      - name: Inspect extension package contents
-        run: npm run package:list
-
-      - name: Package extension
-        run: npm run package -- --out weavenet-for-copilot.vsix
-
-      - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: weavenet-for-copilot-${{ github.sha }}
-          path: weavenet-for-copilot.vsix
-          if-no-files-found: error
-
-      - name: Publish to Visual Studio Marketplace
-        run: npx vsce publish --packagePath weavenet-for-copilot.vsix --skip-duplicate
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      ref: ${{ github.ref }}
+    secrets: inherit

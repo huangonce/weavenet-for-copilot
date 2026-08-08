@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.7.12 - 2026-08-08
+
+- 新增 DeepSeek Chat 专用协议适配：直连 `api.deepseek.com` 自动识别，自定义网关可声明 `openai.dialect: "deepseek"`；请求使用 DeepSeek 原生 `thinking` 开关，并将流式思考以有界隐藏元数据带回下一轮的 `reasoning_content`，改善工具调用后的多轮 Agent 稳定性。标题、分类、设置解析等 Copilot 辅助请求会自动关闭思考，避免无意义延迟和消耗。
+- 新增默认关闭的 DeepSeek 工具列表稳定化：可先执行 Copilot 的 `activate_*` 辅助工具，再把稳定后的工具集合发送给上游；合成控制消息不会污染模型历史，最多尝试三轮并在无法收敛时明确失败。
+- 向 Copilot 返回 OpenAI Chat、OpenAI Responses 和 Claude 的标准 `usage` 数据，并按模型使用真实上游输入量动态校准后续 Token 估算；最小诊断模式始终记录 Token 用量。
+- 将诊断拆分为 `minimal`、`metadata`、`verbose`：默认只记录 Token，元数据模式保持脱敏，verbose 才写入可能含提示词、代码和图片的敏感请求 dump；dump 单文件最多 2 MiB、最多 20 个且总计最多 20 MiB，并提供专用命令打开其目录。
+- 引入 Release Please、可复用发布工作流、GitHub Release VSIX 附件、可选 Open VSX 发布和手动救援发布；CI 与发布加入高危依赖审计，发布工具链的已知 npm 漏洞已清零。
+
 ## 0.7.11 - 2026-08-08
 
 - 修复长回复可能让 VS Code Remote Extension Host 内存持续增长并最终退出的问题：OpenAI Chat Completions、OpenAI Responses 与 Claude Messages 现在通过共享的有界缓冲器批量发布流式文本和思考片段，避免每个 token 都产生一次跨进程进度调用。在一次实测回复中约 7,500 次调用会被压缩为少量有界批次，从而避免宿主达到约 4 GiB 后触发 V8 OOM、日志页面退出和模型重新加载。

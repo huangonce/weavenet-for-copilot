@@ -18,6 +18,7 @@ import {
   canonicalToolInput,
   isCanonicalImagePart,
 } from './canonicalRequest';
+import { deepSeekReasoningContent } from './deepSeekChat';
 import type {
   CanonicalChatRequestSnapshot,
   CanonicalDataPart,
@@ -53,6 +54,7 @@ export function convertMessages(
   request: CanonicalChatRequestSnapshot,
   supportsImageInput: boolean,
   supportsDeveloperRole = false,
+  deepSeekDialect = false,
 ): ChatMessage[] {
   const messages = request.messages;
   const result: ChatMessage[] = [];
@@ -109,6 +111,7 @@ export function convertMessages(
           role,
           content: textContent,
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+          ...(deepSeekDialect ? { reasoning_content: deepSeekReasoningContent(message.content) } : {}),
         });
       }
     } else if (contentParts.length > 0) {

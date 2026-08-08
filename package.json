@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.7.11",
+  "version": "0.7.12",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -109,6 +109,10 @@
       {
         "command": "weavenet-copilot.showDebugLog",
         "title": "%command.showDebugLog%"
+      },
+      {
+        "command": "weavenet-copilot.openRequestDumps",
+        "title": "%command.openRequestDumps%"
       }
     ],
     "configuration": {
@@ -224,6 +228,12 @@
                       "additionalProperties": false,
                       "description": "%configuration.modelOpenAICapabilities.description%",
                       "properties": {
+                        "dialect": {
+                          "type": "string",
+                          "enum": [
+                            "deepseek"
+                          ]
+                        },
                         "tokenLimitField": {
                           "type": "string",
                           "enum": [
@@ -388,10 +398,33 @@
           "maximum": 600,
           "description": "%configuration.streamIdleTimeoutSeconds.description%"
         },
+        "weavenet-copilot.debugMode": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "metadata",
+            "verbose"
+          ],
+          "enumDescriptions": [
+            "%configuration.debugMode.minimal%",
+            "%configuration.debugMode.metadata%",
+            "%configuration.debugMode.verbose%"
+          ],
+          "default": "minimal",
+          "scope": "application",
+          "description": "%configuration.debugMode.description%"
+        },
         "weavenet-copilot.debug": {
           "type": "boolean",
           "default": false,
-          "description": "%configuration.debug.description%"
+          "description": "%configuration.debug.description%",
+          "deprecationMessage": "%configuration.debug.deprecation%"
+        },
+        "weavenet-copilot.experimental.stabilizeToolList": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "%configuration.experimental.stabilizeToolList.description%"
         },
         "weavenet-copilot.modelNamePrefix": {
           "type": "string",
@@ -554,7 +587,8 @@
     "test:watch": "vitest",
     "package:list": "vsce ls --no-dependencies",
     "package": "vsce package --no-dependencies",
-    "publish:marketplace": "vsce publish --no-dependencies --skip-duplicate"
+    "publish:marketplace": "vsce publish --no-dependencies --skip-duplicate",
+    "publish:openvsx": "ovsx publish --skip-duplicate"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -565,6 +599,7 @@
     "@vscode/vsce": "^3.9.1",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
+    "ovsx": "^1.1.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.64.0",
     "vitest": "^4.1.10"

@@ -10,6 +10,7 @@ const MAX_PROFILE_NAME_LENGTH = 100;
 const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export type OpenAIApiStrategy = 'auto' | 'chat' | 'responses';
+export type DebugMode = 'minimal' | 'metadata' | 'verbose';
 
 export interface ConfiguredModel {
   id: string;
@@ -51,6 +52,8 @@ export interface ExtensionConfig {
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
   debug: boolean;
+  debugMode: DebugMode;
+  stabilizeToolList: boolean;
   modelNamePrefix: string;
   includeModels: RegExp[];
   excludeModels: RegExp[];
@@ -75,6 +78,12 @@ export interface ProfileConfiguration {
 
 export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  // `get()` includes the package default, which would mask an existing legacy
+  // `debug=true` setting after upgrade. Only an explicitly stored mode wins.
+  const configuredDebugMode = typeof config.inspect === 'function'
+    ? config.inspect<unknown>('debugMode')?.globalValue
+    : undefined;
+  const debugMode = normalizeDebugMode(configuredDebugMode, config.get<boolean>('debug'));
 
   return {
     profileId: profile?.id,
@@ -90,7 +99,9 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     topP: optionalNumber(config.get<number | null>('topP'), 0, 1),
     requestTimeoutMs: clamp(config.get<number>('requestTimeoutSeconds') ?? 120, 5, 300) * 1000,
     streamIdleTimeoutMs: clamp(config.get<number>('streamIdleTimeoutSeconds') ?? 90, 10, 600) * 1000,
-    debug: config.get<boolean>('debug') ?? false,
+    debug: debugMode !== 'minimal',
+    debugMode,
+    stabilizeToolList: config.get<boolean>('experimental.stabilizeToolList') ?? false,
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
     includeModels: compileRegexList(profile?.includeModels ?? []),
     excludeModels: compileRegexList(profile?.excludeModels ?? []),
@@ -108,6 +119,11 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     requestHeaders: profile?.requestHeaders ?? {},
     models: profile?.models ?? [],
   };
+}
+
+function normalizeDebugMode(value: unknown, legacy: boolean | undefined): DebugMode {
+  if (value === 'minimal' || value === 'metadata' || value === 'verbose') return value;
+  return legacy ? 'metadata' : 'minimal';
 }
 
 function normalizeOpenAIApiStrategy(value: unknown): OpenAIApiStrategy {

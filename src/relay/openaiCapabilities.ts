@@ -20,6 +20,7 @@ export function normalizeOpenAIRequestCapabilities(value: unknown): OpenAIReques
     ? record.defaultReasoningEffort
     : undefined;
   const result: OpenAIRequestCapabilities = {
+    dialect: record.dialect === 'deepseek' ? 'deepseek' : undefined,
     tokenLimitField,
     contextWindow: optionalBoolean(record.contextWindow),
     promptCacheKey: optionalBoolean(record.promptCacheKey),

@@ -4,7 +4,9 @@ WeaveNet for Copilot 不收集遥测数据，也不运营独立的数据收集�
 
 ## 本地数据
 
-API Key 使用 VS Code SecretStorage 保存，并按扩展为每个连接生成的稳定 UUID 隔离。UUID 是普通配置身份，不是秘密。通过扩展命令删除连接时，对应 API Key 也会被删除。扩展设置由 VS Code 配置系统管理，其中包括自定义 `requestHeaders` 的名称和值；这些请求头不受 SecretStorage 保护，因此不应包含 API Key、令牌或其他敏感信息。调试日志不会记录 API Key、提示词正文、图片、视觉代理缓存键、图片摘要或生成的图片描述。
+API Key 使用 VS Code SecretStorage 保存，并按扩展为每个连接生成的稳定 UUID 隔离。UUID 是普通配置身份，不是秘密。通过扩展命令删除连接时，对应 API Key 也会被删除。扩展设置由 VS Code 配置系统管理，其中包括自定义 `requestHeaders` 的名称和值；这些请求头不受 SecretStorage 保护，因此不应包含 API Key、令牌或其他敏感信息。`minimal` 与 `metadata` 诊断不会记录 API Key、提示词正文、图片、视觉代理缓存键、图片摘要或生成的图片描述。
+
+用户显式选择 `debugMode=verbose` 时，扩展会在本机扩展全局存储的 `request-dumps` 目录写入完整请求，可能包含提示词、代码、工具定义与参数、图片数据和生成的图片描述；API Key 与自定义请求头不进入该存储接口。每个文件最多 2 MiB，只保留最新 20 个文件且总计最多 20 MiB；在支持 POSIX 权限的平台上以 `0600` 模式创建。关闭 verbose 不会自动删除已有文件；可运行 `WeaveNet: Open Sensitive Request Dumps Folder` 后手工删除。不得在未审查和脱敏前分享这些文件。
 
 视觉代理的图片描述只保存在当前扩展进程的有界短期内存缓存中，用于避免 Agent 工具轮次重复识别同一批图片。缓存最多 64 条，描述正文合计最多 512 KiB，30 分钟后过期，并按最近最少使用规则淘汰；它不会持久化到设置、文件、SecretStorage、`globalState` 或日志，进程退出后消失。只有目标模型请求成功后才提交描述。缓存键由视觉模型、视觉指令、用户消息布局以及图片 MIME 类型和字节摘要计算，但该键及摘要也不会写入日志或持久存储。过期或被淘汰的历史图片不会自动重新发送给视觉模型。
 

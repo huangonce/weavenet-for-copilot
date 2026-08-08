@@ -83,6 +83,7 @@ export interface ChatMessage {
   content: string | ChatContentPart[] | null;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  reasoning_content?: string;
 }
 
 export type ChatContentPart =
@@ -127,6 +128,7 @@ export interface ChatRequest {
   top_p?: number;
   context_window?: number;
   reasoning_effort?: ReasoningEffort;
+  thinking?: { type: 'enabled' | 'disabled' };
   prompt_cache_key?: string;
   store?: false;
   parallel_tool_calls?: boolean;
@@ -138,6 +140,8 @@ export interface ChatRequest {
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface OpenAIRequestCapabilities {
+  /** Provider-specific Chat Completions request semantics. */
+  dialect?: 'deepseek';
   /** Defaults to max_tokens for compatibility when sendMaxTokens is enabled. */
   tokenLimitField?: 'max_tokens' | 'max_completion_tokens' | 'omit';
   /** Relay-private request extension, never inferred from public context limits. */

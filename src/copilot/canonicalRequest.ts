@@ -25,6 +25,7 @@ const MAX_VISION_IMAGES = 8;
 const MAX_VISION_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VISION_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const RESPONSES_REASONING_METADATA_KEY = 'weavenetResponsesReasoning';
+const DEEPSEEK_REASONING_METADATA_KEY = 'weavenetDeepSeekReasoning';
 
 const SNAPSHOT_BRAND: unique symbol = Symbol('CanonicalChatRequestSnapshot');
 
@@ -61,6 +62,7 @@ export interface CanonicalThinkingPart {
   readonly id?: string;
   readonly encryptedContent?: string;
   readonly summary: readonly CanonicalReasoningSummary[];
+  readonly deepSeekContent?: string;
 }
 
 export interface CanonicalReasoningSummary {
@@ -353,6 +355,7 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
   consumeTextBudget(state, value);
   if (id !== undefined && id !== '') assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
   let encryptedContent: string | undefined;
+  let deepSeekContent: string | undefined;
   const summary: CanonicalReasoningSummary[] = [];
   if (metadata !== undefined && metadata !== null) {
     assertHostRecord(metadata, `${subject} metadata`);
@@ -381,12 +384,23 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
         }
       }
     }
+    const deepSeek = readHostProperty(metadata, DEEPSEEK_REASONING_METADATA_KEY, `${subject} metadata`);
+    if (deepSeek !== undefined && deepSeek !== null) {
+      assertHostRecord(deepSeek, `${subject} DeepSeek reasoning metadata`);
+      const content = readHostProperty(deepSeek, 'content', `${subject} DeepSeek reasoning metadata`);
+      if (typeof content === 'string' && content) {
+        assertBoundedString(content, `${subject} DeepSeek reasoning content`, MAX_TEXT_BYTES, false);
+        consumeTextBudget(state, content);
+        deepSeekContent = content;
+      }
+    }
   }
   return Object.freeze({
     kind: 'thinking' as const,
     value,
     ...(id === undefined || id === '' ? {} : { id }),
     ...(encryptedContent === undefined ? {} : { encryptedContent }),
+    ...(deepSeekContent === undefined ? {} : { deepSeekContent }),
     summary: Object.freeze(summary),
   });
 }
@@ -723,4 +737,3 @@ function snapshotLimitError(): vscode.LanguageModelError {
     'The message is too large or complex to snapshot safely. Reduce its size and try again.',
   );
 }
-

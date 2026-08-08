@@ -16,6 +16,7 @@ describe('ResponsePartEmitter', () => {
 
     expect(reported).toHaveLength(2);
     expect(reported.map((part) => (part as vscode.LanguageModelTextPart).value.length)).toEqual([8_192, 1_808]);
+    expect(emitter.reportCount).toBe(2);
   });
 
   it('flushes adjacent deltas once per interval', () => {
@@ -48,6 +49,7 @@ describe('ResponsePartEmitter', () => {
     expect(reported[1]).toMatchObject({ value: 'thought' });
     expect(reported[2]).toMatchObject({ value: '', id: 'reasoning-1', metadata: { encrypted: true } });
     expect(reported[3]).toMatchObject({ callId: 'call-1', name: 'search' });
+    expect(emitter.reportCount).toBe(4);
   });
 
   it('contains asynchronous progress failures and surfaces them through the request', () => {
@@ -59,6 +61,7 @@ describe('ResponsePartEmitter', () => {
     emitter.text('pending');
     expect(() => vi.advanceTimersByTime(100)).not.toThrow();
     expect(() => emitter.flush()).toThrow(failure);
+    expect(emitter.reportCount).toBe(0);
   });
 
   it('discards pending output and timers after cancellation', () => {

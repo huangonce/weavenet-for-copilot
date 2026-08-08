@@ -23,6 +23,12 @@ import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 import { ResponsePartEmitter } from './responsePartEmitter';
+import type { AdaptiveTokenUsage } from './tokenUsage';
+import { createDeepSeekReplayPart, resolveDeepSeekChatPolicy } from './deepSeekChat';
+import type { RequestDumpStore } from './requestDumpStore';
+import { planToolListStabilization } from './toolStabilization';
+
+const MAX_DEEPSEEK_REPLAY_BYTES = 4 * 1024 * 1024;
 
 export interface OpenAIResponseContext {
   readonly config: ExtensionConfig;
@@ -34,13 +40,47 @@ export interface OpenAIResponseContext {
   readonly token: vscode.CancellationToken;
   readonly apiKey: string;
   readonly debug: DebugLogger;
+  readonly tokenUsage: AdaptiveTokenUsage;
+  readonly requestDumps: RequestDumpStore;
 }
 
 export async function provideOpenAIResponse(context: OpenAIResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, progress, token, apiKey, debug, tokenUsage, requestDumps } = context;
   const tools = supportsToolCallingForModel(routedModel, config)
     ? convertTools(options.tools, routedModel.openai?.strictTools === true)
     : undefined;
+  const configuredReasoningEffort = getConfiguredReasoningEffort(routedModel, options);
+  const deepSeek = resolveDeepSeekChatPolicy(
+    config,
+    routedModel,
+    messages,
+    tools?.map((tool) => tool.function.name) ?? [],
+    configuredReasoningEffort,
+  );
+  if (deepSeek.enabled) {
+    debug(
+      config,
+      `DeepSeek Chat policy: requestKind=${deepSeek.requestKind}, thinking=${deepSeek.thinking?.type ?? 'disabled'}, effort=${deepSeek.effort ?? 'none'}`,
+    );
+  }
+  const stabilization = deepSeek.enabled
+    ? planToolListStabilization(
+      messages,
+      tools?.map((tool) => tool.function.name) ?? [],
+      config.stabilizeToolList,
+    )
+    : { messages, calls: [], round: 0 };
+  if (stabilization.calls.length > 0) {
+    debug(
+      config,
+      `DeepSeek tool-list preflight: round=${stabilization.round}, activators=${stabilization.calls.length}`,
+    );
+    for (const call of stabilization.calls) {
+      progress.report(new vscode.LanguageModelToolCallPart(call.callId, call.name, {}));
+    }
+    return;
+  }
+  const upstreamMessages = stabilization.messages;
   const client = new RelayClient({
     baseUrl: config.baseUrl,
     apiKey,
@@ -52,14 +92,15 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     ? getOpenAIPromptCacheKey(config)
     : undefined;
   const convertedMessages = convertMessages(
-    messages,
+    upstreamMessages,
     supportsImageInputForRoutedModel(routedModel, config),
     routedModel.openai?.developerRole === true,
+    deepSeek.enabled,
   );
   const hasImageInput = convertedMessages.some((message) =>
     Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'));
   const contextWindow = getConfiguredContextWindow(routedModel, options);
-  const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
+  const reasoningEffort = deepSeek.effort;
   const tokenLimit = !hasImageInput && config.sendMaxTokens
     ? createTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
     : {};
@@ -79,15 +120,23 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     } : {}),
     ...tokenLimit,
     ...(!hasImageInput && routedModel.openai?.contextWindow === true && contextWindow ? { context_window: contextWindow } : {}),
-    ...(!hasImageInput && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    ...(!hasImageInput && deepSeek.thinking ? { thinking: deepSeek.thinking } : {}),
+    ...(!hasImageInput && reasoningEffort && !deepSeek.enabled
+      ? { reasoning_effort: reasoningEffort }
+      : {}),
     ...(!hasImageInput && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(!hasImageInput && routedModel.openai?.store === true ? { store: false as const } : {}),
     ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
     stream_options: { include_usage: true },
   };
   logOpenAIRequest(debug, config, request);
+  void requestDumps.capture(config.debugMode, 'openai-chat', model.id, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'OpenAI', model.id, request.messages.length, request.tools?.length ?? 0);
   const output = new ResponsePartEmitter(progress);
+  const usage = tokenUsage.begin(model.id, upstreamMessages);
+  let deepSeekReasoning = '';
+  let deepSeekReasoningBytes = 0;
+  let deepSeekReplayOverflow = false;
 
   try {
     await client.streamChatCompletion(request, {
@@ -98,10 +147,24 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       onReasoning: (text) => {
         diagnostics.onReasoning();
         output.thinking(text);
+        if (deepSeek.enabled && !deepSeekReplayOverflow) {
+          const textBytes = Buffer.byteLength(text, 'utf8');
+          if (deepSeekReasoningBytes + textBytes <= MAX_DEEPSEEK_REPLAY_BYTES) {
+            deepSeekReasoning += text;
+            deepSeekReasoningBytes += textBytes;
+          } else {
+            deepSeekReasoning = '';
+            deepSeekReasoningBytes = 0;
+            deepSeekReplayOverflow = true;
+          }
+        }
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
-      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-chat'),
+      onOpenAIUsage: (value) => {
+        usage.recordOpenAI(value);
+        logOpenAIUsage(debug, config, value, 'openai-chat');
+      },
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
@@ -119,16 +182,20 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
         ));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    const replayPart = deepSeekReplayOverflow ? undefined : createDeepSeekReplayPart(deepSeekReasoning);
+    if (replayPart) output.report(replayPart);
+    const usagePart = usage.finish();
+    if (usagePart) output.report(usagePart);
     output.flush();
-    diagnostics.complete();
+    diagnostics.complete(output.reportCount);
   } catch (error) {
     if (token.isCancellationRequested) {
       output.discard();
-      diagnostics.cancelled();
+      diagnostics.cancelled(output.reportCount);
       throw new vscode.CancellationError();
     }
     flushPartialOutput(output);
-    diagnostics.failed(error);
+    diagnostics.failed(error, output.reportCount);
     throw toLanguageModelError(error);
   }
 }
@@ -142,7 +209,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
  * reasoning survives without server-side storage.
  */
 export async function provideResponsesResponse(context: OpenAIResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, progress, token, apiKey, debug, tokenUsage, requestDumps } = context;
   const supportsImageInput = supportsImageInputForRoutedModel(routedModel, config);
   const tools = supportsToolCallingForModel(routedModel, config)
     ? convertResponsesTools(options.tools, routedModel.openai?.strictTools === true)
@@ -194,8 +261,10 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
   };
   logResponsesRequest(debug, config, request);
+  void requestDumps.capture(config.debugMode, 'openai-responses', model.id, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'Responses', model.id, input.length, request.tools?.length ?? 0);
   const output = new ResponsePartEmitter(progress);
+  const usage = tokenUsage.begin(model.id, messages);
 
   try {
     await client.streamResponses(request, {
@@ -220,7 +289,10 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
-      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-responses'),
+      onOpenAIUsage: (value) => {
+        usage.recordOpenAI(value);
+        logOpenAIUsage(debug, config, value, 'openai-responses');
+      },
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onRefusal: (text) => {
@@ -237,16 +309,18 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
         ));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    const usagePart = usage.finish();
+    if (usagePart) output.report(usagePart);
     output.flush();
-    diagnostics.complete();
+    diagnostics.complete(output.reportCount);
   } catch (error) {
     if (token.isCancellationRequested) {
       output.discard();
-      diagnostics.cancelled();
+      diagnostics.cancelled(output.reportCount);
       throw new vscode.CancellationError();
     }
     flushPartialOutput(output);
-    diagnostics.failed(error);
+    diagnostics.failed(error, output.reportCount);
     throw toLanguageModelError(error);
   }
 }
@@ -277,6 +351,7 @@ function logOpenAIRequest(debug: DebugLogger, config: ExtensionConfig, request: 
     `OpenAI Chat Completions request: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, `
       + `imageParts=${imageParts}, promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `streamUsage=${Boolean(request.stream_options?.include_usage)}, `
+      + `thinking=${request.thinking?.type ?? 'standard'}, `
       + `customEndpointImageCompatibility=${imageParts > 0}, bodyBytes=${bodyBytes}`,
   );
 }
@@ -317,6 +392,7 @@ function logOpenAIUsage(
       + `reasoning=${usage.completion_tokens_details?.reasoning_tokens ?? 'n/a'}, `
       + `predictionAccepted=${usage.completion_tokens_details?.accepted_prediction_tokens ?? 'n/a'}, `
       + `predictionRejected=${usage.completion_tokens_details?.rejected_prediction_tokens ?? 'n/a'}`,
+    'usage',
   );
 }
 

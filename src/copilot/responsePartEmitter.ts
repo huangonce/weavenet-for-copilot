@@ -26,6 +26,7 @@ export class ResponsePartEmitter {
   private pendingCharacters = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerFailure: unknown;
+  private emittedReports = 0;
 
   constructor(
     private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
@@ -49,6 +50,11 @@ export class ResponsePartEmitter {
   report(part: vscode.LanguageModelResponsePart): void {
     this.flush();
     this.progress.report(part);
+    this.emittedReports++;
+  }
+
+  get reportCount(): number {
+    return this.emittedReports;
   }
 
   flush(): void {
@@ -99,9 +105,13 @@ export class ResponsePartEmitter {
     for (const part of parts) {
       if (part.kind === 'text') {
         this.progress.report(new vscode.LanguageModelTextPart(part.value));
+        this.emittedReports++;
       } else {
         const thinking = createThinkingPart(part.value);
-        if (thinking) this.progress.report(thinking);
+        if (thinking) {
+          this.progress.report(thinking);
+          this.emittedReports++;
+        }
       }
     }
   }

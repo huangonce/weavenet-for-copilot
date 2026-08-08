@@ -10,6 +10,8 @@ coverage/**
 weavenet-for-copilot-*.vsix
 .vscode/**
 .github/**
+release-please-config.json
+.release-please-manifest.json
 .agents/**
 CONTEXT.md
 .gitignore

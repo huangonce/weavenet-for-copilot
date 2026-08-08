@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { AuthManager } from '../auth/auth';
 import { getConfig, getProfileConfiguration } from '../config/config';
@@ -16,8 +17,9 @@ import { catalogRevision } from './connectionRuntimeManager';
 import { ConnectionDiagnosticsStore } from './connectionDiagnosticsStore';
 import { ConnectionTestService } from './connectionTestService';
 import type { ConnectionTestResult } from './connectionTestService';
-import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
+import { AdaptiveTokenUsage } from './tokenUsage';
+import { RequestDumpStore } from './requestDumpStore';
 import { ModelBindingRegistry } from './modelBindingRegistry';
 import { ModelCatalogService } from './modelCatalogService';
 import { ModelSnapshotStore } from './modelSnapshotStore';
@@ -64,6 +66,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly bindingRegistry = new ModelBindingRegistry();
   private readonly connectionTest: ConnectionTestService;
   private readonly visionDescriptionCache = new VisionDescriptionCache();
+  private readonly tokenUsage = new AdaptiveTokenUsage();
+  private readonly requestDumps: RequestDumpStore;
   private visionCacheGeneration = 0;
   private connectionStatus: ConnectionStatus = {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
@@ -73,6 +77,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeConnectionStatus = this.connectionStatusEmitter.event;
 
   constructor(context: vscode.ExtensionContext) {
+    this.requestDumps = new RequestDumpStore(
+      join(context.globalStorageUri.fsPath, 'request-dumps'),
+      (message) => this.output.appendLine(`[${new Date().toISOString()}] ${message}`),
+    );
     this.auth = new AuthManager(context.secrets);
     this.diagnosticsStore = new ConnectionDiagnosticsStore(context.globalState);
     this.modelCatalog = new ModelCatalogService(new ModelSnapshotStore(context.globalState), this.debug.bind(this));
@@ -300,6 +308,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         token,
         apiKey,
         debug: this.debug.bind(this),
+        tokenUsage: this.tokenUsage,
+        requestDumps: this.requestDumps,
       };
       this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
       if (routedModel.protocol === 'claude') await provideClaudeResponse(context);
@@ -320,6 +330,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.output.show(true);
   }
 
+  async openRequestDumps(): Promise<void> {
+    await this.requestDumps.open();
+  }
+
   refreshModelPicker(): void {
     this.changeEmitter.fire();
   }
@@ -332,8 +346,12 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     this.debug(getConfig(), message);
   }
 
-  private debug(config: ReturnType<typeof getConfig>, message: string): void {
-    if (config.debug) {
+  private debug(
+    config: ReturnType<typeof getConfig>,
+    message: string,
+    level: 'metadata' | 'usage' = 'metadata',
+  ): void {
+    if (level === 'usage' || config.debugMode !== 'minimal') {
       this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
     }
   }
@@ -362,23 +380,11 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   }
 
   async provideTokenCount(
-    _model: vscode.LanguageModelChatInformation,
+    model: vscode.LanguageModelChatInformation,
     text: string | vscode.LanguageModelChatRequestMessage,
     _token: vscode.CancellationToken,
   ): Promise<number> {
-    if (typeof text === 'string') return estimateTextTokens(text);
-    let tokens = 4;
-    for (const part of text.content) {
-      if (part instanceof vscode.LanguageModelTextPart) tokens += estimateTextTokens(part.value);
-      else if (part instanceof vscode.LanguageModelToolCallPart) {
-        tokens += estimateTextTokens(part.name) + estimateTextTokens(JSON.stringify(part.input ?? {}));
-      } else if (part instanceof vscode.LanguageModelToolResultPart) {
-        tokens += estimateTextTokens(JSON.stringify(part.content));
-      } else if (part instanceof vscode.LanguageModelDataPart) {
-        tokens += Math.max(256, Math.ceil(part.data.byteLength / 768));
-      }
-    }
-    return tokens;
+    return this.tokenUsage.count(model.id, text);
   }
 
   private showRefreshSummary(): void {

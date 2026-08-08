@@ -482,7 +482,7 @@ describe('command registration', () => {
 
     const disposable = registerConnectionCommands({ subscriptions: [] } as never, provider);
 
-    expect(register).toHaveBeenCalledTimes(17);
+    expect(register).toHaveBeenCalledTimes(18);
     expect(registered).toEqual([
       'weavenet-copilot.setRelayKey',
       'weavenet-copilot.clearRelayKey',
@@ -500,6 +500,7 @@ describe('command registration', () => {
       'weavenet-copilot.refreshModelMetadata',
       'weavenet-copilot.pickVisionProxyModel',
       'weavenet-copilot.showDebugLog',
+      'weavenet-copilot.openRequestDumps',
       'weavenet-copilot.openSettings',
     ]);
     expect(disposable).toBeInstanceOf(vscode.Disposable);

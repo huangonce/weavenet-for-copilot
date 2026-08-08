@@ -32,6 +32,7 @@ export function registerConnectionCommands(
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata(provider)),
     vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel(provider)),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),
+    vscode.commands.registerCommand('weavenet-copilot.openRequestDumps', () => provider.openRequestDumps()),
     vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', configurationSection)),
   );
 }

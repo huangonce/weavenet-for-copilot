@@ -131,6 +131,9 @@ describe('connection-scoped route settings', () => {
   function mockConfiguration(values: Record<string, unknown>): void {
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
       get: <T>(key: string) => values[key] as T | undefined,
+      inspect: <T>(key: string) => key === 'debugMode' && Object.hasOwn(values, key)
+        ? { globalValue: values[key] as T }
+        : undefined,
     } as never);
   }
 
@@ -179,6 +182,17 @@ describe('connection-scoped route settings', () => {
     mockConfiguration({ openaiApiStrategy: value });
 
     expect(getConfig().openaiApiStrategy).toBe(expected);
+  });
+
+  it('normalizes diagnostics explicitly and keeps experimental tool stabilization opt-in', () => {
+    mockConfiguration({ debug: true, debugMode: 'minimal' });
+    expect(getConfig()).toMatchObject({ debug: false, debugMode: 'minimal', stabilizeToolList: false });
+
+    mockConfiguration({ debug: true, debugMode: 'verbose', 'experimental.stabilizeToolList': true });
+    expect(getConfig()).toMatchObject({ debug: true, debugMode: 'verbose', stabilizeToolList: true });
+
+    mockConfiguration({ debug: true, debugMode: 'invalid' });
+    expect(getConfig()).toMatchObject({ debug: true, debugMode: 'metadata' });
   });
 
   it('keeps the vision proxy opt-in and normalizes its exact model and prompt settings', () => {
