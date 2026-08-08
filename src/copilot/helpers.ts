@@ -78,6 +78,15 @@ export function reportThinking(
   id?: string,
   metadata?: Record<string, unknown>,
 ): void {
+  const part = createThinkingPart(text, id, metadata);
+  if (part) progress.report(part);
+}
+
+export function createThinkingPart(
+  text: string,
+  id?: string,
+  metadata?: Record<string, unknown>,
+): vscode.LanguageModelResponsePart | undefined {
   const ThinkingPart = (vscode as unknown as {
     LanguageModelThinkingPart?: new (
       value: string,
@@ -87,8 +96,7 @@ export function reportThinking(
   }).LanguageModelThinkingPart;
   if (!ThinkingPart) {
     // A metadata-only part has nothing to show without a thinking part type.
-    if (text) progress.report(new vscode.LanguageModelTextPart(text));
-    return;
+    return text ? new vscode.LanguageModelTextPart(text) : undefined;
   }
-  progress.report(new ThinkingPart(text, id, metadata));
+  return new ThinkingPart(text, id, metadata);
 }

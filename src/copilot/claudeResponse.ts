@@ -9,12 +9,12 @@ import {
   clampClaudeTemperature,
   getConfiguredReasoningEffort,
   parseToolArguments,
-  reportThinking,
   toClaudeThinking,
 } from './helpers';
 import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
+import { ResponsePartEmitter } from './responsePartEmitter';
 
 export interface ClaudeResponseContext {
   readonly config: ExtensionConfig;
@@ -61,6 +61,7 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   };
   logClaudeRequest(debug, config, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'Claude', model.id, request.messages.length, request.tools?.length ?? 0);
+  const output = new ResponsePartEmitter(progress);
   const client = new RelayClient({
     baseUrl: config.baseUrl,
     apiKey,
@@ -75,30 +76,33 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     await client.streamClaudeMessages(request, {
       onContent: (text) => {
         diagnostics.onContent();
-        progress.report(new vscode.LanguageModelTextPart(text));
+        output.text(text);
       },
       onReasoning: (text) => {
         diagnostics.onReasoning();
-        reportThinking(progress, text);
+        output.thinking(text);
       },
       onClaudeUsage: (usage, responseId) => logClaudeUsage(debug, config, usage, responseId),
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onToolCall: (toolCall) => {
         diagnostics.onToolCall();
-        progress.report(new vscode.LanguageModelToolCallPart(
+        output.report(new vscode.LanguageModelToolCallPart(
           toolCall.id,
           toolCall.function.name,
           parseToolArguments(toolCall.function.arguments),
         ));
       },
     }, token);
+    output.flush();
     diagnostics.complete();
   } catch (error) {
     if (token.isCancellationRequested) {
+      output.discard();
       diagnostics.cancelled();
       throw new vscode.CancellationError();
     }
+    try { output.flush(); } catch { /* Preserve the stream failure. */ }
     diagnostics.failed(error);
     throw toLanguageModelError(error);
   }
