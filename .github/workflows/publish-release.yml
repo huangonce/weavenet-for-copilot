@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     concurrency:
       group: publish-${{ inputs.ref }}
       cancel-in-progress: false
@@ -97,10 +99,8 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Publish to Open VSX
-        if: ${{ secrets.OVSX_PAT != '' }}
+        if: ${{ env.OVSX_PAT != '' }}
         run: npm exec -- ovsx publish --skip-duplicate "${{ steps.package.outputs.vsix }}"
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
 
       - name: Attach VSIX to GitHub Release
         uses: softprops/action-gh-release@v2

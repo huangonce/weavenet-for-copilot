@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.13 - 2026-08-08
+
+- 修复 `0.7.12` 首次启用的可复用发布工作流无法通过 GitHub Actions 静态校验的问题：可选 `OVSX_PAT` 现在先映射为 job 环境变量，再由 Open VSX 步骤判断是否配置，不再在 `if` 表达式中直接引用受限制的 `secrets` 上下文。`0.7.12` 未进入 Marketplace；本版本包含其全部功能与修复。
+
 ## 0.7.12 - 2026-08-08
 
 - 新增 DeepSeek Chat 专用协议适配：直连 `api.deepseek.com` 自动识别，自定义网关可声明 `openai.dialect: "deepseek"`；请求使用 DeepSeek 原生 `thinking` 开关，并将流式思考以有界隐藏元数据带回下一轮的 `reasoning_content`，改善工具调用后的多轮 Agent 稳定性。标题、分类、设置解析等 Copilot 辅助请求会自动关闭思考，避免无意义延迟和消耗。
