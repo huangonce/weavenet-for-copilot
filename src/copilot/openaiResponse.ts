@@ -12,16 +12,17 @@ import {
   convertResponsesInput,
   convertResponsesTools,
   convertTools,
-  RESPONSES_REASONING_METADATA_KEY,
 } from './convert';
 import {
-  getConfiguredContextWindow,
   getConfiguredReasoningEffort,
   parseToolArguments,
 } from './helpers';
 import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
+import { cloneReplayState, ReplayBudget } from '../relay/replayState';
+import { hasProtocolReplayCarrier, prepareProtocolTools, reconcileProtocolText, reportProtocolReplay, warnProtocolReplayUnavailable } from './protocolState';
+import type { ResponsesOutputItem, ToolCall } from '../relay/types';
 import { ResponsePartEmitter } from './responsePartEmitter';
 
 export interface OpenAIResponseContext {
@@ -33,6 +34,7 @@ export interface OpenAIResponseContext {
   readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>;
   readonly token: vscode.CancellationToken;
   readonly apiKey: string;
+  readonly protocolIdentity: string;
   readonly debug: DebugLogger;
 }
 
@@ -51,37 +53,42 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
   const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
     ? getOpenAIPromptCacheKey(config)
     : undefined;
+  const replayReasoningContent = routedModel.openai?.replayReasoningContent === true;
+  const replayAvailable = hasProtocolReplayCarrier();
+  if (!replayAvailable) warnProtocolReplayUnavailable('OpenAI');
+  // Buffering a replay payload needs the host carrier. Without it, tool calls
+  // must be published immediately instead of waiting for an impossible replay.
+  const bufferForReplay = replayReasoningContent && replayAvailable;
   const convertedMessages = convertMessages(
     messages,
     supportsImageInputForRoutedModel(routedModel, config),
     routedModel.openai?.developerRole === true,
+    replayReasoningContent, context.protocolIdentity, routedModel.openai?.imageCompatibility === 'legacy-relay',
   );
   const hasImageInput = convertedMessages.some((message) =>
     Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'));
-  const contextWindow = getConfiguredContextWindow(routedModel, options);
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
-  const tokenLimit = !hasImageInput && config.sendMaxTokens
+  const useImageHints = !hasImageInput || routedModel.openai?.imageCompatibility !== 'legacy-relay';
+  const tokenLimit = useImageHints && config.sendMaxTokens
     ? createTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
     : {};
-  // Match VS Code's built-in Custom Endpoint payload for multimodal Chat
-  // Completions. Optional relay hints can change upstream routing and are
-  // deliberately omitted when an image is present.
+  // Standard images keep supported parameters. A relay-specific omission
+  // policy must be selected explicitly instead of overriding every image request.
   const request: ChatRequest = {
     model: routedModel.upstreamId,
     messages: convertedMessages,
     stream: true,
-    temperature: config.temperature,
+    temperature: allowsSampling(routedModel, reasoningEffort) ? config.temperature : undefined,
     // OpenAI recommends changing temperature or top_p, but not both.
-    top_p: config.temperature === undefined ? config.topP : undefined,
+    top_p: allowsSampling(routedModel, reasoningEffort) && config.temperature === undefined ? config.topP : undefined,
     ...(tools?.length ? {
       tools,
       tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
     } : {}),
     ...tokenLimit,
-    ...(!hasImageInput && routedModel.openai?.contextWindow === true && contextWindow ? { context_window: contextWindow } : {}),
-    ...(!hasImageInput && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-    ...(!hasImageInput && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
-    ...(!hasImageInput && routedModel.openai?.store === true ? { store: false as const } : {}),
+    ...(useImageHints && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    ...(useImageHints && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(useImageHints && routedModel.openai?.store === true ? { store: false as const } : {}),
     ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
     stream_options: { include_usage: true },
   };
@@ -89,14 +96,21 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
   const diagnostics = createRequestDiagnostics(debug, config, 'OpenAI', model.id, request.messages.length, request.tools?.length ?? 0);
   const output = new ResponsePartEmitter(progress);
 
+  const replayBudget = new ReplayBudget();
+  let replyText = '';
+  let replyReasoning = '';
+  const pendingTools: ToolCall[] = [];
+
   try {
     await client.streamChatCompletion(request, {
       onContent: (text) => {
         diagnostics.onContent();
+        if (bufferForReplay) { replayBudget.reserve(text); replyText += text; }
         output.text(text);
       },
       onReasoning: (text) => {
         diagnostics.onReasoning();
+        if (bufferForReplay) { replayBudget.reserve(text); replyReasoning += text; }
         output.thinking(text);
       },
       onRequest: diagnostics.onRequest,
@@ -107,18 +121,24 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
       onRefusal: (text) => {
         diagnostics.onRefusal();
+        if (bufferForReplay) { replayBudget.reserve(text); replyText += text; }
         output.text(text);
       },
       onToolCall: (toolCall) => {
         const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
-        output.report(new vscode.LanguageModelToolCallPart(
-          toolCall.id,
-          toolCall.function.name,
-          argumentsValue,
-        ));
+        if (bufferForReplay) { replayBudget.reserveJson(toolCall); pendingTools.push(cloneReplayState(toolCall)); }
+        else output.report(new vscode.LanguageModelToolCallPart(toolCall.id, toolCall.function.name, argumentsValue));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    if (bufferForReplay) {
+      const parts = prepareProtocolTools(pendingTools);
+      reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'chat-completions', displayText: replyText,
+        chat: { role: 'assistant', content: replyText, reasoning_content: replyReasoning,
+          ...(pendingTools.length ? { tool_calls: pendingTools } : {}) } });
+      for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
+    }
     output.flush();
     diagnostics.complete();
   } catch (error) {
@@ -154,6 +174,8 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
+  const replayAvailable = hasProtocolReplayCarrier();
+  if (!replayAvailable) warnProtocolReplayUnavailable('Responses');
   const encryptedReasoning = routedModel.openai?.encryptedReasoning === true;
   const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
     ? getOpenAIPromptCacheKey(config)
@@ -162,16 +184,17 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     messages,
     supportsImageInput,
     routedModel.openai?.replayReasoningContent === true,
-    routedModel.openai?.assistantPhase === true,
-    encryptedReasoning,
+    routedModel.openai?.assistantPhase !== false,
+    encryptedReasoning, context.protocolIdentity,
   );
   const hasImageInput = input.some((item) =>
     'content' in item && Array.isArray(item.content) && item.content.some((part) => part.type === 'input_image'));
   const reasoningEffort = getConfiguredReasoningEffort(routedModel, options);
-  // Summaries are streamed as soon as the Responses API starts thinking, so they are
-  // on by default; a gateway that rejects the field can opt out with an explicit false.
-  const reasoningSummary = routedModel.openai?.reasoningSummary !== false;
-  const tokenLimit = !hasImageInput && config.sendMaxTokens
+  // Reasoning and summaries are distinct capabilities. Unknown summary
+  // support stays omitted even when the model supports reasoning.
+  const reasoningSummary = routedModel.thinking === true && routedModel.openai?.reasoningSummary === true;
+  const useImageHints = !hasImageInput || routedModel.openai?.imageCompatibility !== 'legacy-relay';
+  const tokenLimit = useImageHints && config.sendMaxTokens
     ? createResponsesTokenLimit(routedModel, model.maxOutputTokens ?? config.maxOutputTokens)
     : {};
   const request: ResponsesRequest = {
@@ -179,12 +202,12 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     input,
     stream: true,
     store: false,
-    ...(!hasImageInput && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(useImageHints && promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(encryptedReasoning ? { include: ['reasoning.encrypted_content'] } : {}),
     ...(instructions ? { instructions } : {}),
-    temperature: config.temperature,
+    temperature: allowsSampling(routedModel, reasoningEffort) ? config.temperature : undefined,
     // OpenAI recommends changing temperature or top_p, but not both.
-    top_p: config.temperature === undefined ? config.topP : undefined,
+    top_p: allowsSampling(routedModel, reasoningEffort) && config.temperature === undefined ? config.topP : undefined,
     ...(tools?.length ? {
       tools,
       tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
@@ -196,11 +219,18 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   logResponsesRequest(debug, config, request);
   const diagnostics = createRequestDiagnostics(debug, config, 'Responses', model.id, input.length, request.tools?.length ?? 0);
   const output = new ResponsePartEmitter(progress);
+  const replayBudget = new ReplayBudget();
+  let replyText = '';
+  let terminal: string | undefined;
+  let outputItems: readonly ResponsesOutputItem[] | undefined;
+  const pendingTools: ToolCall[] = [];
+  const reasoningItems: ResponsesOutputItem[] = [];
 
   try {
     await client.streamResponses(request, {
       onContent: (text) => {
         diagnostics.onContent();
+        replayBudget.reserve(text); replyText += text;
         output.text(text);
       },
       onReasoning: (text) => {
@@ -208,35 +238,42 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
         output.thinking(text);
       },
       onResponsesReasoningItem: (item) => {
-        // Parked on a metadata-only thinking part so the next turn can replay
-        // the item verbatim; the payload stays opaque to the extension.
-        if (!encryptedReasoning || !item.id || !item.encrypted_content) return;
-        output.thinking('', item.id, {
-          [RESPONSES_REASONING_METADATA_KEY]: {
-            encryptedContent: item.encrypted_content,
-            summary: item.summary ?? [],
-          },
-        });
+        replayBudget.reserveJson(item); reasoningItems.push(cloneReplayState(item));
       },
+      onResponsesOutputItems: (items) => { outputItems = cloneReplayState(items); },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
       onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-responses'),
       onResponse: diagnostics.onResponse,
-      onStreamEnd: diagnostics.onStreamEnd,
+      onStreamEnd: (protocol, event) => { terminal = event; diagnostics.onStreamEnd(protocol, event); },
       onRefusal: (text) => {
         diagnostics.onRefusal();
+        replayBudget.reserve(text); replyText += text;
         output.text(text);
       },
       onToolCall: (toolCall) => {
         const argumentsValue = parseToolArguments(toolCall.function.arguments);
         diagnostics.onToolCall();
-        output.report(new vscode.LanguageModelToolCallPart(
-          toolCall.id,
-          toolCall.function.name,
-          argumentsValue,
-        ));
+        void argumentsValue;
+        replayBudget.reserveJson(toolCall); pendingTools.push(cloneReplayState(toolCall));
       },
     }, token, routedModel.openai?.clientRequestId === true);
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    const items: readonly ResponsesOutputItem[] = outputItems ?? [
+      ...reasoningItems,
+      ...(replyText ? [{ type: 'message' as const, role: 'assistant' as const, content: [{ type: 'output_text' as const, text: replyText }] }] : []),
+      ...pendingTools.map((call) => ({ type: 'function_call' as const, call_id: call.id, name: call.function.name, arguments: call.function.arguments })),
+    ];
+    const complete = terminal !== 'incomplete';
+    const savedItems = complete ? items : items.filter((item) => item.type === 'message');
+    replyText = reconcileProtocolText(output, replyText, savedItems.flatMap(item => item.type === 'message'
+      ? (item.content ?? []).map(part => part.type === 'refusal' ? part.refusal ?? '' : part.text ?? '') : []).join(''));
+    const calls = complete ? items.flatMap((item): ToolCall[] => item.type === 'function_call' ? [{
+      id: item.call_id ?? '', type: 'function', function: { name: item.name, arguments: item.arguments },
+    }] : []) : [];
+    const parts = prepareProtocolTools(calls);
+    if (replayAvailable) reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'responses', displayText: replyText, responses: savedItems });
+    for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
     output.flush();
     diagnostics.complete();
   } catch (error) {
@@ -258,6 +295,12 @@ function flushPartialOutput(output: ResponsePartEmitter): void {
     // Preserve the request/transport failure that ended the stream. A progress
     // failure is already the primary error when it originated from flush().
   }
+}
+
+function allowsSampling(model: RoutedModel, effort: ReasoningEffort | undefined): boolean {
+  if (model.openai?.sampling === false) return false;
+  if (model.openai?.samplingEfforts) return effort !== undefined && model.openai.samplingEfforts.includes(effort);
+  return model.openai?.sampling === true || model.thinking === false;
 }
 
 function getOpenAIPromptCacheKey(config: ExtensionConfig): string {

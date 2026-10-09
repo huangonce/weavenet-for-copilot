@@ -48,7 +48,7 @@ describe('profile pool migration', () => {
     expect(result.profiles.map((profile) => profile.name)).toEqual(['Work', 'Personal']);
     expect(result.profiles[0].id).toBe(WORK_ID);
     expect(result.profiles[1].id).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(fixture.settings.get('activeProfile')).toBe('');
+    expect(fixture.settings.get('activeProfile')).toBeUndefined();
   });
 
   it('regenerates duplicate valid UUIDs instead of dropping a connection', async () => {
@@ -87,7 +87,7 @@ describe('profile pool migration', () => {
       includeModels: ['^legacy-'],
       excludeModels: ['-old$'],
       requestHeaders: { 'X-Tenant': 'legacy' },
-      models: [{ id: 'private-model', route: 'claude' }],
+      models: [{ id: 'private-model', apiType: 'messages' }],
     });
     expect(profiles[1]).toMatchObject({ id: WORK_ID, name: 'Work' });
     expect(profiles[1].includeModels).toBeUndefined();
@@ -133,7 +133,7 @@ describe('profile pool migration', () => {
   it('rolls profiles and active selection back when persisting the migration fails', async () => {
     const previousProfiles = [{ name: 'Work', baseUrl: 'https://work.example.test/v1' }];
     const fixture = configurationFixture({ profiles: previousProfiles, activeProfile: 'Work' });
-    fixture.failUpdate('activeProfile', '');
+    fixture.failUpdate('activeProfile', undefined);
 
     await expect(migrateProfilePoolConfiguration()).rejects.toThrow('configuration update failed');
 

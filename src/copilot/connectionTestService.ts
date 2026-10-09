@@ -1,10 +1,8 @@
 import type { AuthManager } from '../auth/auth';
 import { getConfig } from '../config/config';
-import type { ConfiguredModel, ConnectionProfile } from '../config/config';
+import type { ApiType, ConnectionProfile } from '../config/config';
 import { RelayClient } from '../relay/client';
 import type { RelayEndpointTestResult } from '../relay/client';
-import { isClaudeModelId } from '../relay/models';
-import type { ModelsResponse } from '../relay/types';
 import { normalizeRelayBaseUrl } from '../relay/url';
 import { ConnectionTestError, describeConnectionTestError, safeHost } from './connection';
 import type { ConnectionTestFailure } from './connection';
@@ -82,6 +80,7 @@ export class ConnectionTestService {
       const client = new RelayClient({
         baseUrl: profile.baseUrl,
         apiKey,
+        authScheme: config.apiType === 'messages' ? 'x-api-key' : 'bearer',
         requestHeaders: profile.requestHeaders ?? {},
         anthropicVersion: config.anthropicVersion,
         requestTimeoutMs: config.requestTimeoutMs,
@@ -91,26 +90,32 @@ export class ConnectionTestService {
       const { models, diagnostic } = await client.testModels();
       const modelCount = Array.isArray(models.data) ? models.data.length : 0;
       const probes: ConnectionProbeResult[] = [successfulProbe('models', modelsStartedAt, diagnostic)];
-      const candidates = selectProbeCandidates(profile.models ?? [], models);
-      if (candidates.openai) {
-        const model = candidates.openai;
-        probes.push(await runProtocolProbe('openai.nonStreaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, false)));
-        probes.push(await runProtocolProbe('openai.streaming', '/chat/completions', model, () => client.testOpenAIChatCompletion(model, true)));
-        // A free GET reports whether the relay exposes /responses at all. It is
-        // informational only and never downgrades overall health on its own.
-        probes.push(await runOpenAIResponsesProbe(client));
-      } else {
-        probes.push(skippedProbe('openai.nonStreaming', '/chat/completions', 'noOpenAIModel'));
-        probes.push(skippedProbe('openai.streaming', '/chat/completions', 'noOpenAIModel'));
-        probes.push(skippedProbe('openai.responses', '/responses', 'noOpenAIModel'));
+      const declarations = new Map(config.models.map((model) => [model.id, model]));
+      const candidates = new Map<ApiType, string>();
+      for (const model of config.models) {
+        const apiType = model.apiType ?? config.apiType;
+        if (!candidates.has(apiType)) candidates.set(apiType, model.id);
       }
-      if (candidates.claude) {
-        const model = candidates.claude;
-        probes.push(await runProtocolProbe('claude.nonStreaming', '/messages', model, () => client.testClaudeMessages(model, false)));
-        probes.push(await runProtocolProbe('claude.streaming', '/messages', model, () => client.testClaudeMessages(model, true)));
-      } else {
-        probes.push(skippedProbe('claude.nonStreaming', '/messages', 'noClaudeModel'));
-        probes.push(skippedProbe('claude.streaming', '/messages', 'noClaudeModel'));
+      for (const model of models.data ?? []) {
+        const declaration = declarations.get(model.id);
+        const apiType = declaration?.apiType ?? config.apiType;
+        if (!candidates.has(apiType)) candidates.set(apiType, model.id);
+      }
+      for (const [apiType, modelId] of candidates) {
+        const prefix = apiType === 'messages' ? 'claude' : apiType === 'responses' ? 'responses' : 'openai';
+        const endpoint = apiType === 'messages' ? '/messages' : apiType === 'responses' ? '/responses' : '/chat/completions';
+        const declaration = config.models.filter((model) => model.id === modelId
+          && (model.apiType ?? config.apiType) === apiType).at(-1);
+        const tokenLimitField = declaration?.openai?.tokenLimitField ?? 'max_tokens';
+        const operation = (stream: boolean) => {
+          if (apiType === 'messages') return client.testClaudeMessages(modelId, stream);
+          if (apiType === 'responses') return client.testOpenAIResponses(modelId, stream);
+          if (tokenLimitField === 'omit') return Promise.reject(new ConnectionTestError({ category: 'protocol',
+            message: 'This model disables output limits; bounded generation tests are unavailable.' }));
+          return client.testOpenAIChatCompletion(modelId, stream, undefined, tokenLimitField);
+        };
+        probes.push(await runProtocolProbe(`${prefix}.nonStreaming`, endpoint, modelId, () => operation(false)));
+        probes.push(await runProtocolProbe(`${prefix}.streaming`, endpoint, modelId, () => operation(true)));
       }
       const completedAt = Date.now();
       const result: ConnectionDiagnosticsSnapshot = {
@@ -142,18 +147,6 @@ export class ConnectionTestService {
       throw new ConnectionTestError(failure);
     }
   }
-}
-
-function selectProbeCandidates(
-  configured: readonly ConfiguredModel[],
-  models: ModelsResponse,
-): { openai?: string; claude?: string } {
-  const explicitOpenAI = configured.find((model) => model.route === 'openai' || model.route === 'chatgpt')?.id;
-  const explicitClaude = configured.find((model) => model.route === 'claude')?.id;
-  const catalog = models.data ?? [];
-  const claude = explicitClaude ?? catalog.find((model) => isClaudeModelId(model.id))?.id;
-  const openai = explicitOpenAI ?? catalog.find((model) => model.id !== claude && !isClaudeModelId(model.id))?.id;
-  return { openai, claude };
 }
 
 function successfulProbe(
@@ -204,41 +197,4 @@ async function runProtocolProbe(
 
 function probeVerdictForFailure(failure: ConnectionTestFailure): ConnectionProbeVerdict {
   return failure.category === 'notFound' ? 'unsupported' : 'indeterminate';
-}
-
-async function runOpenAIResponsesProbe(client: RelayClient): Promise<ConnectionProbeResult> {
-  const startedAt = Date.now();
-  try {
-    // probeResponsesEndpoint is a free GET and never throws; it maps network
-    // failures to 'unknown', which we surface as 'indeterminate'.
-    const availability = await client.probeResponsesEndpoint();
-    return {
-      probe: 'openai.responses',
-      verdict: availability === 'supported' ? 'supported' : availability === 'unsupported' ? 'unsupported' : 'indeterminate',
-      endpointPath: '/responses',
-      startedAt,
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-    };
-  } catch (error) {
-    const failure = describeConnectionTestError(error);
-    return {
-      probe: 'openai.responses',
-      verdict: 'indeterminate',
-      endpointPath: '/responses',
-      startedAt,
-      elapsedMs: Math.max(0, Date.now() - startedAt),
-      status: failure.status,
-      responseType: failure.responseType,
-      requestId: failure.requestId,
-      failure,
-    };
-  }
-}
-
-function skippedProbe(
-  probe: ConnectionProbeId,
-  endpointPath: '/chat/completions' | '/responses' | '/messages',
-  skippedReason: 'noOpenAIModel' | 'noClaudeModel',
-): ConnectionProbeResult {
-  return { probe, verdict: 'skipped', endpointPath, startedAt: Date.now(), elapsedMs: 0, skippedReason };
 }

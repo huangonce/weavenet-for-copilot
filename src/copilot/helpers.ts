@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
+import { t } from '../l10n';
+import { isClaudeEffort } from '../relay/claudeCapabilities';
 import { isReasoningEffort } from '../relay/openaiCapabilities';
-import type { ClaudeThinking, ReasoningEffort, RoutedModel } from '../relay/types';
+import type { ClaudeEffort, ClaudeThinking, ReasoningEffort, RoutedModel } from '../relay/types';
 
 export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
   readonly modelConfiguration?: Record<string, unknown>;
@@ -10,23 +12,24 @@ export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
 export function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
   if (!model?.thinking) return undefined;
   const value = options.modelOptions?.reasoningEffort ?? options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort;
-  if (model.protocol === 'openai' && model.openai?.reasoningEfforts?.length) {
+  if (model.apiType === 'messages' && model.claude?.thinkingMode === 'adaptive') {
+    const efforts: readonly ClaudeEffort[] = model.claude.reasoningEfforts ?? ['low', 'medium', 'high', 'max'];
+    if (isClaudeEffort(value) && efforts.includes(value)) return value;
+    return model.claude.defaultReasoningEffort ?? (efforts.includes('high') ? 'high' : efforts[0]);
+  }
+  if (model.apiType !== 'messages' && model.openai?.reasoningEfforts?.length) {
     if (isReasoningEffort(value) && model.openai.reasoningEfforts.includes(value)) return value;
     return model.openai.defaultReasoningEffort;
   }
   return isReasoningEffort(value) ? value : 'high';
 }
 
-export function getConfiguredContextWindow(model: RoutedModel | undefined, options: ModelOptions): number | undefined {
-  if (!model?.contextWindows?.length) return undefined;
-  const value = options.modelOptions?.contextWindow ?? options.modelConfiguration?.contextWindow ?? options.configuration?.contextWindow;
-  if (typeof value !== 'string' || value === 'default') return undefined;
-  const window = Number(value);
-  return Number.isFinite(window) && model.contextWindows.includes(window) ? window : undefined;
-}
-
-export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens: number): { thinking: ClaudeThinking } | undefined {
+export function toClaudeThinking(effort: ReasoningEffort | undefined, maxTokens: number, mode: 'manual' | 'adaptive' = 'manual'): { thinking: ClaudeThinking; output_config?: { effort: ClaudeEffort } } | undefined {
   if (!effort || effort === 'none') return undefined;
+  if (mode === 'adaptive') {
+    if (!isClaudeEffort(effort)) throw new vscode.LanguageModelError(t('Claude adaptive effort must be low, medium, high, xhigh or max.'));
+    return { thinking: { type: 'adaptive' }, output_config: { effort } };
+  }
   const requested = { minimal: 1024, low: 1024, medium: 4096, high: 8192, xhigh: 12000, max: 16000 }[effort];
   const budget = Math.min(requested, Math.max(0, maxTokens - 1024));
   return budget >= 1024 ? { thinking: { type: 'enabled', budget_tokens: budget } } : undefined;
@@ -82,20 +85,33 @@ export function reportThinking(
   if (part) progress.report(part);
 }
 
+type ThinkingPartConstructor = new (
+  value: string,
+  id?: string,
+  metadata?: Record<string, unknown>,
+) => vscode.LanguageModelResponsePart;
+
+/**
+ * The thinking part class is a proposed API surface. A host module may expose it,
+ * omit it, or throw on unknown properties, so every failure degrades the same way.
+ */
+function hostThinkingPart(): ThinkingPartConstructor | undefined {
+  try {
+    return (vscode as unknown as { LanguageModelThinkingPart?: ThinkingPartConstructor }).LanguageModelThinkingPart;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createThinkingPart(
   text: string,
   id?: string,
   metadata?: Record<string, unknown>,
 ): vscode.LanguageModelResponsePart | undefined {
-  const ThinkingPart = (vscode as unknown as {
-    LanguageModelThinkingPart?: new (
-      value: string,
-      id?: string,
-      metadata?: Record<string, unknown>,
-    ) => vscode.LanguageModelResponsePart;
-  }).LanguageModelThinkingPart;
+  const ThinkingPart = hostThinkingPart();
   if (!ThinkingPart) {
-    // A metadata-only part has nothing to show without a thinking part type.
+    // Without a thinking part type, thinking text still reaches the user as
+    // plain text and a metadata-only part has nothing to show.
     return text ? new vscode.LanguageModelTextPart(text) : undefined;
   }
   return new ThinkingPart(text, id, metadata);

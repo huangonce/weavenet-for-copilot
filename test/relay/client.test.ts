@@ -192,27 +192,6 @@ describe('RelayClient', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain('/responses');
   });
 
-  it('reports /responses endpoint availability from a free GET', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
-    await expect(client().probeResponsesEndpoint()).resolves.toBe('supported');
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 405 }));
-    await expect(client().probeResponsesEndpoint()).resolves.toBe('supported');
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
-    await expect(client().probeResponsesEndpoint()).resolves.toBe('unsupported');
-
-    // A gateway may demand a WebSocket upgrade for only some of the models it
-    // routes, so this bodyless GET must not settle the endpoint for all of them.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 426 }));
-    await expect(client().probeResponsesEndpoint()).resolves.toBe('unknown');
-  });
-
-  it('returns unknown when the /responses availability GET fails', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('network down'));
-    await expect(client().probeResponsesEndpoint()).resolves.toBe('unknown');
-  });
-
   it('sanitizes and bounds successful response metadata', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
       headers: { 'content-type': `application/json${'x'.repeat(300)}`, 'x-request-id': `req${'y'.repeat(200)}` },
@@ -248,5 +227,27 @@ describe('RelayClient', () => {
       .mockResolvedValueOnce(new Response('{}', { headers: { 'content-type': 'application/json' } }));
 
     await expect(client().listModels()).rejects.toThrow('invalid or excessive data array');
+  });
+});
+
+describe('documented request headers and token fields', () => {
+  it('includes the Anthropic API version for native model discovery as well as messages', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] })));
+    const native = new RelayClient({ baseUrl: 'https://api.anthropic.com/v1', apiKey: 'key', requestHeaders: {},
+      authScheme: 'x-api-key', anthropicVersion: '2023-06-01', requestTimeoutMs: 100, streamIdleTimeoutMs: 100 });
+    await native.listModels();
+    const headers = new Headers(fetch.mock.calls[0][1]?.headers);
+    expect(headers.get('x-api-key')).toBe('key');
+    expect(headers.get('anthropic-version')).toBe('2023-06-01');
+    expect(headers.get('authorization')).toBeNull();
+  });
+  it('tests a modern Chat model with its declared max_completion_tokens field', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+    })));
+    await client().testOpenAIChatCompletion('o-series', false, undefined, 'max_completion_tokens');
+    const body = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    expect(body.max_completion_tokens).toBe(1);
+    expect(body).not.toHaveProperty('max_tokens');
   });
 });

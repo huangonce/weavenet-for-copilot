@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { t } from '../l10n';
 import type {
   ChatContentPart,
   ChatMessage,
@@ -13,6 +14,7 @@ import type {
   ToolDefinition,
   ToolCall,
 } from '../relay/types';
+import { matchingReplayStates, hasForeignProtocolState } from './replayConversion';
 import { sanitizeJsonSchema, toStrictJsonSchema } from '../relay/schema';
 import {
   canonicalToolInput,
@@ -53,6 +55,9 @@ export function convertMessages(
   request: CanonicalChatRequestSnapshot,
   supportsImageInput: boolean,
   supportsDeveloperRole = false,
+  replayReasoningContent = false,
+  protocolIdentity?: string,
+  legacyImageShape = false,
 ): ChatMessage[] {
   const messages = request.messages;
   const result: ChatMessage[] = [];
@@ -64,6 +69,19 @@ export function convertMessages(
       if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Chat Completions');
       throw unsupportedImageRoleError('OpenAI Chat Completions', role);
     }
+    const replay = matchingReplayStates(message, 'chat-completions', protocolIdentity);
+    if (replay.length) {
+      for (const state of replay) {
+        const { reasoning_content, ...plain } = state.chat!;
+        result.push(replayReasoningContent ? { ...plain, reasoning_content } : plain);
+      }
+      continue;
+    }
+    const foreign = hasForeignProtocolState(message, 'chat-completions', protocolIdentity);
+    if (replayReasoningContent && foreign && message.content.some(part => part.kind === 'toolCall')) {
+      throw new vscode.LanguageModelError(t('Thinking tool history belongs to a different model or connection. Start a new conversation.'));
+    }
+    let reasoningContent = '';
     const contentParts: ChatContentPart[] = [];
     let textContent = '';
     const toolCalls: ToolCall[] = [];
@@ -97,17 +115,20 @@ export function convertMessages(
           image_url: {
             url: `data:${imagePart.mediaType};base64,${imagePart.base64}`,
             detail: 'auto',
-            media_type: imagePart.mediaType,
+            ...(legacyImageShape ? { media_type: imagePart.mediaType } : {}),
           },
         });
-      } else if (part.kind !== 'thinking') assertNever(part);
+      } else if (part.kind === 'thinking') {
+        if (!foreign) reasoningContent += part.value;
+      } else assertNever(part);
     }
 
     if (role === 'assistant') {
-      if (textContent || toolCalls.length > 0) {
+      if (textContent || toolCalls.length > 0 || (replayReasoningContent && reasoningContent)) {
         result.push({
           role,
           content: textContent,
+          ...(replayReasoningContent ? { reasoning_content: reasoningContent } : {}),
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         });
       }
@@ -170,6 +191,7 @@ export function convertResponsesInput(
   replayReasoningContent = false,
   includeAssistantPhase = false,
   encryptedReasoning = false,
+  protocolIdentity?: string,
 ): { input: ResponsesInputItem[]; instructions?: string } {
   const messages = request.messages;
   const result: ResponsesInputItem[] = [];
@@ -189,6 +211,29 @@ export function convertResponsesInput(
       }
       continue;
     }
+    const replay = matchingReplayStates(message, 'responses', protocolIdentity);
+    if (replay.length) {
+      for (const state of replay) for (const item of state.responses ?? []) {
+        if (item.type === 'reasoning') {
+          if (encryptedReasoning && item.id && item.encrypted_content) result.push({ ...item, summary: item.summary ?? [] });
+          else if (replayReasoningContent && item.content?.length) result.push({ ...item, summary: item.summary ?? [] });
+        } else if (item.type === 'message') {
+          const { phase, ...plain } = item;
+          result.push({ ...plain, role: 'assistant', content: item.content ?? [],
+            ...(includeAssistantPhase && phase !== undefined ? { phase } : {}) } as ResponsesInputItem);
+        } else result.push(item as ResponsesInputItem);
+      }
+      continue;
+    }
+    const foreign = hasForeignProtocolState(message, 'responses', protocolIdentity);
+    if (foreign && message.content.some(part => part.kind === 'toolCall')) {
+      throw new vscode.LanguageModelError(t('Responses tool history belongs to a different model or connection. Start a new conversation.'));
+    }
+    const allowLegacyEncrypted = !protocolIdentity && !foreign;
+    if (protocolIdentity && encryptedReasoning && message.content.some(part => part.kind === 'thinking' && part.encryptedContent)
+      && message.content.some(part => part.kind === 'toolCall')) {
+      throw new vscode.LanguageModelError(t('Unbound encrypted tool history cannot be reused safely. Start a new conversation.'));
+    }
     const toolResults: ResponsesInputItem[] = [];
 
     if (role === 'assistant') {
@@ -199,9 +244,7 @@ export function convertResponsesInput(
       // stays directly in front of each group of tool calls, which is the
       // placement the relays requiring it expect.
       const parts = [...message.content];
-      const lastToolCallIndex = parts.findLastIndex((part) => part.kind === 'toolCall');
       let segment: ResponsesInputContentPart[] = [];
-      let segmentIndex = 0;
       let pendingThinking = '';
       let previousWasToolCall = false;
       const flushText = () => {
@@ -209,14 +252,11 @@ export function convertResponsesInput(
         result.push({
           role,
           content: segment,
-          ...(includeAssistantPhase
-            ? { phase: segmentIndex < lastToolCallIndex ? ('commentary' as const) : ('final_answer' as const) }
-            : {}),
         });
         segment = [];
       };
 
-      for (const [index, part] of parts.entries()) {
+      for (const part of parts) {
         if (part.kind === 'toolCall') {
           flushText();
           if (replayReasoningContent && !encryptedReasoning && !previousWasToolCall) {
@@ -237,7 +277,6 @@ export function convertResponsesInput(
         }
         previousWasToolCall = false;
         if (part.kind === 'text') {
-          if (segment.length === 0) segmentIndex = index;
           segment.push({ type: 'output_text', text: part.value });
         } else if (part.kind === 'toolResult') {
           toolResults.push({
@@ -246,12 +285,12 @@ export function convertResponsesInput(
             output: stringifyToolResult(part.content),
           });
         } else if (part.kind === 'thinking') {
-          const replayed = encryptedReasoning ? encryptedReasoningItem(part) : undefined;
+          const replayed = encryptedReasoning && allowLegacyEncrypted ? encryptedReasoningItem(part) : undefined;
           if (replayed) {
             flushText();
             result.push(replayed);
           } else {
-            pendingThinking += part.value;
+            if (!foreign) pendingThinking += part.value;
           }
         } else if (part.kind === 'data') {
           requireCanonicalImage(part);
@@ -433,6 +472,8 @@ export interface ClaudeConversionOptions {
   readonly supportsImageInput: boolean;
   readonly promptCaching?: boolean;
   readonly cacheTTL?: '5m' | '1h';
+  readonly protocolIdentity?: string;
+  readonly requiresThinkingState?: boolean;
 }
 
 export function convertClaudeMessages(
@@ -469,7 +510,19 @@ export function convertClaudeMessages(
     let textContent = '';
     let interruptsToolChain = false;
     if (role === 'assistant' || role === 'system') discardPendingToolUses();
-    for (const part of message.content) {
+    const replay = matchingReplayStates(message, 'messages', options.protocolIdentity);
+    if (replay.length) {
+      for (const state of replay) for (const block of state.claude ?? []) {
+        if (block.type === 'text' && !block.text) continue;
+        blocks.push(block);
+        if (block.type === 'tool_use') pendingToolUseIds.add(block.id);
+      }
+    } else if (role === 'assistant' && message.content.some(part => part.kind === 'toolCall')
+      && (hasForeignProtocolState(message, 'messages', options.protocolIdentity)
+        || (options.requiresThinkingState && message.content.some(part => part.kind === 'thinking' && part.value)))) {
+      throw new vscode.LanguageModelError(t('Native thinking tool history is missing its matching signed state. Start a new conversation.'));
+    }
+    for (const part of replay.length ? [] : message.content) {
       if (part.kind === 'text') {
         textContent += part.value;
         // Anthropic rejects empty text blocks.

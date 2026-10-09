@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
+import { LanguageModelThinkingPart } from '../support/vscode.mock';
 import {
   canonicalToolInput,
   dataPartBytes,
@@ -256,10 +257,15 @@ describe('canonical chat request snapshot', () => {
   it('rejects oversized dense arrays before reading their entries', () => {
     let reads = 0;
     const messages: unknown[] = [];
-    messages.length = 513;
+    // One past the documented long-session bound of 2048 messages.
+    messages.length = 2_049;
     Object.defineProperty(messages, '0', { get() { reads += 1; return undefined; } });
     expect(() => snapshotChatRequest(messages as never)).toThrow('too large or complex');
     expect(reads).toBe(0);
+    const longSession = Array.from({ length: 2_048 }, () => ({
+      role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart('x')],
+    }));
+    expect(snapshotChatRequest(longSession as never).messages).toHaveLength(2_048);
 
     const input: unknown[] = [];
     input.length = 16_384;
@@ -294,7 +300,7 @@ describe('canonical response options snapshot', () => {
         type: 'object', properties: { query: { type: 'string' } },
       } }],
       toolMode: vscode.LanguageModelChatToolMode.Required,
-      modelOptions: { reasoningEffort: 'max', contextWindow: '400000' },
+      modelOptions: { reasoningEffort: 'max' },
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.tools)).toBe(true);
@@ -349,5 +355,26 @@ describe('canonical response options snapshot', () => {
       })),
       toolMode: vscode.LanguageModelChatToolMode.Auto,
     })).toThrow('too large or complex');
+  });
+});
+
+
+describe('official thinking part value formats', () => {
+  it('detaches and joins string arrays while preserving opaque Responses state', () => {
+    const values = ['first', '', ' second'];
+    const part = new LanguageModelThinkingPart(values, 'rs_1', { weavenetResponsesReasoning: { encryptedContent: 'opaque', summary: [] } });
+    const snapshot = snapshotChatRequest([assistant(part as never)]);
+    values[0] = 'changed';
+    expect(snapshot.messages[0].content[0]).toMatchObject({ kind: 'thinking', value: 'first second', id: 'rs_1', encryptedContent: 'opaque' });
+  });
+  it('rejects dynamic arrays without executing their traps', () => {
+    let calls = 0;
+    const values = new Proxy(['text'], { get() { calls++; throw new Error('must not run'); } });
+    expect(() => snapshotChatRequest([assistant(new LanguageModelThinkingPart(values) as never)])).toThrow('dynamic');
+    expect(calls).toBe(0);
+  });
+  it('applies a single text bound across all chunks', () => {
+    const chunk = 'x'.repeat(3 * 1024 * 1024);
+    expect(() => snapshotChatRequest([assistant(new LanguageModelThinkingPart([chunk, chunk]) as never)])).toThrow('too large or complex');
   });
 });

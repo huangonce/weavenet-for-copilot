@@ -9,6 +9,7 @@ import {
   RELAY_API_KEY_SECRET,
 } from '../constants';
 import type { ConnectionProfile } from '../config/config';
+import { t } from '../l10n';
 
 type AuthProfile = Pick<ConnectionProfile, 'id' | 'name'>;
 
@@ -17,9 +18,15 @@ export class AuthManager {
 
   constructor(private readonly secrets: vscode.SecretStorage) {}
 
+  /**
+   * Reads only the id-keyed secret. The legacy name-keyed entry is consumed by
+   * migration during activation and is deliberately never used as a runtime
+   * fallback: a stale entry left behind (for example after a connection was
+   * removed by editing settings directly) would otherwise silently
+   * authenticate an unrelated connection that reuses the same name.
+   */
   async getApiKey(profile: AuthProfile): Promise<string | undefined> {
-    const value = await this.secrets.get(secretKey(profile))
-      ?? await this.secrets.get(legacyProfileSecretKey(profile.name));
+    const value = await this.secrets.get(secretKey(profile));
     return value?.trim() || undefined;
   }
 
@@ -40,11 +47,11 @@ export class AuthManager {
   async promptForApiKeyValue(profileName: string): Promise<string | undefined> {
     const relayLabel = `“${profileName}”`;
     const apiKey = await vscode.window.showInputBox({
-      prompt: `Enter the API key for ${relayLabel}`,
+      prompt: t('Enter the API key for {0}', relayLabel),
       placeHolder: 'sk-...',
       password: true,
       ignoreFocusOut: true,
-      validateInput: (value) => (value.trim() ? undefined : 'API key is required'),
+      validateInput: (value) => (value.trim() ? undefined : t('API key is required')),
     });
 
     return apiKey?.trim() || undefined;
@@ -77,14 +84,21 @@ export class AuthManager {
     const targetKey = secretKey(profile);
     const sourceKey = legacyProfileSecretKey(profile.name);
     const [target, source] = await Promise.all([this.secrets.get(targetKey), this.secrets.get(sourceKey)]);
-    if (target !== undefined || !source?.trim()) return;
+    if (target !== undefined) {
+      // The id-keyed secret is already in place, so any leftover legacy entry is
+      // dead weight that must not stay resolvable per name.
+      if (source !== undefined) await Promise.resolve(this.secrets.delete(sourceKey)).catch(() => undefined);
+      return;
+    }
+    if (!source?.trim()) return;
     try {
       await this.secrets.store(targetKey, source);
       if (await this.secrets.get(targetKey) !== source) throw new Error('Could not verify the migrated API key.');
       await this.secrets.delete(sourceKey);
     } catch {
       await restoreSecret(this.secrets, targetKey, target);
-      // Keep the legacy source intact so getApiKey can continue to use it.
+      // Keep the legacy source so a later activation can retry the migration;
+      // the runtime itself never falls back to it.
       await restoreSecret(this.secrets, sourceKey, source);
     }
   }

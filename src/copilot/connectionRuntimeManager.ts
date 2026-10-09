@@ -15,7 +15,6 @@ import { currentProfileFingerprint, diagnosticsOptions } from './connectionDiagn
 import type { ConnectionDiagnosticsStore } from './connectionDiagnosticsStore';
 import type { ModelCatalogService } from './modelCatalogService';
 import type { RoutedModel } from '../relay/types';
-import { responsesProbeCache } from '../relay/responsesProbeCache';
 import { catalogArtifactRevision, catalogRevision } from './catalogIdentity';
 import { formatLogError } from './requestDiagnostics';
 
@@ -50,7 +49,7 @@ export interface ConnectionRuntime {
   /** Credential-bound identity for persisted snapshots and probe verdicts. */
   artifactRevision?: string;
   models: RoutedModel[];
-  snapshots: Map<RoutedModel['route'], RoutedModel[]>;
+  directory: RoutedModel[];
   generation: number;
   resolved: boolean;
   phase: ConnectionStatusEntry['phase'];
@@ -101,7 +100,6 @@ export class ConnectionRuntimeManager {
     let changed = false;
     for (const [id, runtime] of this.runtimes) {
       if (ids.has(id)) continue;
-      void responsesProbeCache.clearProfile(id);
       void this.options.catalog.deleteProfile(id);
       runtime.generation++;
       this.runtimes.delete(id);
@@ -116,7 +114,7 @@ export class ConnectionRuntimeManager {
           // Snapshot restoration waits until the API key is available so the
           // store can prove the record belongs to this exact credential.
           models: [],
-          snapshots: new Map(),
+          directory: [],
           generation: 0, resolved: false, phase: 'refreshing',
           lastDiagnostics: this.options.diagnosticsStore.get(profile, diagnosticsOptions()),
         });
@@ -124,14 +122,13 @@ export class ConnectionRuntimeManager {
       } else if (existing.revision !== revision) {
         // baseUrl, headers or fixed models changed: prior probe verdicts and
         // model snapshots no longer apply to this profile.
-        void responsesProbeCache.clearProfile(profile.id);
         void this.options.catalog.deleteProfile(profile.id);
         existing.generation++;
         existing.profile = profile;
         existing.revision = revision;
         existing.artifactRevision = undefined;
         existing.models = [];
-        existing.snapshots.clear();
+        existing.directory = [];
         existing.resolved = false;
         existing.phase = 'refreshing';
         existing.message = undefined;
@@ -156,9 +153,9 @@ export class ConnectionRuntimeManager {
     else this.options.onCatalogChanged();
   }
 
-  async refreshAll(force: boolean, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
+  async refreshAll(force: boolean, token?: vscode.CancellationToken): Promise<void> {
     const runtimes = this.syncProfiles();
-    await mapWithConcurrency(runtimes, 3, (runtime) => this.requestConnectionRefresh(runtime, force, token, forceProbe));
+    await mapWithConcurrency(runtimes, 3, (runtime) => this.requestConnectionRefresh(runtime, force, token));
   }
 
   async refreshConnection(profileId: string, force = true): Promise<void> {
@@ -177,14 +174,13 @@ export class ConnectionRuntimeManager {
         runtime.resolved = false;
         runtime.artifactRevision = undefined;
         runtime.models = [];
-        runtime.snapshots.clear();
+        runtime.directory = [];
         runtime.phase = 'refreshing';
         runtime.message = undefined;
       }
       this.rebuildAggregates();
       await this.options.diagnosticsStore.clear();
       await this.options.catalog.clearAll();
-      await responsesProbeCache.clear();
       await this.refreshAll(false);
       return;
     }
@@ -195,14 +191,13 @@ export class ConnectionRuntimeManager {
       runtime.resolved = false;
       runtime.artifactRevision = undefined;
       runtime.models = [];
-      runtime.snapshots.clear();
+      runtime.directory = [];
       runtime.phase = 'refreshing';
       runtime.message = undefined;
       this.rebuildAggregates();
     }
     await this.options.diagnosticsStore.deleteProfile(profileId);
     await this.options.catalog.deleteProfile(profileId);
-    await responsesProbeCache.clearProfile(profileId);
     if (!runtime) return;
     await this.requestConnectionRefresh(runtime, false);
   }
@@ -221,7 +216,7 @@ export class ConnectionRuntimeManager {
     this.rebuildStatus();
   }
 
-  private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
+  private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean, token?: vscode.CancellationToken): Promise<void> {
     if (force) {
       if (runtime.resolved || runtime.refreshTask) runtime.generation++;
       runtime.resolved = false;
@@ -232,7 +227,7 @@ export class ConnectionRuntimeManager {
       // continues for whoever started it.
       return token ? Promise.race([runtime.refreshTask, cancelledPromise(token)]) : runtime.refreshTask;
     }
-    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime, token, forceProbe));
+    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime, token));
     const sharedTask = task.finally(() => {
       if (runtime.refreshTask === sharedTask) runtime.refreshTask = undefined;
     });
@@ -240,15 +235,15 @@ export class ConnectionRuntimeManager {
     return sharedTask;
   }
 
-  private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
+  private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime, token?: vscode.CancellationToken): Promise<void> {
     while (this.runtimes.get(runtime.profile.id) === runtime) {
       const generation = runtime.generation;
-      await this.refreshRuntimeOnce(runtime, generation, token, forceProbe);
+      await this.refreshRuntimeOnce(runtime, generation, token);
       if (runtime.generation === generation) return;
     }
   }
 
-  private async refreshRuntimeOnce(runtime: ConnectionRuntime, generation: number, token?: vscode.CancellationToken, forceProbe = false): Promise<void> {
+  private async refreshRuntimeOnce(runtime: ConnectionRuntime, generation: number, token?: vscode.CancellationToken): Promise<void> {
     const profile = runtime.profile;
     const revision = runtime.revision;
     let apiKey: string | undefined;
@@ -270,7 +265,7 @@ export class ConnectionRuntimeManager {
     if (!apiKey) {
       runtime.artifactRevision = undefined;
       runtime.models = [];
-      runtime.snapshots.clear();
+      runtime.directory = [];
       await this.options.catalog.clearSnapshot(profile);
       runtime.resolved = true;
       runtime.phase = 'keyMissing';
@@ -293,8 +288,8 @@ export class ConnectionRuntimeManager {
     if (artifactChanged) {
       const restored = this.options.catalog.restore(profile.id, artifactRevision);
       runtime.artifactRevision = artifactRevision;
-      runtime.models = restored?.models ?? [];
-      runtime.snapshots = restored ? this.options.catalog.snapshotMap(restored) : new Map();
+      runtime.directory = restored?.directory ?? [];
+      runtime.models = this.options.catalog.assemble(config, runtime.directory);
     }
     runtime.phase = 'refreshing';
     runtime.message = undefined;
@@ -304,20 +299,17 @@ export class ConnectionRuntimeManager {
       const result = await this.options.catalog.load(
         config,
         apiKey,
-        artifactRevision,
-        new Map(runtime.snapshots),
+        runtime.directory,
         token,
-        forceProbe,
       );
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       runtime.models = result.models;
-      runtime.snapshots = new Map(result.snapshots);
+      runtime.directory = result.directory;
       runtime.resolved = true;
-      runtime.phase = result.partial ? 'degraded' : 'ready';
-      runtime.message = result.partial ? 'Some Relay model routes could not be refreshed.' : undefined;
+      runtime.phase = result.directoryError ? 'degraded' : 'ready';
+      runtime.message = result.directoryError ? 'The Relay directory could not be refreshed; using the last catalog.' : undefined;
       runtime.refreshedAt = Date.now();
-      for (const failure of result.failedRoutes) this.options.catalog.reportRouteRefreshFailure(config, failure.route, failure.error);
-      await this.options.catalog.persistSnapshot(profile.id, artifactRevision, runtime.snapshots, result.models);
+      if (!result.directoryError) await this.options.catalog.persistSnapshot(profile.id, artifactRevision, result.directory);
     } catch (error) {
       if (!this.isCurrentRuntime(runtime, generation, revision)) return;
       if (isCancellationError(error)) {

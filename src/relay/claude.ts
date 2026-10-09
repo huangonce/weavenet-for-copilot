@@ -1,8 +1,11 @@
 import type { CancellationToken } from 'vscode';
+import { ClaudeReplayCollector } from './claudeReplay';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
 import { relayEndpointUrl } from './url';
 import type { ClaudeRequest, ClaudeStreamEvent, StreamCallbacks, ToolCall } from './types';
+
+interface ClaudeParseState { parts: number; started: boolean; replay?: ClaudeReplayCollector }
 
 const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 
@@ -80,7 +83,7 @@ export async function processClaudeStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const tools = new Map<number, ToolCall>();
-  const state = { parts: 0, started: false };
+  const state: ClaudeParseState = { parts: 0, started: false };
   let buffer = '';
   let terminal = false;
   try {
@@ -111,7 +114,7 @@ export async function processClaudeStream(
       terminal = consumed.stopped;
     }
     if (terminal) state.parts += flushToolCalls(tools, callbacks);
-    return { ...state, terminal };
+    return { parts: state.parts, started: state.started, terminal };
   } finally {
     await reader.cancel().catch(() => undefined);
   }
@@ -121,7 +124,7 @@ export function processClaudeSseLine(
   line: string,
   tools: Map<number, ToolCall>,
   callbacks: StreamCallbacks,
-  state: { parts: number; started: boolean },
+  state: ClaudeParseState,
 ): boolean {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return false;
@@ -133,10 +136,14 @@ function processClaudeSseData(
   data: string,
   tools: Map<number, ToolCall>,
   callbacks: StreamCallbacks,
-  state: { parts: number; started: boolean },
+  state: ClaudeParseState,
 ): boolean {
   if (!data || data === '[DONE]') return data === '[DONE]';
   const event = parseClaudeJson(data);
+  if (callbacks.onClaudeAssistantContent) {
+    state.replay ??= new ClaudeReplayCollector();
+    state.replay.consume(event);
+  }
   if (event.type === 'error' || event.error) throw createRelayStreamError('Claude', event.error ?? event);
   if ((event.type === 'message_start'
     || event.type === 'message_delta'
@@ -150,8 +157,15 @@ function processClaudeSseData(
   // `message_start` carries cumulative usage on `message.usage`; `message_delta`
   // carries an output-token delta on `usage`. Pick whichever this event has so
   // a single event can never trigger the usage callback twice.
+  if (event.type === 'message_delta' && event.delta?.stop_reason) callbacks.onClaudeStopReason?.(event.delta.stop_reason);
   const usage = event.usage ?? event.message?.usage;
   if (usage) callbacks.onClaudeUsage?.(usage, event.message?.id);
+  if (event.type === 'content_block_start') {
+    const block = event.content_block;
+    if (block?.type === 'text' && block.text) { callbacks.onContent(block.text); state.parts++; }
+    if (block?.type === 'thinking' && block.thinking) { callbacks.onReasoning(block.thinking); state.parts++; }
+    if (block?.type === 'redacted_thinking') { callbacks.onReasoning('[Redacted thinking]'); state.parts++; }
+  }
   if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
     const index = event.index ?? tools.size;
     const tool: PendingClaudeToolCall = {
@@ -190,6 +204,7 @@ function processClaudeSseData(
       tools.delete(index);
     }
   } else if (event.type === 'message_stop') {
+    if (state.replay) callbacks.onClaudeAssistantContent?.(state.replay.finish());
     return true;
   }
   return false;
@@ -206,8 +221,13 @@ export async function processClaudeFullResponse(
   const payload = parseClaudeJson(body);
   if (payload.error) throw createRelayStreamError('Claude', payload.error);
   if (payload.usage) callbacks.onClaudeUsage?.(payload.usage, payload.message?.id);
+  if (payload.stop_reason) callbacks.onClaudeStopReason?.(payload.stop_reason);
+  const replay = callbacks.onClaudeAssistantContent ? new ClaudeReplayCollector() : undefined;
   let parts = 0;
+  let blockIndex = 0;
   for (const block of payload.content ?? []) {
+    replay?.consume({ type: 'content_block_start', index: blockIndex++, content_block: block });
+    if (block.type === 'redacted_thinking') { callbacks.onReasoning('[Redacted thinking]'); parts++; }
     if (block.type === 'text' && block.text) {
       callbacks.onContent(block.text);
       parts++;
@@ -224,6 +244,7 @@ export async function processClaudeFullResponse(
     }
   }
   if (parts === 0) throw createIncompleteStreamError('Claude', 'empty-response');
+  if (replay) callbacks.onClaudeAssistantContent?.(replay.finish());
 }
 
 function flushToolCalls(tools: Map<number, ToolCall>, callbacks: StreamCallbacks): number {

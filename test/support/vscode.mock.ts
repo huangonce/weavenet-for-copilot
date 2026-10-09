@@ -4,7 +4,7 @@ export class LanguageModelTextPart {
 
 export class LanguageModelThinkingPart {
   constructor(
-    readonly value: string,
+    readonly value: string | string[],
     readonly id?: string,
     readonly metadata?: Record<string, unknown>,
   ) {}
@@ -103,6 +103,15 @@ export const env = {
   language: 'en',
 };
 
+/**
+ * Mirrors `vscode.l10n.t`: substitutes `{0}`-style placeholders and returns the
+ * source string, so unit tests keep asserting the untranslated English text.
+ */
+export const l10n = {
+  t: (message: string, ...args: Array<string | number>): string =>
+    args.reduce<string>((text, value, index) => text.split(`{${index}}`).join(String(value)), message),
+};
+
 export class EventEmitter<T> {
   private readonly listeners = new Set<(value: T) => void>();
 
@@ -160,6 +169,10 @@ export const lm = {
   registerLanguageModelChatProvider: (_vendor: string, _provider: unknown) => new Disposable(),
   get onDidChangeChatModels() { return onDidChangeChatModels; },
   fireDidChangeChatModels,
+};
+
+export const extensions = {
+  getExtension: (_id: string): undefined | { activate(): Promise<unknown> } => undefined,
 };
 
 const chatModelListeners = new Set<() => void>();

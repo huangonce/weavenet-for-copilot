@@ -39,6 +39,11 @@ jobs:
             echo "Tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION."
             exit 1
           fi
+          PUBLISHED_VERSION="$(node -e "const fs=require('fs');const m=fs.readFileSync('CHANGELOG.md','utf8').match(/^## ([0-9]+\.[0-9]+\.[0-9]+)/m);process.stdout.write(m?m[1]:'')")"
+          if [[ "$PUBLISHED_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "The newest released CHANGELOG section ('$PUBLISHED_VERSION') does not match package.json $PACKAGE_VERSION. Promote Unreleased before tagging."
+            exit 1
+          fi
 
       - name: Lint source
         run: npm run lint
@@ -69,6 +74,8 @@ jobs:
           if-no-files-found: error
 
       - name: Publish to Visual Studio Marketplace
-        run: npx vsce publish --packagePath weavenet-for-copilot.vsix --skip-duplicate
+        # No --skip-duplicate: publishing an already-released version must fail
+        # loudly instead of reporting a green build that published nothing.
+        run: npx vsce publish --packagePath weavenet-for-copilot.vsix
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

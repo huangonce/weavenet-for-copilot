@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ConnectionStatus } from '../copilot/provider';
 import type { WeaveNetChatProvider } from '../copilot/provider';
+import { t } from '../l10n';
 
 /** Creates the status bar item, subscribes to provider status changes, and shows it. */
 export function createStatusBarItem(
@@ -16,15 +17,18 @@ export function createStatusBarItem(
 }
 
 export function renderStatus(item: vscode.StatusBarItem, status: ConnectionStatus): void {
-  if (status.phase === 'unconfigured') item.text = '$(plug) WeaveNet: Add Relay Connection';
-  else if (status.phase === 'refreshing') item.text = `$(sync~spin) WeaveNet · ${status.connectionCount} connections · refreshing…`;
-  else if (status.warningCount) item.text = `$(warning) WeaveNet · ${status.modelCount} models · ${status.warningCount} warning${status.warningCount === 1 ? '' : 's'}`;
-  else item.text = `$(check) WeaveNet · ${status.connectionCount} connections · ${status.modelCount} models`;
+  if (status.phase === 'unconfigured') item.text = t('$(plug) WeaveNet: Add Relay Connection');
+  else if (status.phase === 'refreshing') item.text = t('$(sync~spin) WeaveNet · {0} connections · refreshing…', status.connectionCount);
+  else if (status.warningCount) {
+    item.text = status.warningCount === 1
+      ? t('$(warning) WeaveNet · {0} models · {1} warning', status.modelCount, status.warningCount)
+      : t('$(warning) WeaveNet · {0} models · {1} warnings', status.modelCount, status.warningCount);
+  } else item.text = t('$(check) WeaveNet · {0} connections · {1} models', status.connectionCount, status.modelCount);
   item.tooltip = status.connections.map((connection) => [
     `${connection.connectionName}${connection.host ? ` (${connection.host})` : ''}`,
-    `${connection.modelCount} model(s) · ${connection.phase}`,
-    connection.modelRefreshedAt ? `Models refreshed: ${new Date(connection.modelRefreshedAt).toLocaleString()}` : undefined,
-    connection.lastDiagnostics ? `Last test: ${new Date(connection.lastDiagnostics.completedAt).toLocaleString()} (${connection.lastDiagnostics.overall})` : undefined,
+    t('{0} model(s) · {1}', connection.modelCount, connection.phase),
+    connection.modelRefreshedAt ? t('Models refreshed: {0}', new Date(connection.modelRefreshedAt).toLocaleString()) : undefined,
+    connection.lastDiagnostics ? t('Last test: {0} ({1})', new Date(connection.lastDiagnostics.completedAt).toLocaleString(), connection.lastDiagnostics.overall) : undefined,
     connection.message,
   ].filter(Boolean).join('\n')).join('\n\n');
 }

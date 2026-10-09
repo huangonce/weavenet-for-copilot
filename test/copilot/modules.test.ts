@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
+import { getConfig } from '../../src/config/config';
 import type { ConnectionProfile } from '../../src/config/config';
 import type { RoutedModel } from '../../src/relay/types';
 import {
@@ -31,19 +32,17 @@ const WORK_PROFILE: ConnectionProfile = {
   name: 'work',
   baseUrl: 'https://work.example.test/v1',
   includeModels: ['^gpt-'],
-  models: [{ id: 'gpt-fixed', route: 'openai' }],
+  models: [{ id: 'gpt-fixed',
+apiType: 'chat-completions' as const }],
 };
 
 function routedModel(overrides: Partial<RoutedModel> = {}): RoutedModel {
-  return {
-    id: 'gpt-test',
-    pickerId: 'gpt-test',
-    upstreamId: 'gpt-test',
-    protocol: 'openai',
-    route: 'openai',
-    catalogSource: 'discovery',
-    ...overrides,
-  };
+  return { id: 'gpt-test',
+pickerId: 'gpt-test',
+upstreamId: 'gpt-test',
+catalogSource: 'discovery',
+...overrides,
+apiType: 'chat-completions' as const };
 }
 
 function runtime(overrides: Partial<ConnectionRuntime> = {}): ConnectionRuntime {
@@ -51,7 +50,7 @@ function runtime(overrides: Partial<ConnectionRuntime> = {}): ConnectionRuntime 
     profile: WORK_PROFILE,
     revision: 'revision-1',
     models: [routedModel()],
-    snapshots: new Map(),
+    directory: [],
     generation: 0,
     resolved: true,
     phase: 'ready',
@@ -91,51 +90,25 @@ describe('modelBindingRegistry', () => {
 
 describe('modelCatalogService', () => {
   const debug = vi.fn();
-
-  it('maps non-empty snapshot routes into a map', () => {
+  it('persists a single directory and assembles fixed models during restoration', async () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ get: () => undefined } as never);
     const service = new ModelCatalogService(new ModelSnapshotStore(new InMemoryMemento()), debug);
-    const map = service.snapshotMap({
-      schemaVersion: 2,
-      profileId: WORK_ID,
-      catalogRevision: CATALOG_REVISION,
-      savedAt: 1,
-      snapshots: { openai: [routedModel()], chatgpt: [], claude: [] },
-      models: [routedModel()],
-    });
-    expect(map.size).toBe(1);
-    expect(map.get('openai')).toHaveLength(1);
-    expect(map.get('claude')).toBeUndefined();
-  });
-
-  it('restores a stored snapshot and persists new ones', async () => {
-    const store = new ModelSnapshotStore(new InMemoryMemento());
-    const service = new ModelCatalogService(store, debug);
     expect(service.restore(WORK_ID, CATALOG_REVISION)).toBeUndefined();
-    const snapshots = new Map<RoutedModel['route'], RoutedModel[]>([
-      ['openai', [routedModel()]],
-    ]);
-    await service.persistSnapshot(WORK_ID, CATALOG_REVISION, snapshots, [routedModel()]);
-    expect(service.restore(WORK_ID, CATALOG_REVISION)?.models).toHaveLength(1);
+    await service.persistSnapshot(WORK_ID, CATALOG_REVISION, [routedModel()]);
+    const record = service.restore(WORK_ID, CATALOG_REVISION)!;
+    expect(record.directory).toHaveLength(1);
+    const config = getConfig(WORK_PROFILE);
+    expect(service.assemble(config, record.directory).map(model => model.id)).toEqual(['gpt-fixed', 'gpt-test']);
   });
-
-  it('swallows snapshot store failures instead of breaking refresh', async () => {
-    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-      get: <T>(_key: string) => undefined as T,
-    } as never);
-    const memento = new InMemoryMemento();
-    memento.failUpdates = true;
+  it('keeps persistence failures out of refresh and deletion', async () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ get: () => undefined } as never);
+    const memento = new InMemoryMemento(); memento.failUpdates = true;
     const service = new ModelCatalogService(new ModelSnapshotStore(memento), debug);
-    await expect(service.persistSnapshot(WORK_ID, CATALOG_REVISION, new Map(), [])).resolves.toBeUndefined();
+    await expect(service.persistSnapshot(WORK_ID, CATALOG_REVISION, [])).resolves.toBeUndefined();
     await expect(service.clearSnapshot(WORK_PROFILE)).resolves.toBeUndefined();
     await expect(service.deleteProfile(WORK_ID)).resolves.toBeUndefined();
     await expect(service.clearAll()).resolves.toBeUndefined();
     expect(debug).toHaveBeenCalled();
-  });
-
-  it('reports route refresh failures through the debug logger', () => {
-    const service = new ModelCatalogService(new ModelSnapshotStore(new InMemoryMemento()), debug);
-    service.reportRouteRefreshFailure({ profileName: 'work', debug: false } as never, 'openai', new Error('boom'));
-    expect(debug).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('openai route unavailable'));
   });
 });
 
@@ -179,12 +152,11 @@ describe('connectionRuntimeManager helpers', () => {
       upstreamId: 'gpt-restored',
     });
     const restore = vi.fn((_profileId: string, catalogRevision: string): ModelSnapshotRecord => ({
-      schemaVersion: 2,
+      schemaVersion: 3,
       profileId: WORK_ID,
       catalogRevision,
       savedAt: Date.now(),
-      snapshots: { openai: [restoredModel], chatgpt: [], claude: [] },
-      models: [restoredModel],
+      directory: [restoredModel],
     }));
     let rejectLoad!: (reason?: unknown) => void;
     let markLoadStarted!: () => void;
@@ -203,9 +175,7 @@ describe('connectionRuntimeManager helpers', () => {
       diagnosticsStore: { get: vi.fn() } as never,
       catalog: {
         restore,
-        snapshotMap: (record: ModelSnapshotRecord) => new Map([
-          ['openai', record.snapshots.openai],
-        ]),
+        assemble: (_config: unknown, directory: RoutedModel[]) => directory,
         load,
       } as never,
       debug: vi.fn(),
@@ -259,7 +229,10 @@ describe('connectionRuntimeManager helpers', () => {
     })).not.toBe(first);
     expect(catalogRevision({ ...profile, baseUrl: 'https://other.example.test/v1' })).not.toBe(first);
 
+    expect(catalogRevision({ ...profile, apiType: 'responses' })).not.toBe(first);
     values.openaiApiStrategy = 'responses';
+    expect(catalogRevision(profile)).toBe(first);
+    values.modelMetadataEnabled = false;
     expect(catalogRevision(profile)).not.toBe(first);
   });
 

@@ -49,3 +49,18 @@ export function canonicalRelayHeaders(
     .map(([name, value]) => [name, value] as const)
     .sort(([left], [right]) => left.localeCompare(right));
 }
+
+/**
+ * Normalized header names only, for identities that get persisted.
+ *
+ * Header values may be the only credential (for example Azure's `api-key` or
+ * Google's `x-goog-api-key`). Persisting a digest over those values would leave
+ * an offline-verifiable fingerprint in global storage, so persisted identities
+ * hash names only; the in-memory request path still uses full
+ * {@link canonicalRelayHeaders} values.
+ */
+export function canonicalRelayHeaderNames(
+  requestHeaders: Readonly<Record<string, string>>,
+): string[] {
+  return canonicalRelayHeaders(requestHeaders).map(([name]) => name);
+}

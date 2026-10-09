@@ -44,8 +44,49 @@ jobs:
       - name: Run tests with coverage
         run: npm run test:coverage
 
-      - name: Run VS Code extension host smoke test
-        run: xvfb-run -a npm run test:integration
-
       - name: Inspect extension package contents
         run: npm run package:list
+
+      - name: Upload coverage summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary-${{ github.sha }}
+          path: coverage/coverage-summary.json
+          if-no-files-found: ignore
+
+  host:
+    name: Extension host smoke (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The declared engines.vscode floor must be exercised, not just the
+          # newest stable host, because the code relies on proposed-API
+          # surfaces that older hosts may or may not expose.
+          - label: minimum-supported
+            vscodeVersion: '1.116.0'
+          - label: latest-stable
+            vscodeVersion: ''
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Run VS Code extension host smoke test
+        env:
+          VSCODE_VERSION: ${{ matrix.vscodeVersion }}
+        run: xvfb-run -a npm run test:integration

@@ -22,8 +22,8 @@ import type { ConnectionStatus, WeaveNetChatProvider } from '../src/copilot/prov
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
 const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
-const WORK_PROFILE: ConnectionProfile = { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1' };
-const PERSONAL_PROFILE: ConnectionProfile = { id: PERSONAL_ID, name: 'Personal', baseUrl: 'https://personal.example.test/v1' };
+const WORK_PROFILE: ConnectionProfile = { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1', apiType: 'chat-completions' };
+const PERSONAL_PROFILE: ConnectionProfile = { id: PERSONAL_ID, name: 'Personal', baseUrl: 'https://personal.example.test/v1', apiType: 'chat-completions' };
 
 function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFILE]) {
   let profiles = initialProfiles;
@@ -35,6 +35,7 @@ function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFI
     inspect: <T>(key: string) => key === 'profiles' ? { globalValue: profiles as T } : undefined,
     update,
   } as never);
+  vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items) => (await items)[0] as never);
   return { get profiles() { return profiles; }, update };
 }
 
@@ -73,7 +74,7 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
 }
 
 function pickProfile(profile: ConnectionProfile): void {
-  vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue({ profile } as never);
+  vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items) => 'apiType' in ((await items)[0] as object) ? (await items)[0] as never : { profile } as never);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -164,6 +165,16 @@ describe('connection mutation queue', () => {
     expect(provider.refreshModels).toHaveBeenCalledOnce();
   });
 
+  it('does not save a connection or prompt for a key when API selection is cancelled', async () => {
+    const config = configurationFixture([]);
+    const provider = providerFixture();
+    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValueOnce('Work').mockResolvedValueOnce('https://work.example.test/v1');
+    vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValueOnce(undefined);
+    await addConnection(provider);
+    expect(config.update).not.toHaveBeenCalled();
+    expect(provider.promptForRelayKeyValue).not.toHaveBeenCalled();
+  });
+
   it('rolls profile creation back and deletes its UUID key when secret storage fails', async () => {
     const config = configurationFixture([]);
     const provider = providerFixture({ storeRelayKey: vi.fn().mockRejectedValue(new Error('secret failure')) });
@@ -250,7 +261,7 @@ describe('connection mutation queue', () => {
       .mockResolvedValueOnce('Company')
       .mockResolvedValueOnce('https://company.example.test/v1')
       .mockResolvedValueOnce('{"includeModels":["gpt"],"excludeModels":["legacy"]}')
-      .mockResolvedValueOnce('[{"id":"gpt-test","route":"openai"}]');
+      .mockResolvedValueOnce('[{"id":"gpt-test","apiType":"chat-completions"}]');
 
     await editConnection(provider);
 
@@ -258,9 +269,10 @@ describe('connection mutation queue', () => {
       id: WORK_ID,
       name: 'Company',
       baseUrl: 'https://company.example.test/v1',
+      apiType: 'chat-completions',
       includeModels: ['gpt'],
       excludeModels: ['legacy'],
-      models: [{ id: 'gpt-test', route: 'openai' }],
+      models: [{ id: 'gpt-test', apiType: 'chat-completions' }],
     }]);
     expect(provider.clearConnectionDiagnostics).toHaveBeenCalledWith(WORK_PROFILE);
     expect(provider.refreshModels).toHaveBeenCalledOnce();
@@ -283,6 +295,7 @@ describe('connection mutation queue', () => {
       id: WORK_ID,
       name: 'Company',
       baseUrl: 'https://company.example.test/v1',
+      apiType: 'chat-completions',
       requestHeaders: { 'X-Tenant': 'team-a' },
       models: [],
     }]);

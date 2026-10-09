@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ConnectionProfile } from './config';
+import { t } from '../l10n';
 
 export const configurationSection = 'weavenet-copilot';
 
@@ -38,7 +39,7 @@ export async function restoreProfiles(profiles: ConnectionProfile[]): Promise<vo
   try {
     await saveProfiles(profiles);
   } catch (error) {
-    void vscode.window.showErrorMessage(`WeaveNet could not restore the connection configuration: ${errorMessage(error)}`);
+    void vscode.window.showErrorMessage(t('WeaveNet could not restore the connection configuration: {0}', errorMessage(error)));
   }
 }
 

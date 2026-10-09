@@ -4,3 +4,7 @@ out/
 .vscode-test/
 dist/
 coverage/
+
+.npm-cache/
+.tmp/
+.dsh-permission-recovery/

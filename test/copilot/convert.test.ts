@@ -98,7 +98,7 @@ describe('chat request conversion', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID', detail: 'auto', media_type: 'image/png' } },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID', detail: 'auto' } },
       ],
     }]);
   });
@@ -141,8 +141,8 @@ describe('chat request conversion', () => {
     expect(convertMessages(messages, true)).toEqual([{
       role: 'user',
       content: [
-        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,CQg=', detail: 'auto', media_type: 'image/jpeg' } },
-        { type: 'image_url', image_url: { url: 'data:image/webp;base64,Bw==', detail: 'auto', media_type: 'image/webp' } },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,CQg=', detail: 'auto' } },
+        { type: 'image_url', image_url: { url: 'data:image/webp;base64,Bw==', detail: 'auto' } },
       ],
     }]);
     expect(() => convertMessages(messages, false)).toThrow('target does not support image input');
@@ -191,7 +191,7 @@ describe('chat request conversion', () => {
     const svg = [userMessage(new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/svg+xml'))] as never;
 
     expect(convertMessages(jpeg, true)[0]).toMatchObject({
-      content: [{ image_url: { url: 'data:image/jpeg;base64,AQ==', media_type: 'image/jpeg' } }],
+      content: [{ image_url: { url: 'data:image/jpeg;base64,AQ==' } }],
     });
     expect(() => convertMessages(svg, true)).toThrow('accepts only JPEG, PNG, GIF, or WebP');
   });
@@ -255,7 +255,7 @@ describe('responses input conversion', () => {
     });
   });
 
-  it('labels replayed assistant messages with their phase when enabled', () => {
+  it('does not invent an assistant phase when upstream state is absent', () => {
     const preamble = [
       {
         role: vscode.LanguageModelChatMessageRole.Assistant,
@@ -269,9 +269,9 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(preamble, false, false, true)).toEqual({
       input: [
-        { role: 'assistant', content: [{ type: 'output_text', text: 'Let me search.' }], phase: 'commentary' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Let me search.' }] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
-        { role: 'assistant', content: [{ type: 'output_text', text: 'Found it.' }], phase: 'final_answer' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Found it.' }] },
       ],
     });
     expect(convertResponsesInput(preamble, false)).toEqual({
@@ -296,10 +296,10 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false, true, true)).toEqual({
       input: [
-        { role: 'assistant', content: [{ type: 'output_text', text: 'Checking now.' }], phase: 'commentary' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Checking now.' }] },
         { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'I need to check.' }], summary: [] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"query":"relay"}' },
-        { role: 'assistant', content: [{ type: 'output_text', text: 'Found the answer.' }], phase: 'final_answer' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'Found the answer.' }] },
       ],
     });
   });
@@ -317,7 +317,7 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false, true, true)).toEqual({
       input: [
-        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }], phase: 'commentary' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }] },
         { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'Thinking first.' }], summary: [] },
         { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{}' },
         { type: 'function_call', call_id: 'call-2', name: 'read', arguments: '{}' },
@@ -336,7 +336,7 @@ describe('responses input conversion', () => {
 
     expect(convertResponsesInput(messages, false, true, true)).toEqual({
       input: [
-        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }], phase: 'final_answer' },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'The answer.' }] },
       ],
     });
   });

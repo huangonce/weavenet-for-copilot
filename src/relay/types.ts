@@ -4,6 +4,9 @@ export interface RelayModel {
   owned_by?: string;
   created?: number;
   name?: string;
+  display_name?: string;
+  max_input_tokens?: number;
+  max_tokens?: number;
   context_length?: number;
   context_window?: number;
   max_completion_tokens?: number;
@@ -11,54 +14,43 @@ export interface RelayModel {
   capabilities?: Record<string, unknown>;
 }
 
-/** Wire protocol：上游请求使用的协议族。 */
-export type ModelProtocol = 'openai' | 'claude';
-
-/** 目录来源：模型来自 Relay 自动发现（`discovery`）还是用户固定配置（`configured`）。 */
+export type ApiType = 'chat-completions' | 'responses' | 'messages';
+export function isApiType(value: unknown): value is ApiType {
+  return value === 'chat-completions' || value === 'responses' || value === 'messages';
+}
+/** Discovery versus explicit model declarations. */
 export type CatalogSource = 'discovery' | 'configured';
-
-/**
- * 目录分组 key：去重与快照按此维度隔离（同一 `upstreamId` 可在不同 route 共存）。
- * `chatgpt` 是历史遗留值，语义等价 `openai`。
- */
-export type RouteKey = 'openai' | 'chatgpt' | 'claude';
-
-/** OpenAI 协议族内部 API variant（仅当 `protocol === 'openai'` 时生效；`undefined` 等价 `'chat'`）。 */
-export type OpenAIApiVariant = 'chat' | 'responses';
 
 export interface RoutedModel extends RelayModel {
   /** Unique id exposed to VS Code. */
   pickerId: string;
   /** Model id sent unchanged to the relay. */
   upstreamId: string;
-  /** Wire protocol：决定请求构造（Claude Messages / OpenAI 兼容）。 */
-  protocol: ModelProtocol;
-  /** 目录分组 key：去重与快照分组的维度，与 wire protocol 无关。 */
-  route: RouteKey;
+  apiType: ApiType;
   /** 目录来源：discovery（Relay 自动发现）或 configured（用户固定配置）。 */
   catalogSource: CatalogSource;
-  /** Probing result: Responses API support for OpenAI-compatible models. `undefined` means Chat Completions. */
-  openaiApi?: OpenAIApiVariant;
+  /** Total context window shared by input and output. */
+  contextWindow?: number;
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;
   imageInput?: boolean;
   thinking?: boolean;
-  contextWindows?: number[];
   /** Explicit OpenAI request-field support. Unknown capabilities stay omitted. */
   openai?: OpenAIRequestCapabilities;
+  claude?: ClaudeRequestCapabilities;
   /** Public catalog reference pricing. It is never used for relay billing. */
   referencePricing?: ReferencePricing;
   metadataSources?: ModelMetadataSources;
 }
 
 export interface ModelMetadataSources {
+  contextWindow?: ModelMetadataSource;
   maxInputTokens?: ModelMetadataSource;
   maxOutputTokens?: ModelMetadataSource;
   toolCalling?: ModelMetadataSource;
   imageInput?: ModelMetadataSource;
   thinking?: ModelMetadataSource;
-  contextWindows?: ModelMetadataSource;
   referencePricing?: ModelMetadataSource;
 }
 
@@ -76,6 +68,9 @@ export type ModelMetadataSource =
 
 export interface ModelsResponse {
   data?: RelayModel[];
+  has_more?: boolean;
+  first_id?: string;
+  last_id?: string;
 }
 
 export interface ChatMessage {
@@ -83,6 +78,7 @@ export interface ChatMessage {
   content: string | ChatContentPart[] | null;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  reasoning_content?: string;
 }
 
 export type ChatContentPart =
@@ -125,7 +121,6 @@ export interface ChatRequest {
   max_completion_tokens?: number;
   temperature?: number;
   top_p?: number;
-  context_window?: number;
   reasoning_effort?: ReasoningEffort;
   prompt_cache_key?: string;
   store?: false;
@@ -140,13 +135,11 @@ export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | '
 export interface OpenAIRequestCapabilities {
   /** Defaults to max_tokens for compatibility when sendMaxTokens is enabled. */
   tokenLimitField?: 'max_tokens' | 'max_completion_tokens' | 'omit';
-  /** Relay-private request extension, never inferred from public context limits. */
-  contextWindow?: boolean;
   promptCacheKey?: boolean;
   store?: boolean;
   strictTools?: boolean;
   parallelToolCalls?: boolean;
-  /** DeepSeek-style thinking relays reject tool-call history unless `reasoning.content` is replayed, even without the `id` the spec expects. */
+  /** Replays complete reasoning_content in Chat or original reasoning items in Responses when explicitly required. */
   replayReasoningContent?: boolean;
   /** Codex-style models degrade when replayed assistant messages drop their `phase`. */
   assistantPhase?: boolean;
@@ -158,10 +151,15 @@ export interface OpenAIRequestCapabilities {
   encryptedReasoning?: boolean;
   /**
    * Sends `reasoning.summary: "auto"` on the Responses API so the model streams a readable
-   * summary of its thinking. Defaults to on for Responses requests; set `false` when the
-   * endpoint rejects the field or the account has no summary access.
+   * summary of its thinking. Omitted unless explicitly enabled on a thinking model;
+   * leave disabled when the endpoint rejects the field or the account has no summary access.
    */
   reasoningSummary?: boolean;
+  /** Explicit support for sampling, optionally constrained to reasoning effort values. */
+  sampling?: boolean;
+  samplingEfforts?: ReasoningEffort[];
+  /** Standard image schema is the default; legacy mode retains documented relay-specific hints. */
+  imageCompatibility?: 'standard' | 'legacy-relay';
   developerRole?: boolean;
   clientRequestId?: boolean;
   reasoningEfforts?: ReasoningEffort[];
@@ -231,7 +229,7 @@ export type ResponsesInputItem =
   | {
       role: 'user' | 'assistant';
       content: string | ResponsesInputContentPart[];
-      phase?: 'commentary' | 'final_answer';
+      phase?: 'commentary' | 'final_answer' | null;
     }
   | { type: 'function_call_output'; call_id: string; output: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
@@ -248,6 +246,7 @@ export type ResponsesInputItem =
 export type ResponsesInputContentPart =
   | { type: 'input_text'; text: string }
   | { type: 'output_text'; text: string }
+  | { type: 'refusal'; refusal: string }
   | { type: 'input_image'; image_url: string; detail?: 'auto' };
 
 export interface ResponsesToolDefinition {
@@ -298,6 +297,7 @@ export interface ResponsesOutputItemMessage {
   type: 'message';
   role?: 'assistant';
   status?: string;
+  phase?: 'commentary' | 'final_answer' | null;
   content?: ResponsesMessageOutputContentPart[];
 }
 
@@ -340,6 +340,7 @@ export interface ResponsesStreamEvent {
   item_id?: string;
   output_index?: number;
   content_index?: number;
+  summary_index?: number;
   /** Text delta for output_text/refusal/reasoning events. */
   delta?: string;
   /** Complete arguments for function_call_arguments.done events. */
@@ -350,6 +351,7 @@ export interface ResponsesStreamEvent {
     status?: ResponsesFullResponse['status'];
     error?: ResponsesFullResponse['error'];
     usage?: ResponsesUsage;
+    output?: ResponsesOutputItem[];
   };
   error?: { code?: string; message?: string; param?: string; type?: string };
   usage?: ResponsesUsage;
@@ -386,11 +388,34 @@ export interface ClaudeContentBlockToolResult {
   cache_control?: ClaudeCacheControl;
 }
 
+export interface ClaudeContentBlockThinking {
+  type: 'thinking';
+  thinking: string;
+  signature: string;
+}
+
+export interface ClaudeContentBlockRedactedThinking {
+  type: 'redacted_thinking';
+  data: string;
+}
+
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface ClaudeRequestCapabilities {
+  thinkingMode?: 'manual' | 'adaptive';
+  reasoningEfforts?: ClaudeEffort[];
+  defaultReasoningEffort?: ClaudeEffort;
+  sampling?: boolean;
+  forcedToolChoice?: boolean;
+}
+
 export type ClaudeContentBlock =
   | ClaudeContentBlockText
   | ClaudeContentBlockImage
   | ClaudeContentBlockToolUse
-  | ClaudeContentBlockToolResult;
+  | ClaudeContentBlockToolResult
+  | ClaudeContentBlockThinking
+  | ClaudeContentBlockRedactedThinking;
 
 export interface ClaudeMessage {
   role: 'user' | 'assistant';
@@ -415,6 +440,7 @@ export interface ClaudeRequest {
   temperature?: number;
   top_p?: number;
   thinking?: ClaudeThinking;
+  output_config?: { effort: ClaudeEffort };
 }
 
 export interface ClaudeCacheControl {
@@ -422,10 +448,7 @@ export interface ClaudeCacheControl {
   ttl?: '1h';
 }
 
-export interface ClaudeThinking {
-  type: 'enabled';
-  budget_tokens: number;
-}
+export type ClaudeThinking = { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' };
 
 export interface ClaudeUsage {
   input_tokens?: number;
@@ -451,19 +474,28 @@ export interface ClaudeStreamEvent {
     type?: string;
     text?: string;
     thinking?: string;
+    signature?: string;
+    stop_reason?: string;
     partial_json?: string;
   };
   content_block?: {
     type?: string;
+    text?: string;
+    thinking?: string;
+    signature?: string;
+    data?: string;
     id?: string;
     name?: string;
     input?: unknown;
   };
   index?: number;
+  stop_reason?: string;
   content?: Array<{
     type?: string;
     text?: string;
     thinking?: string;
+    signature?: string;
+    data?: string;
     id?: string;
     name?: string;
     input?: unknown;
@@ -479,6 +511,9 @@ export interface StreamCallbacks {
   onToolCall(toolCall: ToolCall): void;
   /** Full reasoning output item captured from the stream (id, summary, encrypted_content). */
   onResponsesReasoningItem?(item: ResponsesOutputItemReasoning): void;
+  onResponsesOutputItems?(items: readonly ResponsesOutputItem[]): void;
+  onClaudeAssistantContent?(blocks: readonly ClaudeContentBlock[]): void;
+  onClaudeStopReason?(reason: string): void;
   /** Request metadata only; request bodies, URLs, and headers are never exposed. */
   onRequest?(protocol: RelayProtocol, metadata: RequestDiagnosticsMetadata): void;
   /** Transport state captured when fetch returns or rejects. */

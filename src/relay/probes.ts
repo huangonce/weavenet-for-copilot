@@ -23,8 +23,6 @@ export interface RelayProtocolProbeResult {
   readonly termination?: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete';
 }
 
-export type ResponsesEndpointAvailability = 'supported' | 'unsupported' | 'unknown';
-
 interface ProtocolProbeOptions {
   readonly baseUrl: string;
   readonly headers: Record<string, string>;
@@ -41,6 +39,7 @@ export async function probeOpenAIChatCompletion(
   model: string,
   stream: boolean,
   token?: CancellationToken,
+  tokenLimitField: 'max_tokens' | 'max_completion_tokens' = 'max_tokens',
 ): Promise<RelayProtocolProbeResult> {
   const response = await fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'chat/completions'), {
     method: 'POST',
@@ -49,7 +48,7 @@ export async function probeOpenAIChatCompletion(
       Accept: stream ? 'text/event-stream' : 'application/json',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ model, max_tokens: 1, stream, messages: [{ role: 'user', content: 'OK' }] }),
+    body: JSON.stringify({ model, [tokenLimitField]: 1, stream, messages: [{ role: 'user', content: 'OK' }] }),
   }, options.requestTimeoutMs, token);
   const metadata = safeResponseMetadata(response);
   await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
@@ -103,8 +102,8 @@ export async function probeClaudeMessages(
 }
 
 /**
- * Minimal `POST /responses` probe. Runs during model discovery and explicit
- * connection tests; each call is a paid request, so results are cached.
+ * Minimal `POST /responses` probe. Only an explicit connection test reaches
+ * this: model discovery never issues paid probes and no result is cached.
  */
 export async function probeOpenAIResponses(
   options: ProtocolProbeOptions,
@@ -143,37 +142,6 @@ export async function probeOpenAIResponses(
     throw createIncompleteStreamError('Responses', outcome.parts === 0 ? 'missing-terminal-empty-response' : 'missing-terminal-event');
   }
   return { endpoint: '/responses', ...metadata, stream: true, termination: outcome.termination ?? 'completed' };
-}
-
-/**
- * Free `GET /responses` availability probe.
- *
- * - `200` → `supported`
- * - `405` → `supported` — the route exists but only accepts POST, which is
- *   exactly what the Responses API requires (GET is never part of the spec).
- * - `404` → `unsupported` — the relay does not implement the endpoint at all;
- *   every OpenAI model falls back to Chat Completions with zero cost.
- * - Anything else (auth errors, `426` upgrade demands, network failures) →
- *   `unknown`, and per-model POST probes decide. This GET carries no `model`,
- *   so gateways that route each model to a different upstream answer it from
- *   their default group only, and its verdict cannot be generalised.
- */
-export async function probeResponsesEndpoint(
-  options: ProtocolProbeOptions,
-  token?: CancellationToken,
-): Promise<ResponsesEndpointAvailability> {
-  let response: Response;
-  try {
-    response = await fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'responses'), {
-      method: 'GET',
-      headers: options.headers,
-    }, options.requestTimeoutMs, token);
-  } catch {
-    return 'unknown';
-  }
-  if (response.ok || response.status === 405) return 'supported';
-  if (response.status === 404) return 'unsupported';
-  return 'unknown';
 }
 
 function requireEventStream(contentType: string, protocol: RelayProtocol): void {

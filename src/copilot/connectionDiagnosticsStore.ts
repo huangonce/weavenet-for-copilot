@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type * as vscode from 'vscode';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile } from '../config/config';
-import { canonicalRelayHeaders } from '../relay/headers';
+import { canonicalRelayHeaderNames } from '../relay/headers';
 import { normalizeRelayBaseUrl } from '../relay/url';
 import {
   CONNECTION_DIAGNOSTICS_KEY_PREFIX,
@@ -18,13 +18,15 @@ import type {
 } from './connectionDiagnostics';
 
 const MAX_PERSISTED_STRING_LENGTH = 500;
-const MAX_PROBES = 6;
+const MAX_PROBES = 9;
 const MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
 const PROBE_IDS: readonly ConnectionProbeId[] = [
   'models',
   'openai.nonStreaming',
   'openai.streaming',
   'openai.responses',
+  'responses.nonStreaming',
+  'responses.streaming',
   'claude.nonStreaming',
   'claude.streaming',
 ];
@@ -48,11 +50,15 @@ export function fingerprintConnection(
   profile: ConnectionProfile,
   options: ConnectionFingerprintOptions = {},
 ): string {
+  // This digest is the persisted diagnostics key, so it must never cover a
+  // header value: a low-entropy header credential would become an offline
+  // verifier. Header names still invalidate diagnostics when the shape changes.
   const identity = {
     profileId: profile.id,
     name: profile.name.trim(),
     baseUrl: normalizeRelayBaseUrl(profile.baseUrl) ?? profile.baseUrl.trim(),
-    requestHeaders: canonicalRelayHeaders(profile.requestHeaders ?? {}),
+    apiType: profile.apiType ?? 'chat-completions',
+    requestHeaders: canonicalRelayHeaderNames(profile.requestHeaders ?? {}),
     includeModels: profile.includeModels ?? [],
     excludeModels: profile.excludeModels ?? [],
     models: profile.models ?? [],
@@ -185,7 +191,10 @@ function parseCapabilities(value: unknown): ConnectionDiagnosticsSnapshot['capab
   if (!isRecord(value)) return undefined;
   const openai = parseProtocolCapabilities(value.openai);
   const claude = parseProtocolCapabilities(value.claude);
-  return openai && claude ? { openai, claude } : undefined;
+  if (!openai || !claude) return undefined;
+  const responses = value.responses === undefined ? undefined : parseProtocolCapabilities(value.responses);
+  if (value.responses !== undefined && !responses) return undefined;
+  return { openai, claude, ...(responses ? { responses } : {}) };
 }
 
 function parseProtocolCapabilities(value: unknown): ConnectionProtocolCapabilities | undefined {

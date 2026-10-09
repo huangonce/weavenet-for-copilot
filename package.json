@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.7.11",
+  "version": "0.8.0",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -42,11 +42,13 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "l10n": "./l10n",
   "contributes": {
     "languageModelChatProviders": [
       {
         "vendor": "weavenet",
-        "displayName": "WeaveNet"
+        "displayName": "WeaveNet",
+        "managementCommand": "weavenet-copilot.manageConnections"
       }
     ],
     "commands": [
@@ -114,13 +116,6 @@
     "configuration": {
       "title": "%configuration.title%",
       "properties": {
-        "weavenet-copilot.activeProfile": {
-          "type": "string",
-          "default": "",
-          "scope": "application",
-          "description": "%configuration.activeProfile.description%",
-          "deprecationMessage": "%configuration.activeProfile.deprecation%"
-        },
         "weavenet-copilot.profiles": {
           "type": "array",
           "default": [],
@@ -138,14 +133,14 @@
               "id": {
                 "type": "string",
                 "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
-                "description": "Extension-managed stable connection identifier."
+                "description": "%configuration.profiles.id.description%"
               },
               "name": {
                 "type": "string"
               },
               "baseUrl": {
                 "type": "string",
-                "description": "Relay API base URL. Remote relays require HTTPS; HTTP is allowed only for localhost and IP loopback addresses."
+                "description": "%configuration.profiles.baseUrl.description%"
               },
               "requestHeaders": {
                 "type": "object"
@@ -168,8 +163,7 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
-                    "id",
-                    "route"
+                    "id"
                   ],
                   "properties": {
                     "id": {
@@ -177,14 +171,6 @@
                     },
                     "name": {
                       "type": "string"
-                    },
-                    "route": {
-                      "type": "string",
-                      "enum": [
-                        "openai",
-                        "chatgpt",
-                        "claude"
-                      ]
                     },
                     "maxInputTokens": {
                       "type": "number",
@@ -203,22 +189,6 @@
                     "thinking": {
                       "type": "boolean"
                     },
-                    "openaiApi": {
-                      "type": "string",
-                      "enum": [
-                        "chat",
-                        "responses"
-                      ],
-                      "description": "%configuration.modelOpenaiApi.description%"
-                    },
-                    "contextWindows": {
-                      "type": "array",
-                      "uniqueItems": true,
-                      "items": {
-                        "type": "number",
-                        "minimum": 1
-                      }
-                    },
                     "openai": {
                       "type": "object",
                       "additionalProperties": false,
@@ -231,9 +201,6 @@
                             "max_completion_tokens",
                             "omit"
                           ]
-                        },
-                        "contextWindow": {
-                          "type": "boolean"
                         },
                         "promptCacheKey": {
                           "type": "boolean"
@@ -292,30 +259,114 @@
                             "xhigh",
                             "max"
                           ]
+                        },
+                        "sampling": {
+                          "type": "boolean",
+                          "description": "%configuration.modelOpenAI.sampling.description%"
+                        },
+                        "samplingEfforts": {
+                          "type": "array",
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          },
+                          "description": "%configuration.modelOpenAI.samplingEfforts.description%"
+                        },
+                        "imageCompatibility": {
+                          "type": "string",
+                          "enum": [
+                            "standard",
+                            "legacy-relay"
+                          ],
+                          "default": "standard",
+                          "description": "%configuration.modelOpenAI.imageCompatibility.description%"
+                        }
+                      }
+                    },
+                    "apiType": {
+                      "type": "string",
+                      "enum": [
+                        "chat-completions",
+                        "responses",
+                        "messages"
+                      ],
+                      "description": "%configuration.modelApiType.description%"
+                    },
+                    "contextWindow": {
+                      "type": "integer",
+                      "minimum": 2,
+                      "description": "%configuration.modelContextWindow.description%"
+                    },
+                    "claude": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "%configuration.modelClaude.description%",
+                      "properties": {
+                        "thinkingMode": {
+                          "type": "string",
+                          "enum": [
+                            "manual",
+                            "adaptive"
+                          ]
+                        },
+                        "reasoningEfforts": {
+                          "type": "array",
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "defaultReasoningEffort": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
+                        },
+                        "sampling": {
+                          "type": "boolean",
+                          "description": "%configuration.modelClaude.sampling.description%"
+                        },
+                        "forcedToolChoice": {
+                          "type": "boolean",
+                          "description": "%configuration.modelClaude.forcedToolChoice.description%"
                         }
                       }
                     }
                   }
                 }
+              },
+              "apiType": {
+                "type": "string",
+                "enum": [
+                  "chat-completions",
+                  "responses",
+                  "messages"
+                ],
+                "default": "chat-completions",
+                "description": "%configuration.apiType.description%"
               }
             }
           }
-        },
-        "weavenet-copilot.openaiApiStrategy": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "chat",
-            "responses"
-          ],
-          "enumDescriptions": [
-            "%configuration.openaiApiStrategy.auto%",
-            "%configuration.openaiApiStrategy.chat%",
-            "%configuration.openaiApiStrategy.responses%"
-          ],
-          "default": "chat",
-          "scope": "application",
-          "description": "%configuration.openaiApiStrategy.description%"
         },
         "weavenet-copilot.anthropicVersion": {
           "type": "string",
@@ -398,24 +449,6 @@
           "default": "WeaveNet",
           "description": "%configuration.modelNamePrefix.description%"
         },
-        "weavenet-copilot.includeModels": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "%configuration.includeModels.description%",
-          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
-        },
-        "weavenet-copilot.excludeModels": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "%configuration.excludeModels.description%",
-          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
-        },
         "weavenet-copilot.maxInputTokens": {
           "type": "number",
           "default": 128000,
@@ -436,12 +469,14 @@
         "weavenet-copilot.supportsToolCalling": {
           "type": "boolean",
           "default": true,
-          "description": "%configuration.supportsToolCalling.description%"
+          "description": "%configuration.supportsToolCalling.description%",
+          "deprecationMessage": "%configuration.legacyCapabilities.deprecation%"
         },
         "weavenet-copilot.supportsImageInput": {
           "type": "boolean",
           "default": false,
-          "description": "%configuration.supportsImageInput.description%"
+          "description": "%configuration.supportsImageInput.description%",
+          "deprecationMessage": "%configuration.legacyCapabilities.deprecation%"
         },
         "weavenet-copilot.imageInputModels": {
           "type": "array",
@@ -449,7 +484,8 @@
             "type": "string"
           },
           "default": [],
-          "description": "%configuration.imageInputModels.description%"
+          "description": "%configuration.imageInputModels.description%",
+          "deprecationMessage": "%configuration.legacyCapabilities.deprecation%"
         },
         "weavenet-copilot.disabledImageInputModels": {
           "type": "array",
@@ -457,7 +493,8 @@
             "type": "string"
           },
           "default": [],
-          "description": "%configuration.disabledImageInputModels.description%"
+          "description": "%configuration.disabledImageInputModels.description%",
+          "deprecationMessage": "%configuration.legacyCapabilities.deprecation%"
         },
         "weavenet-copilot.visionProxyEnabled": {
           "type": "boolean",
@@ -485,59 +522,53 @@
           "minimum": 1,
           "description": "%configuration.metadataRefreshHours.description%"
         },
-        "weavenet-copilot.requestHeaders": {
-          "type": "object",
-          "default": {},
-          "description": "%configuration.requestHeaders.description%",
-          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%"
-        },
-        "weavenet-copilot.models": {
-          "type": "array",
-          "default": [],
-          "description": "%configuration.models.description%",
-          "deprecationMessage": "%configuration.legacyConnectionField.deprecation%",
-          "items": {
-            "type": "object",
-            "required": [
-              "id",
-              "route"
-            ],
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              },
-              "route": {
-                "type": "string",
-                "enum": [
-                  "openai",
-                  "chatgpt",
-                  "claude"
-                ]
-              },
-              "maxInputTokens": {
-                "type": "number",
-                "minimum": 1
-              },
-              "maxOutputTokens": {
-                "type": "number",
-                "minimum": 1
-              },
-              "toolCalling": {
-                "type": "boolean"
-              },
-              "imageInput": {
-                "type": "boolean"
-              },
-              "thinking": {
-                "type": "boolean"
-              }
-            }
-          }
+        "weavenet-copilot.modelMetadataEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "%configuration.modelMetadataEnabled.description%"
         }
       }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "weavenet-copilot.setRelayKey",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.clearRelayKey",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.createProfile",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.editConnection",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.copyConnection",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.deleteConnection",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.clearAllConnections",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.refreshModelMetadata",
+          "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.pickVisionProxyModel",
+          "when": "false"
+        }
+      ]
     }
   },
   "scripts": {
@@ -554,12 +585,12 @@
     "test:watch": "vitest",
     "package:list": "vsce ls --no-dependencies",
     "package": "vsce package --no-dependencies",
-    "publish:marketplace": "vsce publish --no-dependencies --skip-duplicate"
+    "publish:marketplace": "vsce publish --no-dependencies"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "@types/vscode": "^1.116.0",
+    "@types/vscode": "1.116.0",
     "@vitest/coverage-v8": "^4.1.10",
     "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.1",

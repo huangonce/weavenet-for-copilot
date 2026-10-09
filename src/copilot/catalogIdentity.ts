@@ -43,7 +43,8 @@ function canonicalCatalogIdentity(config: ExtensionConfig): string {
   return JSON.stringify(stableValue({
     profileId: config.profileId,
     baseUrl: normalizeRelayBaseUrl(config.baseUrl) ?? config.baseUrl.trim(),
-    openaiApiStrategy: config.openaiApiStrategy,
+    apiType: config.apiType,
+    modelMetadataEnabled: config.modelMetadataEnabled,
     requestHeaders: canonicalRelayHeaders(config.requestHeaders),
     includeModels: normalizedPatterns(config.includeModels),
     excludeModels: normalizedPatterns(config.excludeModels),

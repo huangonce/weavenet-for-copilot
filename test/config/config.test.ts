@@ -23,7 +23,8 @@ describe('connection profiles', () => {
         requestHeaders: { 'X-Tenant': 'work', Ignored: 42 },
         includeModels: ['^gpt-', '  '],
         excludeModels: ['deprecated'],
-        models: [{ id: 'private-model', route: 'openai' }],
+        models: [{ id: 'private-model',
+apiType: 'chat-completions' as const }],
       },
       { id: WORK_ID, name: 'Other ID duplicate', baseUrl: 'https://another.example.com/v1' },
       { id: PERSONAL_ID, name: 'Work', baseUrl: 'https://another.example.com/v1' },
@@ -35,10 +36,11 @@ describe('connection profiles', () => {
       id: WORK_ID,
       name: 'Work',
       baseUrl: 'https://relay.example.com/v1',
+      apiType: 'chat-completions',
       requestHeaders: { 'X-Tenant': 'work' },
       includeModels: ['^gpt-'],
       excludeModels: ['deprecated'],
-      models: [{ id: 'private-model', route: 'openai' }],
+      models: [{ id: 'private-model', apiType: 'chat-completions' }],
     }]);
   });
 
@@ -52,6 +54,7 @@ describe('connection profiles', () => {
       id: PERSONAL_ID,
       name: 'Local',
       baseUrl: 'http://127.0.0.1:8080/v1',
+      apiType: 'chat-completions',
       requestHeaders: undefined,
       includeModels: undefined,
       excludeModels: undefined,
@@ -66,17 +69,20 @@ describe('connection profiles', () => {
         name: 'Protocols',
         baseUrl: 'https://relay.example.com/v1',
         models: [
-          { id: 'explicit-responses', route: 'openai', openaiApi: 'responses' },
-          { id: 'explicit-chat', route: 'openai', openaiApi: 'chat' },
-          { id: 'unspecified', route: 'openai', openaiApi: 'bogus' },
+          { id: 'explicit-responses',
+apiType: 'responses' as const },
+          { id: 'explicit-chat',
+apiType: 'chat-completions' as const },
+          { id: 'unspecified',
+apiType: 'chat-completions' as const },
         ],
       },
     ]);
 
     expect(profiles[0].models).toEqual([
-      { id: 'explicit-responses', route: 'openai', openaiApi: 'responses' },
-      { id: 'explicit-chat', route: 'openai', openaiApi: 'chat' },
-      { id: 'unspecified', route: 'openai' },
+      { id: 'explicit-responses', apiType: 'responses' },
+      { id: 'explicit-chat', apiType: 'chat-completions' },
+      { id: 'unspecified', apiType: 'chat-completions' },
     ]);
   });
 
@@ -110,6 +116,7 @@ describe('connection profiles', () => {
       id: WORK_ID,
       name: 'Safe',
       baseUrl: 'https://relay.example.com/v1',
+      apiType: 'chat-completions',
       requestHeaders: { 'X-Tenant': 'team-a' },
       includeModels: undefined,
       excludeModels: undefined,
@@ -139,7 +146,8 @@ describe('connection-scoped route settings', () => {
       includeModels: ['^legacy-'],
       excludeModels: ['-old$'],
       requestHeaders: { 'X-Tenant': 'legacy' },
-      models: [{ id: 'legacy-private', route: 'claude' }],
+      models: [{ id: 'legacy-private',
+apiType: 'messages' as const }],
     });
     const profile = normalizeConnectionProfiles([{
       id: WORK_ID,
@@ -166,19 +174,6 @@ describe('connection-scoped route settings', () => {
     expect(config.includeModels).toEqual([]);
     expect(config.requestHeaders).toEqual({});
     expect(config.models).toEqual([]);
-  });
-
-  it.each([
-    [undefined, 'chat'],
-    ['auto', 'auto'],
-    ['chat', 'chat'],
-    ['responses', 'responses'],
-    ['invalid', 'chat'],
-    [42, 'chat'],
-  ])('normalizes the application-wide OpenAI API strategy %j to %s', (value, expected) => {
-    mockConfiguration({ openaiApiStrategy: value });
-
-    expect(getConfig().openaiApiStrategy).toBe(expected);
   });
 
   it('keeps the vision proxy opt-in and normalizes its exact model and prompt settings', () => {

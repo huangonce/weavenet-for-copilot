@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ResponsesReplayCollector } from './responsesReplay';
 import type { CancellationToken } from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import {
@@ -31,6 +32,7 @@ export interface OpenAIResponsesRequestOptions {
 interface ResponsesStreamState {
   parts: number;
   started: boolean;
+  replay?: ResponsesReplayCollector;
   /** Which terminal event closed the stream: normal completion or truncation. */
   termination?: 'completed' | 'incomplete';
 }
@@ -142,7 +144,7 @@ export async function processResponsesStream(
       buffer = consumed.buffer;
       terminal = consumed.stopped;
     }
-    return { ...state, terminal };
+    return { parts: state.parts, started: state.started, termination: state.termination, terminal };
   } finally {
     await reader.cancel().catch(() => undefined);
   }
@@ -168,6 +170,10 @@ function processResponsesSseData(
 ): boolean {
   if (!data) return false;
   const event = parseResponsesEvent(data);
+  if (callbacks.onResponsesOutputItems) {
+    state.replay ??= new ResponsesReplayCollector();
+    state.replay.consume(event);
+  }
   switch (event.type) {
     case 'response.created':
     case 'response.in_progress':
@@ -233,6 +239,9 @@ function processResponsesSseData(
         if (current) {
           if (event.item.arguments) current.function.arguments = event.item.arguments;
           state.parts += flushFunctionCall(index, pendingFunctionCalls, callbacks);
+        } else if (event.item.call_id && event.item.name) {
+          callbacks.onToolCall({ id: event.item.call_id, type: 'function', function: { name: event.item.name, arguments: event.item.arguments } });
+          state.parts++;
         }
       } else if (event.item?.type === 'reasoning') {
         // Carries the server-side `id` and, with `include: ["reasoning.encrypted_content"]`,
@@ -251,6 +260,7 @@ function processResponsesSseData(
         const usage = toOpenAIUsage(event.response.usage);
         if (usage) callbacks.onOpenAIUsage?.(usage);
       }
+      if (state.replay) callbacks.onResponsesOutputItems?.(state.replay.finish(event.response?.output));
       state.termination = event.type === 'response.incomplete' ? 'incomplete' : 'completed';
       state.parts += flushFunctionCalls(pendingFunctionCalls, callbacks);
       return true;
@@ -280,6 +290,7 @@ export async function processResponsesFullResponse(
   }
   if (payload.error) throw createRelayStreamError('Responses', payload.error);
   if (payload.status === 'failed') throw createRelayStreamError('Responses', 'response failed');
+  if (payload.status === 'cancelled' || payload.status === 'in_progress') throw createIncompleteStreamError('Responses', 'missing-terminal-event');
   if (payload.usage) {
     const usage = toOpenAIUsage(payload.usage);
     if (usage) callbacks.onOpenAIUsage?.(usage);
@@ -313,6 +324,10 @@ export async function processResponsesFullResponse(
         }
       }
     }
+  }
+  if (callbacks.onResponsesOutputItems) {
+    const replay = new ResponsesReplayCollector();
+    callbacks.onResponsesOutputItems(replay.finish(payload.output));
   }
   // Reasoning models burn the whole `max_output_tokens: 1` budget on thinking
   // and legitimately end `incomplete` with only reasoning items; capability

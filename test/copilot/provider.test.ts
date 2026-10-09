@@ -5,7 +5,6 @@ import {
   ConnectionTestError,
   describeConnectionTestError,
   estimateTextTokens,
-  getConfiguredContextWindow,
   getConfiguredReasoningEffort,
   parseToolArguments,
   safeEndpoint,
@@ -16,6 +15,7 @@ import {
 } from '../../src/copilot/provider';
 import { catalogArtifactRevision } from '../../src/copilot/catalogIdentity';
 import { getConfig } from '../../src/config/config';
+import type { ConnectionProfile } from '../../src/config/config';
 import {
   CATALOG_ARTIFACT_PEPPER_SECRET,
   MODEL_SNAPSHOT_KEY_PREFIX,
@@ -25,7 +25,6 @@ import {
 import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
-import { responsesProbeCache } from '../../src/relay/responsesProbeCache';
 import { formatLogError } from '../../src/copilot/requestDiagnostics';
 import type { ResponsesRequest, RoutedModel } from '../../src/relay/types';
 import { InMemoryMemento } from '../support/memento';
@@ -61,7 +60,7 @@ class InMemorySecrets {
 }
 
 function providerFixture(options: {
-  profiles?: Array<{ id: string; name: string; baseUrl: string; requestHeaders?: Record<string, string> }>;
+  profiles?: ConnectionProfile[];
   configValues?: Record<string, unknown>;
   secrets?: InMemorySecrets;
   keys?: Record<string, string>;
@@ -123,9 +122,6 @@ function framedDescription(value: string): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  // Probe verdicts are cached per profile id; several tests reuse the same
-  // profile ids with different probe outcomes, so isolate each test.
-  responsesProbeCache.clear();
 });
 
 describe('connection pool model refresh', () => {
@@ -289,7 +285,7 @@ describe('connection pool model refresh', () => {
       schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
       profileId: WORK_ID,
       catalogRevision: revision,
-      snapshots: { openai: [expect.objectContaining({ id: 'gpt-work' })] },
+      directory: [expect.objectContaining({ id: 'gpt-work' })],
     });
     // The snapshot is JSON-safe: no functions or class instances.
     expect(JSON.parse(JSON.stringify(stored))).toEqual(stored);
@@ -299,24 +295,15 @@ describe('connection pool model refresh', () => {
     const globalState = new InMemoryMemento();
     const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
     const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
-    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`, {
-      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
-      profileId: WORK_ID,
-      catalogRevision: revision,
-      savedAt: Date.now(),
-      snapshots: {
-        openai: [{
-          id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot',
-          protocol: 'openai', route: 'openai', toolCalling: true,
-        }],
-        chatgpt: [],
-        claude: [],
-      },
-      models: [{
-        id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot',
-        protocol: 'openai', route: 'openai', toolCalling: true,
-      }],
-    });
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`, { schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
+profileId: WORK_ID,
+catalogRevision: revision,
+savedAt: Date.now(),
+directory: [{ id: 'gpt-snapshot',
+pickerId: 'gpt-snapshot',
+upstreamId: 'gpt-snapshot',
+toolCalling: true,
+apiType: 'chat-completions' as const }] });
     // The relay is completely unreachable on startup.
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
 
@@ -332,17 +319,14 @@ describe('connection pool model refresh', () => {
     const globalState = new InMemoryMemento();
     const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
     const staleRevision = 'f'.repeat(64);
-    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${staleRevision}`, {
-      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
-      profileId: WORK_ID,
-      catalogRevision: staleRevision,
-      savedAt: Date.now(),
-      snapshots: { openai: [], chatgpt: [], claude: [] },
-      models: [{
-        id: 'gpt-stale', pickerId: 'gpt-stale', upstreamId: 'gpt-stale',
-        protocol: 'openai', route: 'openai',
-      }],
-    });
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${staleRevision}`, { schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
+profileId: WORK_ID,
+catalogRevision: staleRevision,
+savedAt: Date.now(),
+directory: [{ id: 'gpt-stale',
+pickerId: 'gpt-stale',
+upstreamId: 'gpt-stale',
+apiType: 'chat-completions' as const }] });
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
 
     const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
@@ -356,14 +340,14 @@ describe('connection pool model refresh', () => {
     const { provider, secrets } = providerFixture({ globalState, secrets: new InMemorySecrets() });
     const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
     const snapshotKey = `${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`;
-    globalState.values.set(snapshotKey, {
-      schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
-      profileId: WORK_ID,
-      catalogRevision: revision,
-      savedAt: Date.now(),
-      snapshots: { openai: [], chatgpt: [], claude: [] },
-      models: [{ id: 'gpt-snapshot', pickerId: 'gpt-snapshot', upstreamId: 'gpt-snapshot', protocol: 'openai', route: 'openai' }],
-    });
+    globalState.values.set(snapshotKey, { schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
+profileId: WORK_ID,
+catalogRevision: revision,
+savedAt: Date.now(),
+directory: [{ id: 'gpt-snapshot',
+pickerId: 'gpt-snapshot',
+upstreamId: 'gpt-snapshot',
+apiType: 'chat-completions' as const }] });
     secrets.values.delete(keyFor(WORK_ID));
     await provider.refreshModels();
 
@@ -457,7 +441,8 @@ describe('connection pool model refresh', () => {
   });
 
   it('returns model diagnostics while treating a failed optional Claude probe as a warning', async () => {
-    const { provider, secrets } = providerFixture();
+    const profile = { ...WORK_PROFILE, models: [{ id: 'claude-test', apiType: 'messages' as const }] };
+    const { provider, secrets } = providerFixture({ profiles: [profile] });
     secrets.values.set(keyFor(WORK_ID), 'work-key');
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'claude-test' }, { id: 'gpt-test' }] }), {
@@ -472,7 +457,7 @@ describe('connection pool model refresh', () => {
         headers: { 'content-type': 'application/json', 'x-request-id': 'claude-request' },
       }));
 
-    await expect(provider.testConnection(WORK_PROFILE)).resolves.toMatchObject({
+    await expect(provider.testConnection(profile)).resolves.toMatchObject({
       profileId: WORK_ID,
       connectionName: 'work',
       host: 'work.example.test',
@@ -517,6 +502,7 @@ describe('connection pool model refresh', () => {
   it('estimates text, tool, result, and image token counts', async () => {
     const { provider } = providerFixture();
     const message = {
+      role: vscode.LanguageModelChatMessageRole.User,
       content: [
         new vscode.LanguageModelTextPart('你好abcd'),
         new vscode.LanguageModelToolCallPart('call-1', 'search', { q: 'docs' }),
@@ -531,16 +517,12 @@ describe('connection pool model refresh', () => {
 });
 
 describe('Provider request helpers', () => {
-  const thinkingModel = {
-    id: 'reasoning-model',
-    pickerId: 'reasoning-model',
-    upstreamId: 'reasoning-model',
-    protocol: 'openai',
-    route: 'openai',
-    catalogSource: 'discovery',
-    thinking: true,
-    contextWindows: [200_000, 400_000],
-  } satisfies RoutedModel;
+  const thinkingModel = { id: 'reasoning-model',
+pickerId: 'reasoning-model',
+upstreamId: 'reasoning-model',
+catalogSource: 'discovery',
+thinking: true,
+apiType: 'chat-completions' as const } satisfies RoutedModel;
 
   it('normalizes safe relay hosts and endpoint paths without leaking URL credentials', () => {
     expect(safeHost('https://user:pass@relay.example.test/v1?secret=yes')).toBe('relay.example.test');
@@ -558,9 +540,6 @@ describe('Provider request helpers', () => {
       ...thinkingModel,
       openai: { reasoningEfforts: ['minimal', 'low'], defaultReasoningEffort: 'minimal' },
     }, { modelOptions: { reasoningEffort: 'high' } } as never)).toBe('minimal');
-    expect(getConfiguredContextWindow(thinkingModel, { modelConfiguration: { contextWindow: '400000' } } as never)).toBe(400_000);
-    expect(getConfiguredContextWindow(thinkingModel, { configuration: { contextWindow: '999999' } } as never)).toBeUndefined();
-    expect(getConfiguredContextWindow(thinkingModel, { configuration: { contextWindow: 'default' } } as never)).toBeUndefined();
   });
 
   it('creates bounded Claude thinking budgets and validates Relay tool arguments', () => {
@@ -597,7 +576,7 @@ describe('Provider chat responses', () => {
   } as vscode.CancellationToken;
   const progress = () => ({ report: vi.fn() });
   const openAIModel = { id: 'gpt-test', capabilities: { tool_calling: true, reasoning: true }, context_length: 128_000 };
-  const claudeModel = { id: 'claude-test', capabilities: { tool_calling: true, reasoning: true } };
+  const claudeModel = { id: 'claude-test', capabilities: { tool_calling: true, reasoning: true, claude: { thinkingMode: 'manual', sampling: true, forcedToolChoice: true } } };
 
   async function readyProvider(
     model: typeof openAIModel | typeof claudeModel,
@@ -605,7 +584,7 @@ describe('Provider chat responses', () => {
     profile = WORK_PROFILE,
   ) {
     const { provider, secrets } = providerFixture({
-      profiles: [profile],
+      profiles: [{ ...profile, apiType: model === claudeModel ? 'messages' : 'chat-completions', ...profile }],
       configValues: {
         sendMaxTokens: true,
         supportsToolCalling: true,
@@ -633,7 +612,10 @@ describe('Provider chat responses', () => {
   it('converts OpenAI requests and streamed content, reasoning, and tools to VS Code parts', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+apiType: 'chat-completions' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, {}, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
@@ -658,7 +640,7 @@ describe('Provider chat responses', () => {
     );
 
     expect(stream).toHaveBeenCalledOnce();
-    expect(output.report.mock.calls.map(([part]) => part)).toEqual([
+    expect(output.report.mock.calls.map(([part]) => part).filter(part => !(part as unknown as { metadata?: Record<string, unknown> }).metadata?.weavenetProtocolReplay)).toEqual([
       expect.objectContaining({ value: 'reason' }),
       expect.objectContaining({ value: 'answer' }),
       expect.objectContaining({ callId: 'call-1', name: 'search', input: { q: 'docs' } }),
@@ -668,10 +650,11 @@ describe('Provider chat responses', () => {
   it('snapshots tool definitions and model options before awaiting the API key', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{
-        id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true,
-        contextWindows: [128_000, 400_000], openai: { contextWindow: true },
-      }],
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+contextWindow: 400_000,
+apiType: 'chat-completions' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, {}, profile);
     let releaseKey: ((value: string | undefined) => void) | undefined;
@@ -690,7 +673,6 @@ describe('Provider chat responses', () => {
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
       expect(request).toMatchObject({
         reasoning_effort: 'max',
-        context_window: 400_000,
         tool_choice: 'required',
         tools: [{ function: {
           name: 'search', description: 'Search docs',
@@ -722,12 +704,12 @@ describe('Provider chat responses', () => {
   it('uses explicitly supported modern OpenAI request fields without changing legacy defaults', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{
-        id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true,
-        contextWindows: [128_000],
-        openai: {
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+contextWindow: 128_000,
+openai: {
           tokenLimitField: 'max_completion_tokens' as const,
-          contextWindow: true,
           promptCacheKey: true,
           store: true,
           strictTools: true,
@@ -735,14 +717,14 @@ describe('Provider chat responses', () => {
           developerRole: true,
           reasoningEfforts: ['minimal', 'high'] as const,
           defaultReasoningEffort: 'minimal' as const,
+          sampling: true, samplingEfforts: ['minimal' as const],
         },
-      }],
+apiType: 'chat-completions' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, { temperature: 0.4, topP: 0.7 }, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
       expect(request).toMatchObject({
         max_completion_tokens: 32,
-        context_window: 128_000,
         reasoning_effort: 'minimal',
         store: false,
         parallel_tool_calls: true,
@@ -770,10 +752,10 @@ describe('Provider chat responses', () => {
   it('does not enable strict tools for schemas with optional properties', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{
-        id: 'gpt-test', route: 'openai' as const, toolCalling: true,
-        openai: { strictTools: true },
-      }],
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+openai: { strictTools: true },
+apiType: 'chat-completions' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, {}, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request) => {
@@ -793,15 +775,41 @@ describe('Provider chat responses', () => {
     expect(stream).toHaveBeenCalledOnce();
   });
 
-  it('uses Claude native payloads, extended thinking, and native tool-choice semantics', async () => {
+  it('counts replayed Chat thinking once, including metadata-only host history', async () => {
+    const profile = { ...WORK_PROFILE, models: [{ id: 'gpt-test', apiType: 'chat-completions' as const,
+      thinking: true, openai: { replayReasoningContent: true } }] };
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
+    vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (_request, callbacks) => {
+      callbacks.onReasoning('abcdefgh'); callbacks.onContent('answer');
+    });
+    const output = progress();
+    await provider.provideLanguageModelChatResponse(model, [], {} as never, output as never, token);
+    const parts = output.report.mock.calls.map(([part]) => part);
+    expect(await provider.provideTokenCount(model, { role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: parts, name: undefined } as never, token)).toBe(4 + estimateTextTokens('answer') + estimateTextTokens('abcdefgh'));
+    const metadataOnly = parts.filter(part => !(part as { value?: unknown }).value || part instanceof vscode.LanguageModelTextPart);
+    expect(await provider.provideTokenCount(model, { role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: metadataOnly, name: undefined } as never, token)).toBe(4 + estimateTextTokens('answer') + estimateTextTokens('abcdefgh'));
+  });
+
+  it('rejects Required tool mode when no callable tool is available', async () => {
+    const { provider, model } = await readyProvider(openAIModel);
+    const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion');
+    await expect(provider.provideLanguageModelChatResponse(model, [], {
+      toolMode: vscode.LanguageModelChatToolMode.Required, tools: [],
+    } as never, progress() as never, token)).rejects.toThrow('Required tool mode');
+    expect(stream).not.toHaveBeenCalled();
+  });
+
+  it('honors Claude Required tool mode without incompatible manual extended thinking', async () => {
     const { provider, model } = await readyProvider(claudeModel, { temperature: 2, topP: 0.5 });
     const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({
         model: 'claude-test', max_tokens: 9_000, stream: true,
-        thinking: { type: 'enabled', budget_tokens: 7_976 },
-        temperature: undefined, top_p: undefined,
+        temperature: 1, top_p: undefined,
       });
-      expect(request.tool_choice).toBeUndefined();
+      expect(request.thinking).toBeUndefined();
+      expect(request.tool_choice).toEqual({ type: 'any' });
       callbacks.onContent('answer');
       callbacks.onToolCall({ id: 'toolu-1', type: 'function', function: { name: 'search', arguments: '{}' } });
       callbacks.onStreamEnd?.('Claude', 'message_stop');
@@ -817,17 +825,17 @@ describe('Provider chat responses', () => {
     );
 
     expect(stream).toHaveBeenCalledOnce();
-    expect(output.report).toHaveBeenCalledTimes(2);
+    expect(output.report).toHaveBeenCalledTimes(3);
   });
 
-  it('uses multimodal-compatible OpenAI payloads without Relay routing hints', async () => {
+  it('preserves standard multimodal token limits and selected reasoning', async () => {
     const { provider, model } = await readyProvider(openAIModel, { supportsImageInput: true });
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({ model: 'gpt-test', stream: true });
-      expect(request).not.toHaveProperty('max_tokens');
+      expect(request.max_tokens).toBe(32);
       expect(request).not.toHaveProperty('context_window');
-      expect(request).not.toHaveProperty('reasoning_effort');
-      expect(request).not.toHaveProperty('prompt_cache_key');
+      expect(request.reasoning_effort).toBe('max');
+      expect(request.prompt_cache_key).toEqual(expect.stringContaining('weavenet-'));
       callbacks.onContent('image answer');
     });
 
@@ -896,7 +904,7 @@ describe('Provider chat responses', () => {
     expect(sendRequest.mock.calls[0][2]).not.toBe(token);
     expect(sendRequest).toHaveBeenCalledOnce();
     expect(stream).toHaveBeenCalledTimes(2);
-    expect(output.report.mock.calls.map(([part]) => part)).toEqual([
+    expect(output.report.mock.calls.map(([part]) => part).filter(part => !(part as unknown as { metadata?: Record<string, unknown> }).metadata?.weavenetProtocolReplay)).toEqual([
       expect.objectContaining({ value: 'fixed' }),
       expect.objectContaining({ value: 'fixed' }),
     ]);
@@ -1172,12 +1180,10 @@ describe('Provider chat responses', () => {
   it('promotes native tool-result images after Responses function outputs', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
     };
-    const { provider, model } = await readyProvider(openAIModel, {
-      openaiApiStrategy: 'responses',
-      supportsImageInput: true,
-    }, profile);
+    const { provider, model } = await readyProvider(openAIModel, { supportsImageInput: true }, profile);
     const select = vi.spyOn(vscode.lm, 'selectChatModels');
     const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
       expect(request.input).toEqual([
@@ -1281,10 +1287,11 @@ describe('Provider chat responses', () => {
     {
       protocol: 'OpenAI Responses',
       modelInfo: openAIModel,
-      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      configValues: { supportsImageInput: true },
       profile: {
         ...WORK_PROFILE,
-        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+        models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
       },
       capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamResponses')
         .mockImplementation(async (request) => assertRequest(responsesInputItems(request.input))),
@@ -1385,10 +1392,11 @@ describe('Provider chat responses', () => {
     {
       protocol: 'OpenAI Responses',
       modelInfo: openAIModel,
-      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      configValues: { supportsImageInput: true },
       profile: {
         ...WORK_PROFILE,
-        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+        models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
         const input = responsesInputItems(request.input);
@@ -1465,10 +1473,11 @@ describe('Provider chat responses', () => {
     },
     {
       protocol: 'OpenAI Responses',
-      configValues: { openaiApiStrategy: 'responses', supportsImageInput: true },
+      configValues: { supportsImageInput: true },
       profile: {
         ...WORK_PROFILE,
-        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+        models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
         expect(request.input).toHaveLength(3);
@@ -1526,10 +1535,10 @@ describe('Provider chat responses', () => {
     {
       protocol: 'OpenAI Responses',
       modelInfo: openAIModel,
-      configValues: { openaiApiStrategy: 'responses' },
       profile: {
         ...WORK_PROFILE,
-        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+        models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
         const input = responsesInputItems(request.input);
@@ -1599,10 +1608,10 @@ describe('Provider chat responses', () => {
     },
     {
       protocol: 'OpenAI Responses',
-      configValues: { openaiApiStrategy: 'responses' },
       profile: {
         ...WORK_PROFILE,
-        models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+        models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
       },
       capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
         expect(JSON.stringify(request.input)).not.toContain('call-2');
@@ -1705,8 +1714,10 @@ describe('Provider chat responses', () => {
     const profile = {
       ...WORK_PROFILE,
       models: [
-        { id: 'target', route: 'openai' as const },
-        { id: 'proxy-only', route: 'openai' as const },
+        { id: 'target',
+apiType: 'chat-completions' as const },
+        { id: 'proxy-only',
+apiType: 'chat-completions' as const },
       ],
     };
     const { provider } = providerFixture({
@@ -1744,8 +1755,11 @@ describe('Provider chat responses', () => {
     const profile = {
       ...WORK_PROFILE,
       models: [
-        { id: 'target', route: 'openai' as const },
-        { id: 'native-vision', route: 'openai' as const, imageInput: true },
+        { id: 'target',
+apiType: 'chat-completions' as const },
+        { id: 'native-vision',
+imageInput: true,
+apiType: 'chat-completions' as const },
       ],
     };
     const nativeId = `weavenet::${WORK_ID}::native-vision`;
@@ -1818,10 +1832,10 @@ describe('Provider chat responses', () => {
   it('sends only the generated description through the Responses API for a text-only model', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{ id: 'gpt-test', route: 'openai' as const, openaiApi: 'responses' as const }],
+      models: [{ id: 'gpt-test',
+apiType: 'responses' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, {
-      openaiApiStrategy: 'responses',
       visionProxyEnabled: true,
       visionProxyModel: 'copilot/gpt-4o',
     }, profile);
@@ -2126,7 +2140,6 @@ describe('Provider chat responses', () => {
     ));
     // This test verifies per-profile routing of duplicate ids, not protocol
     // capability, so keep the catalog on Chat Completions.
-    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('unsupported');
     const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, token);
     const selected = information.find((model) => model.id.includes(PERSONAL_ID));
     const stream = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async function (this: RelayClient, request) {
@@ -2201,21 +2214,14 @@ describe('Provider chat responses', () => {
       .rejects.toBeInstanceOf(vscode.CancellationError);
   });
 
-  it('routes models probed for the Responses API through streamResponses with a stateless request', async () => {
+  it('routes explicitly configured Responses models through a stateless request', async () => {
     const profile = {
       ...WORK_PROFILE,
+      apiType: 'responses' as const,
       baseUrl: 'https://responses-work.example.test/v1',
-      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+      models: [{ id: 'gpt-test',  toolCalling: true, thinking: true }],
     };
-    // Probe spies must be installed before refreshModels runs the probes.
-    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('supported');
-    vi.spyOn(RelayClient.prototype, 'testOpenAIResponses').mockResolvedValue({
-      endpoint: '/responses',
-      status: 200,
-      responseType: 'application/json',
-      termination: 'completed',
-    } as never);
-    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
     const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({
         model: 'gpt-test',
@@ -2245,22 +2251,25 @@ describe('Provider chat responses', () => {
     );
 
     expect(stream).toHaveBeenCalledOnce();
-    expect(output.report.mock.calls.map(([part]) => part)).toEqual([
+    expect(output.report.mock.calls.map(([part]) => part).filter(part => !(part as unknown as { metadata?: Record<string, unknown> }).metadata?.weavenetProtocolReplay)).toEqual([
       expect.objectContaining({ value: 'reason' }),
       expect.objectContaining({ value: 'answer' }),
       expect.objectContaining({ callId: 'call-1', name: 'search', input: { q: 'docs' } }),
     ]);
   });
 
-  it('keeps Chat Completions for models that fail the Responses probe', async () => {
+  it('keeps explicitly selected Chat Completions without protocol probing', async () => {
     const profile = {
       ...WORK_PROFILE,
       baseUrl: 'https://chat-probe.example.test/v1',
-      models: [{ id: 'gpt-test', route: 'openai' as const, toolCalling: true, thinking: true }],
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+apiType: 'chat-completions' as const }],
     };
-    vi.spyOn(RelayClient.prototype, 'probeResponsesEndpoint').mockResolvedValue('supported');
     vi.spyOn(RelayClient.prototype, 'testOpenAIResponses').mockRejectedValue(new Error('model does not support /responses'));
-    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
+    const probe = vi.mocked(RelayClient.prototype.testOpenAIResponses);
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
     const streamResponses = vi.spyOn(RelayClient.prototype, 'streamResponses').mockResolvedValue(undefined);
     const streamChat = vi.spyOn(RelayClient.prototype, 'streamChatCompletion').mockImplementation(async (request, callbacks) => {
       expect(request).toMatchObject({ model: 'gpt-test', messages: expect.any(Array) });
@@ -2277,21 +2286,21 @@ describe('Provider chat responses', () => {
 
     expect(streamResponses).not.toHaveBeenCalled();
     expect(streamChat).toHaveBeenCalledOnce();
+    // An explicitly declared model protocol must never trigger the paid
+    // Responses probe, not even through the rejected stub.
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it('requests encrypted reasoning without leaving the request stateless when encryptedReasoning is enabled', async () => {
     const profile = {
       ...WORK_PROFILE,
-      models: [{
-        id: 'gpt-test',
-        route: 'openai' as const,
-        openaiApi: 'responses' as const,
-        toolCalling: true,
-        thinking: true,
-        openai: { encryptedReasoning: true },
-      }],
+      models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+openai: { encryptedReasoning: true },
+apiType: 'responses' as const }],
     };
-    const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
+    const { provider, model } = await readyProvider(openAIModel, {}, profile);
     let request: ResponsesRequest | undefined;
     vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
       request = sent as ResponsesRequest;
@@ -2318,25 +2327,23 @@ describe('Provider chat responses', () => {
     expect(request).not.toHaveProperty('previous_response_id');
     // The opaque payload is parked on a thinking part so the next turn can replay it verbatim.
     expect(reported.report).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'rs_1',
-      metadata: { weavenetResponsesReasoning: { encryptedContent: 'enc:abc', summary: [] } },
+      metadata: { weavenetProtocolReplay: expect.objectContaining({
+        apiType: 'responses', responses: expect.arrayContaining([expect.objectContaining({ id: 'rs_1', encrypted_content: 'enc:abc' })]),
+      }) },
     }));
   });
 
-  it('requests a reasoning summary by default and honors an explicit opt-out', async () => {
+  it('requests a reasoning summary only when the model explicitly supports it', async () => {
     const withCapability = async (openai: Record<string, unknown>): Promise<ResponsesRequest | undefined> => {
       const profile = {
         ...WORK_PROFILE,
-        models: [{
-          id: 'gpt-test',
-          route: 'openai' as const,
-          openaiApi: 'responses' as const,
-          toolCalling: true,
-          thinking: true,
-          openai,
-        }],
+        models: [{ id: 'gpt-test',
+toolCalling: true,
+thinking: true,
+openai,
+apiType: 'responses' as const }],
       };
-      const { provider, model } = await readyProvider(openAIModel, { openaiApiStrategy: 'auto' }, profile);
+      const { provider, model } = await readyProvider(openAIModel, {}, profile);
       let request: ResponsesRequest | undefined;
       vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
         request = sent as ResponsesRequest;
@@ -2353,9 +2360,7 @@ describe('Provider chat responses', () => {
       return request;
     };
 
-    expect(await withCapability({})).toMatchObject({
-      reasoning: { effort: 'low', summary: 'auto' },
-    });
+    expect((await withCapability({}))?.reasoning).toEqual({ effort: 'low' });
     expect(await withCapability({ reasoningSummary: true })).toMatchObject({
       reasoning: { effort: 'low', summary: 'auto' },
     });

@@ -16,4 +16,12 @@ CONTEXT.md
 .vscodeignore
 *.vsix
 PRODUCT_IMPROVEMENTS.md
+OPENAI_RESPONSES_PLAN.md
+VSCODE_1_129_ASSESSMENT.md
+scripts/**
 out/**/*.map
+
+.npm-cache/**
+.tmp/**
+.dsh-permission-recovery/**
+CODE_REVIEW_*.md

@@ -1,6 +1,8 @@
 # WeaveNet 通用 Relay 产品改进清单
 
-> 目标：将 WeaveNet 从服务于特定 sub2api 部署的扩展，逐步发展为可连接不同 OpenAI 兼容与 Anthropic 兼容 AI Gateway 的 Copilot 扩展。
+> 当前方向：精简的 Relay Provider。显式协议、连接隔离与诊断优先；原生 Custom Endpoint 已适用的标准连接可以直接使用官方能力。以下清单保留历史范围，新增供应商、OAuth 和独立补全不作为本轮精简目标。
+
+本轮已完成连接默认 apiType、模型级协议覆盖、取消后台 Responses 探测、移除无效上下文控件、收拢命令和可关闭在线元数据。旧能力开关与旧命令只为兼容已有用户保留。
 
 状态标记：✅ 已完成；🟡 部分完成；⬜ 未开始。
 
@@ -48,7 +50,7 @@
 
 结果中可安全展示脱敏后的请求地址、HTTP 状态、响应类型与 `X-Request-Id`。
 
-### 5. 探测并保存 Relay 能力 🟡
+### 5. 主动测试并保存 Relay 诊断 🟡
 
 连接测试应验证并记录以下能力，模型选择器仅展示实际可用能力：
 
@@ -76,14 +78,14 @@
 
 所有敏感凭据仍只保存在 VS Code SecretStorage。
 
-### 7. 允许连接级协议和路径覆盖 🟡
+### 7. 连接级协议已完成，路径覆盖待需要时扩展 🟡
 
 为不同服务提供可配置或自动探测的端点：
 
 - Models path，例如 `/models`。
 - OpenAI Chat path，例如 `/chat/completions`。
 - Anthropic Messages path，例如 `/messages`。
-- 协议开关或自动探测。
+- 连接默认 apiType 与模型级显式覆盖（已完成）。
 - API 版本 Header。
 
 ### 8. 提供模型别名与路由规则 🟡

@@ -3,33 +3,40 @@ import { CONFIG_SECTION } from '../constants';
 import { DEFAULT_VISION_PROXY_PROMPT } from '../copilot/visionProxy';
 import { isReservedRelayHeader } from '../relay/headers';
 import { normalizeOpenAIRequestCapabilities } from '../relay/openaiCapabilities';
-import type { OpenAIRequestCapabilities, RouteKey } from '../relay/types';
+import type { ClaudeRequestCapabilities, OpenAIRequestCapabilities, ApiType } from '../relay/types';
+import { normalizeClaudeRequestCapabilities } from '../relay/claudeCapabilities';
+export { normalizeClaudeRequestCapabilities } from '../relay/claudeCapabilities';
 import { normalizeRelayBaseUrl } from '../relay/url';
+import { t } from '../l10n';
 
 const MAX_PROFILE_NAME_LENGTH = 100;
 const UNSAFE_PROFILE_NAME = /[\u0000-\u001f\u007f-\u009f]/u;
 
-export type OpenAIApiStrategy = 'auto' | 'chat' | 'responses';
+export { isApiType } from '../relay/types';
+export type { ApiType } from '../relay/types';
+import { isApiType } from '../relay/types';
 
 export interface ConfiguredModel {
   id: string;
   name?: string;
-  /** 目录分组声明：`claude` 选择 Claude 协议，`openai`/`chatgpt` 走 OpenAI 兼容协议（`chatgpt` 为历史遗留值）。 */
-  route: RouteKey;
-  openaiApi?: 'chat' | 'responses';
+  /** Overrides the connection API type; omitted models inherit the connection. */
+  apiType?: ApiType;
+  /** Total input + output window, when the upstream documents it. */
+  contextWindow?: number;
   maxInputTokens?: number;
   maxOutputTokens?: number;
   toolCalling?: boolean;
   imageInput?: boolean;
   thinking?: boolean;
-  contextWindows?: number[];
   openai?: OpenAIRequestCapabilities;
+  claude?: ClaudeRequestCapabilities;
 }
 
 export interface ConnectionProfile {
   id: string;
   name: string;
   baseUrl: string;
+  apiType?: ApiType;
   requestHeaders?: Record<string, string>;
   includeModels?: string[];
   excludeModels?: string[];
@@ -41,7 +48,8 @@ export interface ExtensionConfig {
   profileName?: string;
   baseUrl: string;
   anthropicVersion: string;
-  openaiApiStrategy: OpenAIApiStrategy;
+  apiType: ApiType;
+  modelMetadataEnabled: boolean;
   openaiPromptCaching: boolean;
   openaiPromptCacheKey: string;
   claudePromptCaching: 'automatic' | 'disabled';
@@ -81,7 +89,8 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     profileName: profile?.name,
     baseUrl: profile?.baseUrl ?? '',
     anthropicVersion: (config.get<string>('anthropicVersion') ?? '2023-06-01').trim() || '2023-06-01',
-    openaiApiStrategy: normalizeOpenAIApiStrategy(config.get<unknown>('openaiApiStrategy')),
+    apiType: profile?.apiType ?? 'chat-completions',
+    modelMetadataEnabled: config.get<boolean>('modelMetadataEnabled') ?? true,
     openaiPromptCaching: config.get<boolean>('openaiPromptCaching') ?? true,
     openaiPromptCacheKey: (config.get<string>('openaiPromptCacheKey') ?? '').trim(),
     claudePromptCaching: config.get<'automatic' | 'disabled'>('claudePromptCaching') ?? 'automatic',
@@ -110,10 +119,6 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
   };
 }
 
-function normalizeOpenAIApiStrategy(value: unknown): OpenAIApiStrategy {
-  return value === 'auto' || value === 'responses' ? value : 'chat';
-}
-
 export function getProfileConfiguration(): ProfileConfiguration {
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
   // Intentionally reads only `globalValue`: connection profiles may carry
@@ -138,7 +143,7 @@ function compileRegexList(values: string[]): RegExp[] {
     } catch {
       if (!warnedInvalidRegexes.has(value)) {
         warnedInvalidRegexes.add(value);
-        void vscode.window.showWarningMessage(`Invalid WeaveNet model regex ignored: ${value}`);
+        void vscode.window.showWarningMessage(t('Invalid WeaveNet model regex ignored: {0}', value));
       }
     }
   }
@@ -172,20 +177,19 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
     if (!value || typeof value !== 'object') continue;
     const record = value as Record<string, unknown>;
     const id = typeof record.id === 'string' ? record.id.trim() : '';
-    const route = record.route;
-    if (!id || (route !== 'openai' && route !== 'chatgpt' && route !== 'claude')) continue;
+    if (!id || (record.apiType !== undefined && !isApiType(record.apiType))) continue;
     models.push({
       id,
-      route,
+      apiType: isApiType(record.apiType) ? record.apiType : undefined,
       name: typeof record.name === 'string' && record.name.trim() ? record.name.trim() : undefined,
-      openaiApi: record.openaiApi === 'responses' ? 'responses' : record.openaiApi === 'chat' ? 'chat' : undefined,
+      contextWindow: positiveNumber(record.contextWindow),
       maxInputTokens: positiveNumber(record.maxInputTokens),
       maxOutputTokens: positiveNumber(record.maxOutputTokens),
       toolCalling: typeof record.toolCalling === 'boolean' ? record.toolCalling : undefined,
       imageInput: typeof record.imageInput === 'boolean' ? record.imageInput : undefined,
       thinking: typeof record.thinking === 'boolean' ? record.thinking : undefined,
-      contextWindows: positiveNumberArray(record.contextWindows),
       openai: normalizeOpenAIRequestCapabilities(record.openai),
+      claude: normalizeClaudeRequestCapabilities(record.claude),
     });
   }
   return models;
@@ -200,17 +204,22 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     const record = value as Record<string, unknown>;
     const id = typeof record.id === 'string' ? record.id.trim().toLowerCase() : '';
     const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (record.apiType !== undefined && !isApiType(record.apiType)) continue;
     const baseUrl = typeof record.baseUrl === 'string' ? normalizeRelayBaseUrl(record.baseUrl) ?? '' : '';
     if (!isValidProfileId(id) || !isValidProfileName(name) || !baseUrl || seenIds.has(id) || seenNames.has(name)) continue;
     seenIds.add(id);
     seenNames.add(name);
     const includeModels = stringArray(record.includeModels);
     const excludeModels = stringArray(record.excludeModels);
+    // Old public declarations must be upgraded, never silently routed by new defaults.
+    if (Array.isArray(record.models) && record.models.some(model => model && typeof model === 'object'
+      && ['route', 'openaiApi', 'contextWindows'].some(key => (model as Record<string, unknown>)[key] !== undefined))) continue;
     const models = Array.isArray(record.models) ? normalizeModels(record.models) : undefined;
     profiles.push({
       id,
       name,
       baseUrl,
+      apiType: isApiType(record.apiType) ? record.apiType : 'chat-completions',
       requestHeaders: objectHeaders(record.requestHeaders),
       includeModels,
       excludeModels,
@@ -241,11 +250,4 @@ function stringArray(value: unknown): string[] | undefined {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-function positiveNumberArray(value: unknown): number[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const result = [...new Set(value.map(positiveNumber).filter((entry): entry is number => entry !== undefined))]
-    .sort((left, right) => left - right);
-  return result.length ? result : undefined;
 }

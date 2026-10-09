@@ -12,7 +12,7 @@ import { getCachedData, scheduleRefresh } from './metadataCache.js';
  * OpenRouter only fills fields that the relay did not provide.
  */
 
-export const OPENROUTER_CACHE_KEY = 'weavenet.metadata.openrouter.v3';
+export const OPENROUTER_CACHE_KEY = 'weavenet.metadata.openrouter.v4';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/models';
 export const OPENROUTER_MAX_BODY_BYTES = 10 * 1024 * 1024;
 export const OPENROUTER_MAX_ENTRIES = 10_000;
@@ -45,7 +45,7 @@ interface OpenRouterResponse {
 interface OpenRouterCatalogEntry {
   readonly id: string;
   readonly fullId: string;
-  readonly maxInputTokens?: number;
+  readonly contextWindow?: number;
   readonly maxOutputTokens?: number;
   readonly vision?: boolean;
   readonly toolCalling?: boolean;
@@ -111,13 +111,13 @@ function toEntry(model: OpenRouterModel): OpenRouterCatalogEntry | undefined {
   const inputModalities = new Set(Array.isArray(model.architecture?.input_modalities)
     ? model.architecture.input_modalities.filter(isString)
     : []);
-  const maxInputTokens =
+  const contextWindow =
     positiveFinite(model.context_length) ?? positiveFinite(model.top_provider?.context_length);
   const maxOutputTokens = positiveFinite(model.top_provider?.max_completion_tokens);
   return {
     id,
     fullId: fullId!,
-    maxInputTokens,
+    contextWindow,
     maxOutputTokens,
     vision: inputModalities.has('image') ? true : undefined,
     toolCalling: params.has('tools') || params.has('tool_choice') ? true : undefined,
@@ -162,7 +162,7 @@ function isValidCatalog(value: unknown): value is OpenRouterCatalogEntry[] {
     && typeof entry === 'object'
     && isNonEmptyString((entry as OpenRouterCatalogEntry).id)
     && isNonEmptyString((entry as OpenRouterCatalogEntry).fullId)
-    && validOptionalPositive((entry as OpenRouterCatalogEntry).maxInputTokens)
+    && validOptionalPositive((entry as OpenRouterCatalogEntry).contextWindow)
     && validOptionalPositive((entry as OpenRouterCatalogEntry).maxOutputTokens)
     && validOptionalBoolean((entry as OpenRouterCatalogEntry).vision)
     && validOptionalBoolean((entry as OpenRouterCatalogEntry).toolCalling)
@@ -198,48 +198,40 @@ function enrichModelFromOpenRouter(
     ?? uniqueBareIdEntry(entries, modelId);
   if (!entry) return model;
 
-  const maxInputTokens = model.maxInputTokens ?? entry.maxInputTokens;
+  const contextWindow = model.contextWindow ?? entry.contextWindow;
   const maxOutputTokens = model.maxOutputTokens ?? entry.maxOutputTokens;
   const imageInput = model.imageInput ?? entry.vision;
   const toolCalling = model.toolCalling ?? entry.toolCalling;
   const thinking = model.thinking ?? entry.reasoning;
   const referencePricing = model.referencePricing ?? entry.referencePricing;
-  const contextWindows = model.contextWindows?.length
-    ? model.contextWindows
-    : entry.maxInputTokens !== undefined ? contextWindowsFromLimit(entry.maxInputTokens) : undefined;
   const tier: ModelMetadataSource = 'openrouter';
 
-  const filledFromOpenRouter = model.maxInputTokens === undefined && entry.maxInputTokens !== undefined
+  const filledFromOpenRouter = model.contextWindow === undefined && entry.contextWindow !== undefined
     || model.maxOutputTokens === undefined && entry.maxOutputTokens !== undefined
     || model.imageInput === undefined && entry.vision !== undefined
     || model.toolCalling === undefined && entry.toolCalling !== undefined
     || model.thinking === undefined && entry.reasoning !== undefined
-    || model.referencePricing === undefined && entry.referencePricing !== undefined
-    || !model.contextWindows?.length && Boolean(contextWindows?.length);
+    || model.referencePricing === undefined && entry.referencePricing !== undefined;
   if (!filledFromOpenRouter) return model;
 
   const sources: ModelMetadataSources = {
     ...model.metadataSources,
-    maxInputTokens: sourceForMissing(model.metadataSources?.maxInputTokens, tier, model.maxInputTokens, entry.maxInputTokens),
+    contextWindow: sourceForMissing(model.metadataSources?.contextWindow, tier, model.contextWindow, entry.contextWindow),
     maxOutputTokens: sourceForMissing(model.metadataSources?.maxOutputTokens, tier, model.maxOutputTokens, entry.maxOutputTokens),
     imageInput: sourceForMissing(model.metadataSources?.imageInput, tier, model.imageInput, entry.vision),
     toolCalling: sourceForMissing(model.metadataSources?.toolCalling, tier, model.toolCalling, entry.toolCalling),
     thinking: sourceForMissing(model.metadataSources?.thinking, tier, model.thinking, entry.reasoning),
     referencePricing: sourceForMissing(model.metadataSources?.referencePricing, tier, model.referencePricing, entry.referencePricing),
-    contextWindows: model.contextWindows?.length
-      ? model.metadataSources?.contextWindows
-      : contextWindows?.length ? tier : undefined,
   };
 
   return {
     ...model,
-    maxInputTokens,
+    contextWindow,
     maxOutputTokens,
     imageInput,
     toolCalling,
     thinking,
     referencePricing,
-    contextWindows,
     metadataSources: sources,
   };
 }
@@ -259,10 +251,4 @@ function sourceForMissing<T>(
   fallbackValue: T | undefined,
 ): ModelMetadataSource | undefined {
   return currentValue === undefined && fallbackValue !== undefined ? fallbackSource : currentSource;
-}
-
-function contextWindowsFromLimit(maxInputTokens: number | undefined): number[] | undefined {
-  if (maxInputTokens === undefined) return undefined;
-  const windows = [200_000, 400_000, 1_000_000].filter((value) => value <= maxInputTokens);
-  return windows.length > 0 ? windows : undefined;
 }

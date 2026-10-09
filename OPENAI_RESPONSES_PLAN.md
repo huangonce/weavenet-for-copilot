@@ -1,4 +1,6 @@
-# OpenAI Responses API 增量演进计划
+# OpenAI Responses API 历史演进记录
+
+> 以下为旧版本设计记录，不再代表当前配置。当前采用连接默认 apiType 与模型覆盖；自动探测和全局 openaiApiStrategy 已移除，刷新只读取目录。最新使用说明见 [README.md](README.md)。
 
 > **0.6.1 策略补充**：新增应用级 `weavenet-copilot.openaiApiStrategy`（`auto` / `chat` / `responses`）。协议选择采用安全否决顺序：全局设置或固定模型任一处显式 `chat`，即强制 Chat Completions；没有 `chat` 时，任一处显式 `responses` 即强制 Responses；两处均未指定时才执行自动能力探测。强制策略与模型级显式声明都会跳过对应模型的 GET/POST Responses 探测；设置变化会失效旧模型快照与探测缓存并刷新目录。Claude 模型不受此策略影响。
 

@@ -58,7 +58,7 @@ describe('metadata safety', () => {
     const parsed = parseOpenRouterResponse({
       data: [{ id: 'vendor/model', context_length: 200_000, top_provider: { context_length: 100_000 } }],
     });
-    expect(parsed[0]).toMatchObject({ maxInputTokens: 200_000 });
+    expect(parsed[0]).toMatchObject({ contextWindow: 200_000 });
     expect(() => parseOpenRouterResponse({
       data: Array.from({ length: OPENROUTER_MAX_ENTRIES + 1 }, (_, index) => ({ id: `vendor/model-${index}` })),
     })).toThrow('exceeds');
@@ -77,7 +77,7 @@ describe('metadata safety', () => {
     })).toEqual([expect.objectContaining({
       id: 'vision-model',
       fullId: 'vendor/vision-model',
-      maxInputTokens: 400_000,
+      contextWindow: 400_000,
       maxOutputTokens: 8_000,
       vision: true,
       toolCalling: true,
@@ -104,11 +104,27 @@ describe('metadata safety', () => {
     }, { force: true });
 
     const [enriched, preserved, ambiguous] = enrichModelsWithOpenRouter([
-      { id: 'unique', pickerId: 'unique', upstreamId: 'unique', protocol: 'openai', route: 'openai', catalogSource: 'discovery', metadataSources: {} },
-      { id: 'vendor/unique', pickerId: 'vendor/unique', upstreamId: 'vendor/unique', protocol: 'openai', route: 'openai', catalogSource: 'discovery', maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } },
-      { id: 'ambiguous', pickerId: 'ambiguous', upstreamId: 'ambiguous', protocol: 'openai', route: 'openai', catalogSource: 'discovery', metadataSources: {} },
+      { id: 'unique',
+pickerId: 'unique',
+upstreamId: 'unique',
+catalogSource: 'discovery',
+metadataSources: {},
+apiType: 'chat-completions' as const },
+      { id: 'vendor/unique',
+pickerId: 'vendor/unique',
+upstreamId: 'vendor/unique',
+catalogSource: 'discovery',
+maxInputTokens: 8_192,
+metadataSources: { maxInputTokens: 'api' },
+apiType: 'chat-completions' as const },
+      { id: 'ambiguous',
+pickerId: 'ambiguous',
+upstreamId: 'ambiguous',
+catalogSource: 'discovery',
+metadataSources: {},
+apiType: 'chat-completions' as const },
     ]);
-    expect(enriched).toMatchObject({ maxInputTokens: 200_000, imageInput: true, contextWindows: [200_000], metadataSources: { maxInputTokens: 'openrouter' } });
+    expect(enriched).toMatchObject({ contextWindow: 200_000, imageInput: true, metadataSources: { contextWindow: 'openrouter' } });
     expect(preserved).toMatchObject({ maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } });
     expect(ambiguous.maxInputTokens).toBeUndefined();
   });

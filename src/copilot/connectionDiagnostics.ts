@@ -4,7 +4,9 @@ export type ConnectionProbeId =
   | 'models'
   | 'openai.nonStreaming'
   | 'openai.streaming'
-  | 'openai.responses'
+  | 'openai.responses' // Accepted only for reading older diagnostics.
+  | 'responses.nonStreaming'
+  | 'responses.streaming'
   | 'claude.nonStreaming'
   | 'claude.streaming';
 
@@ -42,6 +44,7 @@ export interface ConnectionProtocolCapabilities {
 export interface ConnectionCapabilities {
   readonly openai: ConnectionProtocolCapabilities;
   readonly claude: ConnectionProtocolCapabilities;
+  readonly responses?: ConnectionProtocolCapabilities;
 }
 
 export interface ConnectionDiagnosticsSnapshot {
@@ -82,6 +85,7 @@ export function deriveConnectionCapabilities(probes: readonly ConnectionProbeRes
   return {
     openai: deriveProtocolCapabilities(find('openai.nonStreaming'), find('openai.streaming')),
     claude: deriveProtocolCapabilities(find('claude.nonStreaming'), find('claude.streaming')),
+    responses: deriveProtocolCapabilities(find('responses.nonStreaming'), find('responses.streaming')),
   };
 }
 

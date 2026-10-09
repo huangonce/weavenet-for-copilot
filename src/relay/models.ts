@@ -1,13 +1,12 @@
 import type * as vscode from 'vscode';
-import type { ConfiguredModel, ExtensionConfig } from '../config/config';
+import { normalizeClaudeRequestCapabilities } from '../config/config';
+import type { ApiType, ConfiguredModel, ExtensionConfig } from '../config/config';
 import { normalizeOpenAIRequestCapabilities } from './openaiCapabilities';
 import type {
+  ClaudeEffort,
   ModelMetadataSources,
-  ModelProtocol,
-  OpenAIApiVariant,
   ReasoningEffort,
   RelayModel,
-  RouteKey,
   RoutedModel,
 } from './types';
 
@@ -39,16 +38,16 @@ export function toChatInformation(
   hasApiKey: boolean,
   source?: { readonly name: string; readonly host?: string },
 ): PickerModelInformation {
-  const protocolLabel = model.protocol === 'claude' ? 'Claude native' : 'OpenAI compatible';
+  const protocolLabel = model.apiType === 'messages' ? 'Claude native' : 'OpenAI compatible';
+  const budget = modelTokenBudget(model, config);
   return {
     id: model.pickerId || model.id,
     name: `${config.modelNamePrefix} ${model.name || model.upstreamId}`,
-    family: model.protocol === 'claude' ? 'claude' : 'weavenet',
+    family: model.apiType === 'messages' ? 'claude' : 'weavenet',
     version: model.upstreamId,
     detail: hasApiKey ? detailFor(model, source) : 'API key required',
     tooltip: hasApiKey ? buildTooltip(model, protocolLabel) : 'Run a WeaveNet key command first.',
-    maxInputTokens: Math.min(model.maxInputTokens ?? config.maxInputTokens, config.maxInputTokens),
-    maxOutputTokens: model.maxOutputTokens ?? config.maxOutputTokens,
+    ...budget,
     isBYOK: true,
     isUserSelectable: true,
     capabilities: {
@@ -60,32 +59,37 @@ export function toChatInformation(
   };
 }
 
+/** Never advertise input + output above a documented shared context window. */
+export function modelTokenBudget(model: RoutedModel, config: ExtensionConfig): { maxInputTokens: number; maxOutputTokens: number } {
+  const positive = (value: number | undefined, fallback: number) => Number.isFinite(value) && value! > 0 ? Math.floor(value!) : fallback;
+  // Old OpenRouter-enriched snapshots stored the total window as maxInputTokens.
+  const legacyWindow = model.metadataSources?.maxInputTokens === 'openrouter' ? model.maxInputTokens : undefined;
+  const total = positive(model.contextWindow ?? model.context_length ?? model.context_window ?? legacyWindow, Infinity);
+  if (total < 2) throw new Error('The model context window must allow at least one input and one output token.');
+  const defaultOutput = positive(config.maxOutputTokens, 16_384);
+  const maxOutputTokens = Math.min(positive(model.maxOutputTokens, defaultOutput), total - 1);
+  const maxInputTokens = Math.min(positive(model.maxInputTokens, positive(config.maxInputTokens, 128_000)),
+    positive(config.maxInputTokens, 128_000), total - maxOutputTokens);
+  return { maxInputTokens, maxOutputTokens };
+}
+
 const LEGACY_REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function toConfigurationSchema(model: RoutedModel): { configurationSchema?: object } {
   const properties: Record<string, object> = {};
   if (model.thinking) {
-    const efforts = model.protocol === 'openai' && model.openai?.reasoningEfforts?.length
-      ? model.openai.reasoningEfforts
-      : LEGACY_REASONING_EFFORTS;
+    const efforts = model.apiType === 'messages' && model.claude?.thinkingMode === 'adaptive'
+      ? model.claude.reasoningEfforts ?? ['low', 'medium', 'high', 'max']
+      : model.apiType !== 'messages' && model.openai?.reasoningEfforts?.length
+        ? model.openai.reasoningEfforts : LEGACY_REASONING_EFFORTS;
     properties.reasoningEffort = {
       type: 'string',
       title: '思考工作量',
       enum: efforts,
       enumItemLabels: efforts.map(reasoningEffortLabel),
       enumDescriptions: efforts.map(reasoningEffortDescription),
-      default: model.openai?.defaultReasoningEffort ?? (efforts.includes('high') ? 'high' : efforts[0]),
-      group: 'navigation',
-    };
-  }
-  if (model.contextWindows?.length) {
-    properties.contextWindow = {
-      type: 'string',
-      title: '上下文大小',
-      enum: ['default', ...model.contextWindows.map(String)],
-      enumItemLabels: ['Default', ...model.contextWindows.map(formatContextWindow)],
-      enumDescriptions: ['Use the provider default context budget', ...model.contextWindows.map((value) => `${formatContextWindow(value)} context budget`)],
-      default: model.contextWindows.at(-1)?.toString() ?? 'default',
+      default: (model.apiType === 'messages' ? model.claude?.defaultReasoningEffort : model.openai?.defaultReasoningEffort)
+        ?? (efforts.includes('high') ? 'high' : efforts[0]),
       group: 'navigation',
     };
   }
@@ -108,12 +112,8 @@ function reasoningEffortDescription(value: ReasoningEffort): string {
   }[value];
 }
 
-function formatContextWindow(value: number): string {
-  return value >= 1_000_000 ? `${value / 1_000_000}M` : `${Math.round(value / 1000)}K`;
-}
-
 function detailFor(model: RoutedModel, source?: { readonly name: string; readonly host?: string }): string {
-  const protocolLabel = model.protocol === 'claude' ? 'Claude native' : 'OpenAI compatible';
+  const protocolLabel = model.apiType === 'messages' ? 'Claude native' : 'OpenAI compatible';
   const owner = model.owned_by ? `owned by ${model.owned_by}` : 'from your relay';
   const parts = [protocolLabel, owner];
   if (source) parts.push(`${source.name}${source.host ? ` (${source.host})` : ''}`);
@@ -143,7 +143,7 @@ function toModelCostInfo(model: RoutedModel): Pick<PickerModelInformation, 'inpu
         outputPrice: pricing.outputPer1M,
         cachePrice: pricing.cacheHitPer1M,
         cacheWritePrice: pricing.cacheCreationPer1M,
-        contextMax: model.maxInputTokens,
+        contextMax: model.contextWindow ?? model.maxInputTokens,
       },
     },
     priceCategory: priceCategory(pricing.outputPer1M),
@@ -165,7 +165,7 @@ export function supportsImageInputForModel(modelId: string, config: ExtensionCon
 
 export function supportsImageInputForRoutedModel(model: RoutedModel, config: ExtensionConfig): boolean {
   if (config.disabledImageInputModels.some((regex) => regex.test(model.id))) return false;
-  return supportsImageInputForModel(model.id, config) || model.imageInput === true;
+  return model.imageInput ?? supportsImageInputForModel(model.id, config);
 }
 
 export function supportsVisionProxy(config: Pick<ExtensionConfig, 'visionProxyEnabled' | 'visionProxyModel'>): boolean {
@@ -176,34 +176,21 @@ export function supportsToolCallingForModel(model: RoutedModel, config: Extensio
   return config.supportsToolCalling && model.toolCalling === true;
 }
 
-/** Claude 原生模型识别：模型 id 以 `claude-` 开头（大小写不敏感）。 */
-export function isClaudeModelId(modelId: string): boolean {
-  return modelId.toLowerCase().startsWith('claude-');
-}
-
-/**
- * 解析 OpenAI API variant：`undefined`（未探测/未声明）等价 `'chat'`（Chat Completions）。
- * 分派与展示逻辑都应通过本函数读取 variant，避免把 `undefined` 的"未探测"语义散落各处。
- */
-export function resolveOpenAIApiVariant(model: { readonly openaiApi?: OpenAIApiVariant }): OpenAIApiVariant {
-  return model.openaiApi ?? 'chat';
-}
-
 export function toRoutedModel(
   model: RelayModel,
-  protocol: ModelProtocol,
-  route: RouteKey = protocol === 'claude' ? 'claude' : 'openai',
+  apiType: ApiType,
 ): RoutedModel {
   const record = model as unknown as Record<string, unknown>;
   const capabilities = objectFrom(model.capabilities);
   const openai = normalizeOpenAIRequestCapabilities(
     capabilities.openai ?? record.openai ?? record.openai_request_capabilities,
   );
-  const maxInputTokens = numberFrom(model.context_length, model.context_window, record.max_input_tokens);
+  const contextWindow = numberFrom(model.context_length, model.context_window, record.contextWindow);
+  const maxInputTokens = numberFrom(record.max_input_tokens, record.maxInputTokens);
   const maxOutputTokens = numberFrom(model.max_completion_tokens, model.max_output_tokens, record.max_tokens);
   const imageInput = booleanFrom(
     capabilities.vision,
-    capabilities.image_input,
+    typeof capabilities.image_input === 'object' ? objectFrom(capabilities.image_input).supported : capabilities.image_input,
     capabilities.imageInput,
     capabilities.multimodal,
     capabilities.multi_modal,
@@ -216,8 +203,22 @@ export function toRoutedModel(
     capabilities.function_calling,
     record.tool_calling,
   );
-  const thinking = booleanFrom(capabilities.reasoning, capabilities.thinking, record.reasoning);
+  const nativeThinking = objectFrom(capabilities.thinking);
+  const manualThinking = nativeThinking.supported === false ? false : objectFrom(objectFrom(nativeThinking.types).enabled).supported;
+  const adaptiveThinking = objectFrom(objectFrom(nativeThinking.types).adaptive).supported;
+  const declaredClaude = normalizeClaudeRequestCapabilities(capabilities.claude ?? record.claude);
+  const effortSupport = objectFrom(capabilities.effort);
+  const nativeEfforts = (['low', 'medium', 'high', 'xhigh', 'max'] as ClaudeEffort[])
+    .filter((level) => objectFrom(effortSupport[level]).supported === true);
+  const inferredClaude = apiType === 'messages' && (adaptiveThinking === true || manualThinking === true)
+    ? { sampling: manualThinking === true, forcedToolChoice: manualThinking === true, thinkingMode: adaptiveThinking === true ? 'adaptive' as const : 'manual' as const,
+      reasoningEfforts: nativeEfforts.length ? nativeEfforts : undefined } : undefined;
+  const claude = inferredClaude || declaredClaude ? { ...inferredClaude,
+    ...Object.fromEntries(Object.entries(declaredClaude ?? {}).filter(([, value]) => value !== undefined)) } : undefined;
+  const thinking = booleanFrom(apiType === 'messages' && adaptiveThinking === true ? true : undefined, apiType === 'messages' ? manualThinking : undefined,
+    capabilities.reasoning, capabilities.thinking, apiType !== 'messages' ? nativeThinking.supported : undefined, record.reasoning);
   const metadataSources: ModelMetadataSources = {
+    contextWindow: contextWindow === undefined ? undefined : 'api',
     maxInputTokens: maxInputTokens === undefined ? undefined : 'api',
     maxOutputTokens: maxOutputTokens === undefined ? undefined : 'api',
     imageInput: imageInput === undefined ? undefined : 'api',
@@ -226,41 +227,53 @@ export function toRoutedModel(
   };
 
   return {
-    ...model,
+    id: model.id,
+    object: model.object,
+    owned_by: model.owned_by,
+    created: model.created,
+    display_name: model.display_name,
+    max_input_tokens: model.max_input_tokens,
+    max_tokens: model.max_tokens,
+    context_length: model.context_length,
+    context_window: model.context_window,
+    max_completion_tokens: model.max_completion_tokens,
+    max_output_tokens: model.max_output_tokens,
+    capabilities: model.capabilities,
+    name: model.name ?? (typeof record.display_name === 'string' ? record.display_name : undefined),
     pickerId: model.id,
     upstreamId: model.id,
-    protocol,
-    route,
+    apiType,
     catalogSource: 'discovery',
+    contextWindow,
     maxInputTokens,
     maxOutputTokens,
     imageInput,
     toolCalling,
     thinking,
     openai,
+    claude,
     metadataSources,
   };
 }
 
-/** 固定配置模型 → 运行时模型。`route === 'claude'` 显式选择 Claude 协议；否则走 OpenAI 兼容协议。 */
-export function fromConfiguredModel(model: ConfiguredModel): RoutedModel {
-  const protocol: ModelProtocol = model.route === 'claude' ? 'claude' : 'openai';
+/** Fixed declarations inherit the connection API unless explicitly overridden. */
+export function fromConfiguredModel(model: ConfiguredModel, defaultApiType: ApiType = 'chat-completions'): RoutedModel {
+  const apiType = model.apiType ?? defaultApiType;
   return {
     id: model.id,
     pickerId: model.id,
     upstreamId: model.id,
     name: model.name,
-    protocol,
-    route: model.route,
+    apiType,
     catalogSource: 'configured',
+    contextWindow: model.contextWindow,
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
     toolCalling: model.toolCalling,
     imageInput: model.imageInput,
     thinking: model.thinking,
-    contextWindows: model.contextWindows,
     openai: model.openai,
-    openaiApi: model.openaiApi,
+    claude: model.claude,
     metadataSources: {},
   };
 }
@@ -272,7 +285,7 @@ export function assignUniquePickerIds(models: RoutedModel[]): RoutedModel[] {
   const used = new Set<string>();
   return models.map((model) => {
     const base = (counts.get(model.upstreamId) ?? 0) > 1
-      ? `${model.upstreamId}::${model.route}`
+      ? `${model.upstreamId}::${model.apiType}`
       : model.upstreamId;
     let pickerId = base;
     let suffix = 2;
@@ -285,11 +298,11 @@ export function assignUniquePickerIds(models: RoutedModel[]): RoutedModel[] {
 export function filterModels(
   models: RoutedModel[],
   config: ExtensionConfig,
-  protocol?: ModelProtocol,
+  apiType?: ApiType,
 ): RoutedModel[] {
   return models
     .filter((model) => model.id)
-    .filter((model) => !protocol || model.protocol === protocol)
+    .filter((model) => !apiType || model.apiType === apiType)
     .filter((model) =>
       config.includeModels.length === 0 || config.includeModels.some((regex) => regex.test(model.id)),
     )
@@ -303,7 +316,7 @@ function objectFrom(value: unknown): Record<string, unknown> {
 
 function numberFrom(...values: unknown[]): number | undefined {
   for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
       return value;
     }
   }

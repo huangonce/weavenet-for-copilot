@@ -1,8 +1,12 @@
 import { types as utilTypes } from 'node:util';
 import * as vscode from 'vscode';
+import type { ProtocolReplayState } from '../relay/replayState';
+import { MAX_PROTOCOL_REPLAY_BYTES, MAX_PROTOCOL_REPLAY_ITEMS, PROTOCOL_REPLAY_METADATA_KEY } from '../relay/replayState';
 
 const SYSTEM_ROLE = 3;
-const MAX_MESSAGES = 512;
+// Long agent sessions need far more than 512 messages; the total text, tool JSON
+// and part budgets below are the real amplification guards.
+const MAX_MESSAGES = 2_048;
 const MAX_PARTS = 8_192;
 const MAX_TOOLS = 128;
 const MAX_JSON_NODES = 16_384;
@@ -60,6 +64,7 @@ export interface CanonicalThinkingPart {
   readonly value: string;
   readonly id?: string;
   readonly encryptedContent?: string;
+  readonly protocolReplay?: ProtocolReplayState;
   readonly summary: readonly CanonicalReasoningSummary[];
 }
 
@@ -149,12 +154,10 @@ export function snapshotChatResponseOptions(
     throw new vscode.LanguageModelError('The response tool mode is invalid and cannot be sent safely.');
   }
   const reasoningEffort = snapshotSelectedModelOption(rawOptions, 'reasoningEffort');
-  const contextWindow = snapshotSelectedModelOption(rawOptions, 'contextWindow');
-  const modelOptions = reasoningEffort === undefined && contextWindow === undefined
+  const modelOptions = reasoningEffort === undefined
     ? undefined
     : Object.freeze({
       ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      ...(contextWindow === undefined ? {} : { contextWindow }),
     });
   return Object.freeze({
     ...(tools === undefined ? {} : { tools }),
@@ -346,16 +349,18 @@ function snapshotToolResultPart(
 }
 
 function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string): CanonicalThinkingPart {
-  const value = readHostProperty(raw, 'value', subject);
+  const rawValue = readHostProperty(raw, 'value', subject);
+  const value = snapshotThinkingText(rawValue, state, subject);
   const id = readHostProperty(raw, 'id', subject);
   const metadata = readHostProperty(raw, 'metadata', subject);
-  assertBoundedString(value, `${subject} thinking text`, MAX_TEXT_BYTES, true);
-  consumeTextBudget(state, value);
   if (id !== undefined && id !== '') assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
   let encryptedContent: string | undefined;
+  let protocolReplay: ProtocolReplayState | undefined;
   const summary: CanonicalReasoningSummary[] = [];
   if (metadata !== undefined && metadata !== null) {
     assertHostRecord(metadata, `${subject} metadata`);
+    const replay = readHostProperty(metadata, PROTOCOL_REPLAY_METADATA_KEY, `${subject} metadata`);
+    if (replay !== undefined && replay !== null) protocolReplay = snapshotProtocolReplay(replay, state, subject);
     const carried = readHostProperty(metadata, RESPONSES_REASONING_METADATA_KEY, `${subject} metadata`);
     if (carried !== undefined && carried !== null) {
       assertHostRecord(carried, `${subject} reasoning metadata`);
@@ -387,8 +392,83 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
     value,
     ...(id === undefined || id === '' ? {} : { id }),
     ...(encryptedContent === undefined ? {} : { encryptedContent }),
+    ...(protocolReplay === undefined ? {} : { protocolReplay }),
     summary: Object.freeze(summary),
   });
+}
+
+function snapshotProtocolReplay(raw: unknown, state: SnapshotState, subject: string): ProtocolReplayState {
+  const snapshot = snapshotStrictJson(raw, state, subject, 'Protocol replay state cannot be cyclic.');
+  if (Buffer.byteLength(snapshot.json, 'utf8') > MAX_PROTOCOL_REPLAY_BYTES) throw snapshotLimitError();
+  const value = snapshot.value as Record<string, unknown>;
+  const record = (entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry);
+  const string = (entry: unknown) => typeof entry === 'string';
+  const array = (entry: unknown): entry is unknown[] => Array.isArray(entry) && entry.length <= MAX_PROTOCOL_REPLAY_ITEMS;
+  const invalid = () => new vscode.LanguageModelError('Invalid protocol replay metadata cannot be sent safely.');
+  if (!record(value) || value.version !== 1 || typeof value.identity !== 'string' || !/^[a-f0-9]{64}$/.test(value.identity)
+    || !string(value.displayText)) throw invalid();
+  if (value.apiType === 'messages') {
+    if (value.claudePrefix !== undefined && (!record(value.claudePrefix)
+      || typeof value.claudePrefix.hash !== 'string' || !/^[a-f0-9]{64}$/.test(value.claudePrefix.hash)
+      || !Number.isInteger(value.claudePrefix.messageCount) || Number(value.claudePrefix.messageCount) < 0
+      || Number(value.claudePrefix.messageCount) > MAX_MESSAGES)) throw invalid();
+    if (!array(value.claude)) throw invalid();
+    for (const block of value.claude) {
+      if (!record(block)) throw invalid();
+      if (block.type === 'text' && string(block.text)) continue;
+      if (block.type === 'thinking' && string(block.thinking) && string(block.signature) && block.signature) continue;
+      if (block.type === 'redacted_thinking' && string(block.data) && block.data) continue;
+      if (block.type === 'tool_use' && string(block.id) && string(block.name) && record(block.input)) continue;
+      throw invalid();
+    }
+  } else if (value.apiType === 'chat-completions') {
+    if (!record(value.chat) || value.chat.role !== 'assistant' || !string(value.chat.content)
+      || !string(value.chat.reasoning_content)) throw invalid();
+    if (value.chat.tool_calls !== undefined) {
+      if (!array(value.chat.tool_calls)) throw invalid();
+      for (const call of value.chat.tool_calls) {
+        if (!record(call) || call.type !== 'function' || !string(call.id) || !record(call.function)
+          || !string(call.function.name) || !string(call.function.arguments)) throw invalid();
+      }
+    }
+  } else if (value.apiType === 'responses') {
+    if (!array(value.responses)) throw invalid();
+    for (const item of value.responses) {
+      if (!record(item)) throw invalid();
+      if (item.type === 'message') {
+        if ((item.role !== undefined && item.role !== 'assistant') || !array(item.content)
+          || (item.phase !== undefined && item.phase !== null && item.phase !== 'commentary' && item.phase !== 'final_answer')) throw invalid();
+        for (const part of item.content) {
+          if (!record(part) || !((part.type === 'output_text' && string(part.text)) || (part.type === 'refusal' && string(part.refusal)))) throw invalid();
+        }
+      } else if (item.type === 'function_call') {
+        if (!string(item.call_id) || !string(item.name) || !string(item.arguments)) throw invalid();
+      } else if (item.type === 'reasoning') {
+        if (item.encrypted_content !== undefined && !string(item.encrypted_content)) throw invalid();
+        if (item.id !== undefined && !string(item.id)) throw invalid();
+      } else throw invalid();
+    }
+  } else throw invalid();
+  return snapshot.value as ProtocolReplayState;
+}
+
+function snapshotThinkingText(rawValue: unknown, state: SnapshotState, subject: string): string {
+  if (typeof rawValue === 'string') {
+    assertBoundedString(rawValue, `${subject} thinking text`, MAX_TEXT_BYTES, true);
+    consumeTextBudget(state, rawValue);
+    return rawValue;
+  }
+  assertNotProxy(rawValue, `${subject} thinking text`);
+  const values = readDenseArray(rawValue, `${subject} thinking text`, MAX_PARTS);
+  let bytes = 0;
+  const chunks = values.map((chunk) => {
+    assertBoundedString(chunk, `${subject} thinking text`, MAX_TEXT_BYTES, true);
+    bytes += Buffer.byteLength(chunk, 'utf8');
+    if (bytes > MAX_TEXT_BYTES) throw snapshotLimitError();
+    consumeTextBudget(state, chunk);
+    return chunk;
+  });
+  return chunks.join('');
 }
 
 function isThinkingPart(value: unknown): value is object {
@@ -520,7 +600,7 @@ function jsonStringBytes(value: string): number {
 
 function snapshotSelectedModelOption(
   options: object,
-  key: 'reasoningEffort' | 'contextWindow',
+  key: 'reasoningEffort',
 ): unknown {
   for (const containerKey of ['modelOptions', 'modelConfiguration', 'configuration'] as const) {
     const container = readHostProperty(options, containerKey, 'The response options');
@@ -723,4 +803,3 @@ function snapshotLimitError(): vscode.LanguageModelError {
     'The message is too large or complex to snapshot safely. Reduce its size and try again.',
   );
 }
-

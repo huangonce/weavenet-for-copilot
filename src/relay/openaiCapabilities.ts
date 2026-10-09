@@ -21,7 +21,6 @@ export function normalizeOpenAIRequestCapabilities(value: unknown): OpenAIReques
     : undefined;
   const result: OpenAIRequestCapabilities = {
     tokenLimitField,
-    contextWindow: optionalBoolean(record.contextWindow),
     promptCacheKey: optionalBoolean(record.promptCacheKey),
     store: optionalBoolean(record.store),
     strictTools: optionalBoolean(record.strictTools),
@@ -30,6 +29,9 @@ export function normalizeOpenAIRequestCapabilities(value: unknown): OpenAIReques
     assistantPhase: optionalBoolean(record.assistantPhase),
     encryptedReasoning: optionalBoolean(record.encryptedReasoning),
     reasoningSummary: optionalBoolean(record.reasoningSummary),
+    sampling: optionalBoolean(record.sampling),
+    samplingEfforts: Array.isArray(record.samplingEfforts) ? record.samplingEfforts.filter(isReasoningEffort) : undefined,
+    imageCompatibility: record.imageCompatibility === 'legacy-relay' || record.imageCompatibility === 'standard' ? record.imageCompatibility : undefined,
     developerRole: optionalBoolean(record.developerRole),
     clientRequestId: optionalBoolean(record.clientRequestId),
     reasoningEfforts: reasoningEfforts?.length ? reasoningEfforts : undefined,

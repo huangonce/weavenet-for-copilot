@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { t } from '../l10n';
 import {
   createCanonicalSnapshot,
   isCanonicalImagePart,
@@ -11,7 +12,7 @@ import type {
   CanonicalToolResultContentPart,
 } from './canonicalRequest';
 
-const IMAGE_ONLY_TOOL_RESULT_TEXT = '[Image output attached in the following user message.]';
+export const IMAGE_ONLY_TOOL_RESULT_TEXT = '[Image output attached in the following user message.]';
 
 interface DeferredUserMessage {
   readonly content: CanonicalInputPart[];
@@ -99,7 +100,7 @@ export function normalizeToolResultBatches(
 
       if (message.role !== 'user' || !pendingToolCalls.has(part.callId)) {
         throw new vscode.LanguageModelError(
-          'A tool result must match one earlier, unique, unconsumed assistant tool call.',
+          t('A tool result must match one earlier, unique, unconsumed assistant tool call.'),
         );
       }
 
@@ -166,7 +167,7 @@ function stripToolResultImages(
 function assertUniquePendingToolCall(callId: string, pendingToolCalls: ReadonlySet<string>): void {
   if (pendingToolCalls.has(callId)) {
     throw new vscode.LanguageModelError(
-      'Tool call IDs in one pending batch must be unique to promote image tool results safely.',
+      t('Tool call IDs in one pending batch must be unique to promote image tool results safely.'),
     );
   }
 }

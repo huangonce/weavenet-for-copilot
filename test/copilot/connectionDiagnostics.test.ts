@@ -22,7 +22,8 @@ const profile: ConnectionProfile = {
   baseUrl: 'https://relay.example.test/v1/',
   requestHeaders: { 'X-Tenant': 'team-a', 'X-Region': 'west' },
   includeModels: ['gpt', 'claude'],
-  models: [{ id: 'gpt-test', route: 'openai' }],
+  models: [{ id: 'gpt-test',
+apiType: 'chat-completions' as const }],
 };
 
 function probe(overrides: Partial<ConnectionProbeResult>): ConnectionProbeResult {

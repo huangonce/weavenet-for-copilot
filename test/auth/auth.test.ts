@@ -74,11 +74,15 @@ describe('Relay API key storage', () => {
     await expect(auth.getApiKey(personal)).resolves.toBeUndefined();
   });
 
-  it('temporarily falls back to the legacy name-addressed key', async () => {
+  it('ignores a leftover legacy name-addressed key', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
     await secrets.store(legacyProfileKey(work.name), '  legacy-key  ');
-    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
+
+    // A stale entry must never authenticate a connection that merely reuses the
+    // name; only migration (or an explicit key entry) can supply a key.
+    await expect(auth.getApiKey(work)).resolves.toBeUndefined();
+    expect(secrets.values.get(legacyProfileKey(work.name))).toBe('  legacy-key  ');
   });
 
   it('migrates a legacy key by copying, verifying, and deleting the source', async () => {
@@ -92,7 +96,7 @@ describe('Relay API key storage', () => {
     expect(secrets.values.has(legacyProfileKey(work.name))).toBe(false);
   });
 
-  it('does not overwrite an existing UUID key during migration', async () => {
+  it('does not overwrite an existing UUID key during migration and drops the legacy copy', async () => {
     const secrets = new InMemorySecrets();
     const auth = new AuthManager(secrets as never);
     await secrets.store(profileSecretKey(work.id), 'existing-key');
@@ -101,10 +105,10 @@ describe('Relay API key storage', () => {
     await auth.migrateProfileApiKeys([work]);
 
     await expect(auth.getApiKey(work)).resolves.toBe('existing-key');
-    expect(secrets.values.get(legacyProfileKey(work.name))).toBe('legacy-key');
+    expect(secrets.values.has(legacyProfileKey(work.name))).toBe(false);
   });
 
-  it('keeps the legacy key usable when migration storage fails', async () => {
+  it('leaves the legacy key in place but unusable when migration storage fails', async () => {
     const secrets = new FailingSecrets();
     const auth = new AuthManager(secrets as never);
     await secrets.store(legacyProfileKey(work.name), 'legacy-key');
@@ -112,11 +116,14 @@ describe('Relay API key storage', () => {
 
     await auth.migrateProfileApiKeys([work]);
 
-    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
+    // The source is kept so a later activation can retry the migration, but the
+    // runtime never falls back to it.
+    await expect(auth.getApiKey(work)).resolves.toBeUndefined();
+    expect(secrets.values.get(legacyProfileKey(work.name))).toBe('legacy-key');
     expect(secrets.values.has(profileSecretKey(work.id))).toBe(false);
   });
 
-  it('keeps both copies usable when migration cannot delete the source', async () => {
+  it('rolls the migration back when the copied key cannot be verified', async () => {
     const secrets = new FailingSecrets();
     const auth = new AuthManager(secrets as never);
     await secrets.store(legacyProfileKey(work.name), 'legacy-key');
@@ -124,8 +131,9 @@ describe('Relay API key storage', () => {
 
     await auth.migrateProfileApiKeys([work]);
 
-    await expect(auth.getApiKey(work)).resolves.toBe('legacy-key');
+    await expect(auth.getApiKey(work)).resolves.toBeUndefined();
     expect(secrets.values.get(legacyProfileKey(work.name))).toBe('legacy-key');
+    expect(secrets.values.has(profileSecretKey(work.id))).toBe(false);
   });
 
   it('deletes both UUID and legacy keys for one profile without touching others', async () => {

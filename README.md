@@ -1,183 +1,227 @@
 # WeaveNet for Copilot
 
-把你的 OpenAI 兼容 AI Relay 模型接入 GitHub Copilot Chat 的模型选择器，同时保持 Claude 走 Claude 原生协议、其他模型走 OpenAI 协议。
+为 GitHub Copilot Chat 管理具名 Relay 连接，明确选择 Chat Completions、Responses 或 Anthropic Messages API，并提供连接隔离、目录恢复与脱敏诊断。
 
-## 项目结构
+标准网关也可直接使用 VS Code 内置的 [Custom Endpoint](https://code.visualstudio.com/docs/agent-customization/language-models#_add-a-custom-endpoint-model)。WeaveNet 适合需要集中管理多条 Relay、明确模型协议覆盖、检查连接或使用可选视觉代理的场景。
 
-```text
-src/
-  extension.ts       VS Code 激活与命令注册
-  constants.ts       扩展常量与 SecretStorage key
-  auth/              Relay API Key 管理
-  config/            VS Code 配置读取与校验
-  copilot/           Copilot provider 与请求转换
-  relay/             中转站 HTTP/SSE 客户端、模型与协议类型
-  metadata/          OpenRouter 在线模型能力与参考价格
-```
+## 快速开始
 
-## 使用方式
+1. 安装扩展，运行 `WeaveNet: Add Relay Connection`。
+2. 输入连接名称、Relay Base URL，选择 Relay 实际提供的 API，再输入 API Key。
+3. 运行 `WeaveNet: Refresh Models`，然后在 Copilot 模型选择器中选择模型。
+4. 使用 `WeaveNet: Manage Relay Connections` 编辑、复制、测试、删除连接或管理密钥。
 
-1. 安装本地 VSIX 扩展。
-2. 在你的 Relay 中创建一把可访问所需模型的 API Key。
-3. 首次启动时，扩展会显示一次非阻塞提示；点击 **Add Relay Connection**，输入连接名称、Relay Base URL 和 API Key。也可继续添加更多连接，所有连接会同时启用。
-4. 运行 `WeaveNet: Refresh Models` 聚合刷新所有连接，然后在 Copilot Chat 模型选择器里选择 `WeaveNet ...` 模型。模型详情会显示其来源连接和脱敏 Host。
-5. 需要立即更新 OpenRouter 能力目录时，运行 `WeaveNet: Refresh Model Metadata`。
+连接的 API 类型有三种：
 
-### Relay 连接管理
+| `apiType` | 请求端点 | 认证 |
+| --- | --- | --- |
+| `chat-completions` | `POST /chat/completions` | `Authorization: Bearer` |
+| `responses` | `POST /responses` | `Authorization: Bearer` |
+| `messages` | `POST /messages` | `x-api-key` |
 
-可用配置档同时连接工作、中转站或不同模型集，而不必反复改写设置：
+Base URL 是 API 根路径，例如 `https://relay.example.com/v1`。远程 Relay 必须使用 HTTPS；只有 localhost 与 IP 回环地址允许 HTTP。地址不能包含用户名、密码、query 或 fragment。
 
-1. 在命令面板运行 `WeaveNet: Add Relay Connection`，依次填写名称、Relay API 地址和 API Key。
-2. 使用 `WeaveNet: Manage Relay Connections` 新增、编辑、复制、测试、删除连接，或刷新全部/指定连接。状态栏会汇总所有连接及模型刷新状态。
+**刷新模型只读取 `/models`，不发起付费推理或协议探测。**带 has_more/last_id 的目录会通过同端点 after_id 继续读取；拒绝重复游标，最多 100 页、10000 模型和累计 10 MiB，不跟随第三方 next_url。新发现的模型继承连接 API；插件不会按模型名字猜测协议。混合协议 Relay 必须给对应模型配置 `apiType` 覆盖。
 
-每个连接可选地设置 `requestHeaders`、`includeModels`、`excludeModels` 和固定 `models`。每个连接有扩展管理的稳定 UUID 和一把 Relay API Key；UUID 不属于秘密，密钥不会写入 `settings.json`，而是按 UUID 隔离存储在 VS Code SecretStorage。复制连接会生成新 UUID，且不会复制 API Key。`requestHeaders` 的值仍属于普通 VS Code 设置，不受 SecretStorage 保护，不得用于保存 API Key、令牌或其他敏感信息。
+## 连接与模型配置
 
-## 命令
+连接保存在用户级 `weavenet-copilot.profiles` 中。UUID 由扩展创建；编辑连接保留 UUID，复制连接生成新 UUID且不复制密钥。所有连接同时启用，每个模型只向其来源连接发送请求。
 
-- `WeaveNet: Add Relay Connection`：新建并启用 Relay 连接，收集地址和 API Key。
-- `WeaveNet: Manage Relay Connections`：打开连接管理菜单。
-- `WeaveNet: Edit Relay Connection`：编辑连接名称、地址、模型过滤规则和固定模型；现有额外请求头保持不变（需要修改时可直接编辑 settings.json）。改名不影响基于 UUID 存储的 API Key。
-- `WeaveNet: Copy Relay Connection`：复制不含 API Key 的连接配置。
-- `WeaveNet: Test Relay Connection`：由用户显式触发 `/models` 与最小 OpenAI/Claude 流式及非流式请求；结果安全展示脱敏端点、HTTP 状态、响应类型与请求 ID，并解释鉴权、端点、限流、上游和网络错误。最小模型请求可能产生极少量服务费用；扩展不会在后台自动执行这些付费探测。
-- `WeaveNet: Delete Relay Connection`：删除连接及对应 API Key。
-- `WeaveNet: Clear All Relay Connections`：永久删除全部连接配置、其 API Key，以及旧版本遗留的 Relay 密钥。
-- `WeaveNet: Set Relay API Key`：单连接时直接设置；多连接时先选择连接。
-- `WeaveNet: Clear Relay API Key`：单连接时直接删除；多连接时先选择连接。
-- `WeaveNet: Refresh Models`：并发刷新所有连接的 `/models` 目录并聚合模型。`openaiApiStrategy` 为 `auto` 时，新发现且未显式指定协议的 OpenAI 兼容模型会各执行一次极小的 Responses API 能力探测（`max_output_tokens: 1`，无存储），每次刷新每个模型最多一次，结果按连接缓存 `metadataRefreshHours` 并持久化到 VS Code `globalState`（重启后无需重新探测）；明确被拒绝（HTTP 400/404/426）或探测成功的模型会被缓存，临时失败（超时、限流、5xx、网络）不缓存，下次刷新自动重试。手动执行此命令会先清除对应连接的能力缓存再重新探测；强制 `chat` 或 `responses` 时不执行 Responses 探测。
-- `WeaveNet: Refresh Model Metadata`：立即刷新 OpenRouter 的公开模型能力和参考价格目录。
-- `WeaveNet: Open Settings`：打开 WeaveNet 设置页。
-- `WeaveNet: Show Debug Log`：打开 `WeaveNet` 输出通道，用于查看脱敏请求摘要和缓存用量字段。
-
-## 协议路由
-
-插件使用每个 Relay 各自的 API Key 获取模型。每个模型都绑定发现它的连接、配置修订和请求协议，聊天请求始终发送到该来源 Relay：
-
-- OpenAI 兼容模型：按 `openaiApiStrategy`、固定模型声明和自动探测结果选择 `POST /chat/completions` 或 `POST /responses`，使用 `Authorization: Bearer` 认证。
-- Claude 模型：走 Anthropic-compatible `POST /messages`，使用 `x-api-key` 认证。
-
-同一把密钥只因目标协议不同而采用对应的请求头；这样可避免 Claude 模型被错误地转成 OpenAI 协议，减少缓存或原生能力失效的问题。
-
-## 模型能力与参考价格
-
-模型的图片输入、工具调用、推理和上下文窗口优先读取 sub2api 返回的能力字段，缺失字段由 OpenRouter 补充；公开参考价格来自 OpenRouter。插件不再使用 LiteLLM、内置模型快照或名称猜测。无法确认的图片、工具与推理能力保持关闭，缺失的 token 上限使用插件配置默认值。模型选择器会显示输入、输出和缓存读取的每百万 token 参考价，以及对应的成本档位。
-
-参考价格不是 sub2api 实际扣费价格。实际扣费受你的分组、账号倍率和上游渠道影响，应以 sub2api 的用量日志为准。
-
-支持推理的模型会在聊天输入框旁显示“思考工作量”，可选择 Low、Medium、High、Extra High 或 Max。OpenAI 协议会发送 `reasoning_effort`；Claude 协议会换算为原生 `thinking.budget_tokens`。有上下文窗口元数据的模型也会显示“上下文大小”。
-
-## 常用设置
-
-- `weavenet-copilot.activeProfile`：仅为从 `0.3.x` 升级保留的废弃字段；首次迁移排序后自动清空，不再控制路由。
-- `weavenet-copilot.profiles`：全局保存且同时启用的 Relay 连接池。每项包含扩展管理的 `id`、`name`、`baseUrl`，还可单独设置 `requestHeaders`、模型白名单/黑名单与固定模型；远程 Relay 必须使用 HTTPS，只有 `localhost`、`127.0.0.0/8` 与 `::1` 允许 HTTP；schema 不允许在此写入 API Key 或其他未声明字段。`requestHeaders` 是普通配置，不应包含任何秘密。
-- `weavenet-copilot.openaiApiStrategy`：应用级 OpenAI 请求协议策略，默认 `chat`。`chat` 强制全部 OpenAI 兼容模型使用 Chat Completions，兼容性最好，也避免切换协议带来的 Prompt 缓存冷启动；`responses` 强制未被固定模型显式 `chat` 否决的模型使用 Responses；`auto` 遵循固定模型声明，并只对未声明模型执行能力探测。优先级为：任一处显式 `chat` > 任一处显式 `responses` > 自动探测。修改设置会自动清除旧目录快照并刷新模型；协议切换后建议新开对话，避免不同协议的工具调用或 reasoning 历史不兼容。
-- `weavenet-copilot.anthropicVersion`：Claude `/messages` 请求使用的 `anthropic-version`。
-- `weavenet-copilot.openaiPromptCaching`：是否为 `gpt-*` 模型发送稳定的 `prompt_cache_key`，默认开启。
-- `weavenet-copilot.openaiPromptCacheKey`：可选的 OpenAI 缓存 key。留空时按当前工作区生成稳定值；同一工作区内应保持不变。
-- `weavenet-copilot.claudePromptCaching`：Claude 缓存模式，默认 `automatic`。插件会为 system、最后一个工具定义和最近两条用户消息设置显式缓存断点，适合持续增长的多轮 Copilot 对话。设为 `disabled` 可关闭缓存。
-- `weavenet-copilot.debug`：开启后将请求摘要和 Claude 缓存用量写入 VS Code 的 `WeaveNet` 输出通道，不记录 API Key 或 prompt 正文。通过 `WeaveNet: Show Debug Log` 打开。
-  - `cacheRead` / `cacheWrite` 为数字时是上游实际返回的 token 用量；显示 `n/a` 表示上游的流式响应未返回该字段，不能据此判断是否命中。
-- `weavenet-copilot.includeModels` / `excludeModels`：仅供从 `0.3.x` 升级迁移使用的废弃顶层模型过滤设置；新配置应写入 `profiles` 中。
-- `weavenet-copilot.maxInputTokens`：向 Copilot 声明的输入 token 硬上限，默认 `128000`。即使模型元数据声明了更大的上下文，也不会超过这个值；OAuth 上游的实际窗口较小时应相应调低。
-- `weavenet-copilot.supportsToolCalling`：是否向 Copilot 声明工具调用能力。
-- `weavenet-copilot.supportsImageInput`：是否为所有模型向 Copilot 声明图片输入能力，默认关闭。
-- `weavenet-copilot.imageInputModels`：可选的模型 ID 正则表达式；命中后强制向 Copilot 声明图片输入能力。正常情况下无需配置，插件会优先根据 sub2api 和 OpenRouter 的模型元数据自动识别。
-- `weavenet-copilot.disabledImageInputModels`：即使公开元数据声称支持图片，也强制关闭对应模型的图片输入能力。默认为空；只有确认某个具体路由不支持图片时，才建议在这里添加模型 ID 正则表达式。
-- `weavenet-copilot.visionProxyEnabled`：为不支持图片输入的 WeaveNet 模型启用视觉代理，默认关闭。开启前需确认将图片交给另一模型处理符合你的隐私、安全和费用要求；原生视觉模型仍直接接收图片，不经过代理。
-- `weavenet-copilot.visionProxyModel`：视觉代理使用的已安装 VS Code 语言模型，必须精确填写 `vendor/id`，例如 `copilot/gpt-4o`。可以是任何扩展注册的原生视觉模型，也可以是自己通过 WeaveNet 加载的具备原生图片输入的模型（例如 `weavenet/gpt-4o`），但只靠视觉代理声明图片能力的模型不能作为代理，以避免递归。扩展不自动挑选其他模型，也不在失败时 fallback。不知道要填什么 ID 时，运行命令 `WeaveNet: Pick Vision Proxy Model`（或点击设置项说明中的链接）从已安装且具备视觉能力的模型列表中选择，会自动写入正确的 `vendor/id`。
-- `weavenet-copilot.visionProxyPrompt`：发送给视觉模型的指令；留空使用内置的忠实描述指令。每条当前含图用户消息中的图片会带编号统一识别，并同时发送该消息的有界布局；布局可能包含图片周边用户文本和工具结果文本，以保留必要语境。
-- OpenAI 图片请求会自动采用与 VS Code 内置 Custom Endpoint 相同的兼容形态，不发送 `prompt_cache_key`、`context_window`、`reasoning_effort` 或 `max_tokens` 等可选扩展字段；纯文本请求仍保留对应设置。
-- `weavenet-copilot.metadataRefreshHours`：OpenRouter 模型能力目录的后台刷新间隔，默认 6 小时。
-- `weavenet-copilot.models`：仅供从 `0.3.x` 升级迁移使用的废弃顶层固定模型列表；新配置应写入 `profiles` 中。
-- 自动发现会并发刷新每个连接的 `/models` 目录；返回的 `claude-*` 模型使用 Claude 原生路由，其余模型使用 OpenAI 路由。各连接的固定模型会与其发现结果合并。某个连接发现失败时只保留该连接上一次成功的发现快照；如果没有快照但配置了固定模型，则以降级状态仅展示其固定模型。
-- `weavenet-copilot.requestTimeoutSeconds`：等待响应头的秒数。模型发现 GET 最多安全重试一次，聊天 POST 不做网络盲重试。
-- `weavenet-copilot.streamIdleTimeoutSeconds`：流式响应数据块之间允许的空闲秒数。
-- `weavenet-copilot.temperature` / `weavenet-copilot.topP`：可选采样参数。OpenAI 同时配置两者时只发送 `temperature`；Claude 保持已有转发行为。
-- `weavenet-copilot.claudePromptCachingTTL`：Claude 缓存断点 TTL，支持 `5m` 和 `1h`。自动模式会覆盖 system、tools 和最近两条用户消息。
-
-协议兼容层同时支持标准 SSE、无空格 `data:`、CRLF、完整 JSON 响应、reasoning、usage 和增量工具调用。只有在没有任何上游处理证据时，流式请求才允许安全降级为非流式请求。
-
-OpenAI-compatible Relay 可在固定模型中通过 `openai` 对象显式声明实际支持的请求能力。未声明时维持旧版请求负载，不假定第三方 Relay 支持 OpenAI 的全部新字段。例如：
+下面展示一个 Chat 默认连接以及两个模型覆盖。请使用“添加连接”生成自己的 UUID：
 
 ```json
 {
-  "id": "gpt-modern",
-  "route": "openai",
-  "openaiApi": "responses",
-  "toolCalling": true,
+  "weavenet-copilot.profiles": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Work Relay",
+      "baseUrl": "https://relay.example.com/v1",
+      "apiType": "chat-completions",
+      "models": [
+        {
+          "id": "company-claude",
+          "apiType": "messages",
+          "toolCalling": true,
+          "imageInput": true,
+          "thinking": true
+        },
+        {
+          "id": "company-gpt",
+          "apiType": "responses",
+          "toolCalling": true,
+          "maxInputTokens": 100000,
+          "maxOutputTokens": 16000,
+          "openai": { "reasoningSummary": false }
+        }
+      ]
+    }
+  ]
+}
+```
+
+`models` 只要求模型 `id`；`apiType` 留空时继承连接。既能定义目录中不存在的固定模型，也能覆盖发现模型的名称、API 或能力。覆盖只修改明确填写的字段，因此不必重复整个能力对象。同一 ID 的不同 API 声明保留为独立模型；相同 ID 与 API 的重复声明合并，后写的明确字段优先。收窄 `reasoningEfforts` 时会重新校验继承的默认 effort，避免发送新列表不允许的值。
+
+- `toolCalling`：工具调用支持。
+- `imageInput`：原生图片输入支持。明确的 `false` 可关闭来自公开目录的视觉声明。
+- `thinking`：推理支持；模型选择器可以显示思考工作量。
+- `contextWindow`：已知的输入加输出总窗口；插件会从中预留输出空间。它是静态预算元数据，不创建上下文档位控件。
+- `maxInputTokens` / `maxOutputTokens`：向宿主声明的输入、输出上限；请按上游实际限制填写并预留输出空间。
+- `openai`：已验证的 OpenAI 请求能力，例如 `tokenLimitField`、`strictTools`、`parallelToolCalls`、`developerRole`、`clientRequestId`、`reasoningEfforts`、`defaultReasoningEffort`。
+
+`openai.encryptedReasoning` 可在 Responses 请求中启用加密推理状态回放；`replayReasoningContent` 在 Chat 中回传每轮 `reasoning_content`，在 Responses 中回放上游原始 reasoning 内容。仅在对应 Relay 要求时启用。Responses 会保留上游返回的原始 `phase`，不会根据工具位置猜测；`assistantPhase: false` 可显式关闭发送阶段字段。Claude 的 Required 工具模式需有明确强制工具能力；manual 强制轮次关闭冲突的思考，adaptive 允许时保留思考。已有 manual 签名思考链中关闭思考会明确报错，避免发送不一致的续接。没有可用工具时也会明确报错。Responses 始终使用无状态 `store: false`，不发送 `previous_response_id`。`reasoningSummary` 默认省略，只有模型声明 thinking 且明确 reasoningSummary: true 才发送。
+
+连接也支持 `includeModels`、`excludeModels` 正则过滤与非敏感的 `requestHeaders`。认证和协议保留头由扩展管理；额外请求头不能用于保存密钥。
+
+输入 token 全局硬上限为 `maxInputTokens`，默认 128000；输出默认值为 `maxOutputTokens`，默认 16384。之前的“上下文大小”档位已移除：它在不同 API 上不能一致生效。需要限制上下文时使用明确的输入、输出上限。若 Relay 或 OpenRouter 提供总窗口，向宿主声明的输入加输出不会超过该窗口。
+
+## 模型参数能力与安全默认
+
+模型的工具能力不等于允许强制工具选择。Claude 的 `claude.forcedToolChoice` 控制 Required/any：明确不支持或未知时，在请求前报错；不要把不支持的 Required 悄悄改成 Auto。声明允许强制工具选择的 adaptive 模型可同时发送 adaptive 和 any；manual 强制轮次关闭与其冲突的手动思考。
+
+Claude 的 `claude.sampling` 控制非思考请求是否继承全局采样。未确认支持时省略；原生目录明确支持 manual 的旧模型可采用旧模式能力。即使允许采样，也只发送 temperature 或 top_p 中的一种。新 Claude 模型不支持采样或强制工具时，应明确设 false。
+
+```json
+{
+  "id": "company-claude",
+  "apiType": "messages",
   "thinking": true,
-  "contextWindows": [32768, 128000],
-  "openai": {
-    "tokenLimitField": "max_completion_tokens",
-    "contextWindow": true,
-    "promptCacheKey": true,
-    "store": true,
-    "strictTools": true,
-    "parallelToolCalls": true,
-    "developerRole": true,
-    "clientRequestId": true,
-    "replayReasoningContent": false,
-    "assistantPhase": false,
-    "encryptedReasoning": false,
-    "reasoningSummary": false,
-    "reasoningEfforts": ["minimal", "low", "medium", "high"],
-    "defaultReasoningEffort": "medium"
+  "toolCalling": true,
+  "claude": {
+    "thinkingMode": "adaptive",
+    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"],
+    "sampling": false,
+    "forcedToolChoice": false
   }
 }
 ```
 
-`openaiApi` 可显式声明固定模型使用 `responses`（Responses API）或 `chat`（Chat Completions）。模型级和全局策略采用安全否决优先级：任一处显式 `chat` 都强制 Chat；没有 `chat` 时，任一处显式 `responses` 都强制 Responses；两处均未指定时才自动探测。`openaiApi` 为 `responses` 时，请确认 Relay 上游确实实现了 `/responses`。
+Claude 的 effort 仅允许 low、medium、high、xhigh、max；none/minimal 不会作为 Claude output_config.effort 发送。模型还可进一步缩小允许列表。
 
-固定模型与自动发现的同名模型（同一 `route` + 模型 id）会合并，固定模型只覆盖它真正写出来的字段：省略 `toolCalling`、`maxInputTokens` 等字段时，发现阶段拿到的值会保留，不会被清空。`openai` 能力对象同样按字段合并，因此只想补一条 `encryptedReasoning` 时无需重复声明其余能力。
+OpenAI 的 `openai.sampling: true` 明确允许采样，false 明确关闭；`samplingEfforts` 可限制只有指定思考档位才允许发送。未声明支持且思考能力未知或为 true 的模型默认不发送采样；明确非推理模型可按标准字段继承全局设置。Chat 与 Responses 共用该规则。
 
-`context_window` 是 Relay 私有扩展，只在显式启用并提供 `contextWindows` 时发送。`store: false`、并行工具、developer role、`X-Client-Request-Id`、严格工具 schema 和现代令牌字段也都需要显式能力。严格 schema 无法无损转换时会自动回退到普通工具定义。GPT 模型保留原有 Prompt Cache Key 行为，能力值 `false` 可覆盖该回退；Prompt Cache Key 在 Chat Completions 与 Responses 两条路径上以相同规则发送。诊断可记录 finish reason、拒绝事件、usage、请求 ID、限流余量和时延，但不记录 Prompt 或工具参数正文。`auto` 策略下，Responses API 采用自动能力探测：免费 `GET /responses` 可用性检查后，新发现且未显式指定协议的 OpenAI 兼容模型各执行一次最小探测 POST，探测结果按连接缓存；手动刷新可重新探测。强制策略和模型级显式声明会跳过对应探测，演进约束见 [OPENAI_RESPONSES_PLAN.md](OPENAI_RESPONSES_PLAN.md)。
+标准图片默认遵循 OpenAI schema，仅有 url/detail，不附加私有 media_type；图片不会自动删除已支持的输出上限、思考工作量和缓存键。确有此需求的旧 Relay 可显式选择 `openai.imageCompatibility: "legacy-relay"`，恢复旧的字段与提示省略策略；此模式会省略部分限制和参数，应按该网关文档使用。
 
-`replayReasoningContent` 与 `assistantPhase` 只作用于 Responses 协议，且默认关闭。前者在每组连续 `function_call` 前回传一个合成的 `reasoning` item，仅供 DeepSeek 等要求回传思考内容的 Relay 使用——规范中的 `reasoning` item 需携带上游返回的 `id`，合成项无法提供，因此默认不发送。后者为 assistant 历史消息标注 `phase`（最后一次工具调用之前的文本记为 `commentary`，其后记为 `final_answer`），可改善 Codex 系模型的表现，但旧网关可能拒绝该字段。重放历史始终按原始交错顺序产出 item（思考、文本、工具调用各就各位），不再按类型分组。
+```json
+{
+  "id": "gateway-model",
+  "apiType": "responses",
+  "thinking": true,
+  "openai": {
+    "samplingEfforts": ["none"],
+    "reasoningSummary": true,
+    "imageCompatibility": "standard"
+  }
+}
+```
 
-`encryptedReasoning`（仅 Responses 协议，默认关闭）是 `replayReasoningContent` 的规范替代方案：启用后请求带 `include: ["reasoning.encrypted_content"]`，扩展把服务端返回的 reasoning item（真实 `id` + 加密载荷）原样寄存在会话历史的思考块上，下一轮按原位逐字回传，从而在不依赖服务端存储的前提下还原真实推理——请求仍为 `store: false`，也从不发送 `previous_response_id`。加密载荷对扩展完全不透明，只做透传。官方 Responses API 在 `store: false` 的无状态模式下支持返回该载荷，但兼容网关的实现可能不同：有些网关只在 `store: true` 或服务端持久化路径下返回 `encrypted_content`，即使请求包含 `include` 也可能省略它。要求 Relay 上游接受 `include` 字段；不认识该字段的网关可能返回 400，关闭该能力即可。若宿主未把加密载荷带回下一轮，则退化为不发送任何 reasoning item——绝不会发送缺少加密载荷的 reasoning item。验证时，首个请求的 `replayedReasoningItems=0` 是预期的；如果连续多轮仍为 0，应优先检查 Relay 是否在 `store: false` 下返回了 `encrypted_content`，而不是假设扩展能够自行生成或解密该载荷。
+采样、强制工具与摘要是独立能力，不会通过模型 ID 名字猜测；模型 `claude`/`openai` 字段是已验证能力声明。既有 UUID、密钥与协议保持不变。新增安全默认可能省略旧版发送的可选字段：需要这些字段时，请明确配置对应能力，而非回到全局盲目发送。
 
-`reasoningSummary`（仅 Responses 协议）默认开启：Responses 请求自动带 `reasoning.summary: "auto"`，模型在最终答案之前流式输出一段可读的思考摘要，显著缩短"看起来在等"的空窗期。它不改变实际推理量，也不影响首字节时延，只让思考过程可见。不支持该字段的网关可能返回 400，部分官方账号还需完成组织验证才会返回摘要，遇到问题可在固定模型上显式声明 `openai.reasoningSummary: false` 关闭。调试日志的 `reasoningSummary=` 字段可确认请求是否携带该参数。
+## 命令与诊断
 
-当上游明确返回上下文窗口超限时，插件会提示新开会话或减少附件。Cloudflare、Nginx 等网关返回 HTML 错误页时，插件只显示简短的 HTTP 错误和排查提示，不会把整页 HTML 注入聊天窗口。调试模式会额外记录请求体字节数，但不会记录请求正文。
+命令面板保留六个主要入口：
+
+- `WeaveNet: Add Relay Connection`
+- `WeaveNet: Manage Relay Connections`
+- `WeaveNet: Refresh Models`
+- `WeaveNet: Test Relay Connection`
+- `WeaveNet: Open Settings`
+- `WeaveNet: Show Debug Log`
+
+编辑、复制、删除、密钥管理、元数据刷新和视觉模型选择集中在管理菜单；旧命令 ID 暂时保留兼容，常用命令面板不再逐一展示。
+
+连接测试只由用户主动触发。测试读取 `/models`，并为实际配置的每种 API 选择一个模型，执行最小流式与非流式请求；不测试未配置的 API。最小请求可能产生少量费用。测试会展示脱敏 Host、端点、HTTP 状态、响应类型和请求 ID；结果是该代表模型的证据，不保证连接中的所有模型和能力都已验证。声明 max_completion_tokens 的 Chat 模型会用对应字段测试；声明不允许输出上限的模型不会执行无界生成测试。
+
+某条连接刷新失败时，仅恢复该连接最后一次成功目录并显示降级状态；其他连接继续可用。每条连接保存一份 `directory`，v3 快照最多保留 2000 个 API 模型条目；固定模型、能力覆盖、过滤和可选公开元数据在在线刷新与离线恢复时按同一规则组装，不再额外持久化最终模型列表。目录快照绑定连接配置与凭据，修改 API、模型规则、地址或密钥后不会复用旧身份的快照。取消、超时、截断流和无效工具参数会明确报告，聊天 POST 不会盲目重试。
+
+开启 `debug` 后记录脱敏请求摘要、usage、首输出时延、请求 ID 等。API Key、提示词正文与工具参数正文不写入日志。`cacheRead` 等字段缺失只表示上游没有返回用量，不代表未命中缓存。
+
+运行时界面文案跟随 VS Code 的显示语言：当前内置简体中文（`l10n/bundle.l10n.zh-cn.json`），未翻译的条目自动回退英文。新增语言只需在 `l10n/` 下添加 `bundle.l10n.<locale>.json`；`npm test` 会校验翻译键与代码中的引用一一对应、占位符一致，且没有空值或遗留条目。
+
+## 可选功能
+
+### 在线模型元数据
+
+`modelMetadataEnabled` 默认开启，使用 OpenRouter 公开目录补充 Relay 缺失的图片、工具、推理能力和参考价格。关闭后既不刷新公开目录，也不使用已缓存的公开元数据，只读取 Relay 和模型声明。`metadataRefreshHours` 控制缓存刷新间隔；管理菜单可手动刷新。
+
+用户配置与 Relay 元数据优先；无法确认的能力保持关闭。参考价格不是 Relay 实际扣费，应以 Relay 的用量日志为准。公开目录也不能证明某条具体 Relay 路由接受相同功能，必要时用模型覆盖关闭能力。
 
 ### 纯文本模型的视觉代理
 
-启用视觉代理后，扩展先把当前用户消息中的图片、配置的视觉指令以及该消息的有界布局发送给指定的已安装视觉模型。布局最多 16 KiB，可能递归包含图片周边用户文本和工具结果文本（例如文件内容或测试输出），因此这些数据也会交给视觉模型提供方。视觉模型返回的文字描述会作为长度前缀 JSON 不可信数据替换图片，再发送给目标 WeaveNet 纯文本模型；目标模型不会收到原始图片。每条当前、未命中缓存的含图用户消息会产生一次独立视觉调用，调用由所选模型的提供方处理，可能独立计费，并受该提供方自己的数据处理和保留政策约束。
+`visionProxyEnabled` 默认关闭。通过管理菜单选择已安装的原生视觉模型，或在设置说明中点击“选择视觉代理模型”，将 `visionProxyModel` 配置为精确 `vendor/id`。纯文本模型会先让该模型描述图片，再把描述交给目标 Relay；原生视觉模型直接接收图片。
 
-单个目标请求最多处理 8 张待代理图片；单张图片最多 10 MiB，待代理图片合计最多 20 MiB，视觉指令最多 32 KiB，插入目标请求的单条描述（含安全 framing）最多 48 KiB。视觉模型返回流最多接受 4,096 个 chunk；连续 90 秒没有新 chunk 或整次视觉调用超过 120 秒时，扩展会取消本地模型请求并失败，不会把部分描述发送给目标 Relay。超过可预检限制时请求会在选择或调用视觉模型前失败。限制只统计当前轮次可能外发的图片；历史图片不会自动重新外发。
+图片、视觉指令和当前消息的有界布局（可能包含用户文本、工具结果）会交给视觉模型提供者，可能独立计费。代理不自动选模、不回退、不允许递归使用仅靠代理获得视觉能力的模型。
 
-为了避免 Agent 工具轮次重复识别同一批图片，描述只保存在扩展进程内的有界短期缓存中：最多 64 条、描述正文合计最多 512 KiB、30 分钟过期，并按最近最少使用规则淘汰。缓存不写入设置、文件、SecretStorage、`globalState` 或日志，扩展进程结束后即消失；只有目标请求成功后才写入缓存。缓存键由视觉模型、完整视觉指令和消息布局、图片 MIME 类型与字节摘要计算，日志不会记录该键、摘要、图片、指令或描述正文。若较早轮次的图片描述已不在缓存中，扩展不会在后续 Agent 轮次中自动再次外发图片，而会明确标记描述不可用。
+每个请求最多 8 张图片，单张 10 MiB、总计 20 MiB；描述只进入有界的短期进程内缓存，不持久化。目标请求成功后才提交缓存；历史描述过期后不会自动再次外发原图片。`visionProxyPrompt` 可以覆盖默认描述指令。
 
-API Key 会存储在 VS Code SecretStorage 中。
+现有图片请求的兼容规则与工具图片提升处理继续保留；它们不属于本次协议配置精简。详见隐私说明。
 
-请使用 `Delete Relay Connection` 或 `Clear All Relay Connections` 删除连接；命令会同时清除对应 API Key，避免产生无法归属的 Secret。直接手动编辑设置删除 Profile 不会回收 SecretStorage 中已有的 API Key。
+## 从旧版升级
 
-连接测试结果会按稳定连接 UUID 与配置 SHA-256 指纹保存在 VS Code `globalState` 中，用于重启后继续展示状态。指纹不包含 API Key，持久化结果不包含自定义 Header 原文、响应正文、Prompt 或工具参数；API Key 变化时只会使对应连接诊断失效。当前诊断仅用于记录和展示，不会自动改变聊天请求路由。每个连接最近一次成功的模型目录也会按连接 UUID 持久化到 `globalState`：扩展重启后若 Relay 暂时不可用，模型选择器仍会恢复上次成功加载的模型（状态显示为降级），配置修订或 API Key 移除时该快照会被清除。
+- 保留连接 UUID、名称、地址、密钥与模型能力覆盖。
+- 将旧 `route` / `openaiApi` 转为模型 `apiType`，并遵循旧全局 `chat` 否决规则。
+- 将全局 `responses` 转为连接默认 API；`auto` 不再继续探测。优先从当前凭据和旧配置对应的已验证目录快照提取协议覆盖，并保留完整离线目录。缺少快照但有密钥时，迁移会只读一次 /models，固化旧 Claude 路由；不会继续执行 Responses 付费探测。目录读取失败时不提交迁移。
+- 混合协议连接请检查迁移提示。无密钥而无法读取目录的旧连接，以及以后新增的 Claude 模型，需要自己填写 `apiType: "messages"`，以后新增模型也不再按名字自动路由。
+- 旧 `activeProfile` 和 `openaiApiStrategy` 成功迁移后清除；失败会回滚普通设置，密钥不会因本次迁移删除。
+- 旧 `route`、`protocol`、`openaiApi` 的解释只在迁移边界发生；运行时统一使用 `apiType`。凭据和配置匹配的 v2 快照转为单目录 v3，无法验证身份的 v1 不恢复。原 v2 记录在目录保留成功前不会删除；迁移保留的旧记录由之后的成功目录刷新清理。
+- `contextWindows` 和 `openai.contextWindow` 不再产生上下文控件或私有请求参数。
+- 旧全局工具开关和视觉正则暂时保留为废弃兼容项；新配置使用模型级能力。
 
-从 `0.3.x` 升级时，扩展会为连接自动生成稳定 UUID，将旧默认连接排到首位，并只把旧顶层模型规则、固定模型和请求头物化到该旧默认连接。名称型 Secret 会在验证新 UUID Secret 写入成功后再删除；迁移可重复运行且不会覆盖已有 UUID Secret。
+协议改变后建议新开会话，避免旧协议的工具或推理历史被带到另一种 API。使用管理菜单删除连接会同时删除其 API Key。手动从设置中删除连接不会回收 SecretStorage 中的密钥；激活时的迁移会清理遗留的按名称旧条目，运行时也只读取按连接 UUID 保存的密钥，因此残留的旧密钥不会被同名的其他连接沿用，需要重新填写密钥。
 
-从旧版单一 Relay 配置首次升级到连接配置档版本时，扩展会执行一次性清理：删除旧版顶层 Base URL 与旧版 API Key，并要求重新创建 Relay 连接。完成标记保存在 VS Code 全局状态中，后续升级不会重复执行，也不会删除新版连接配置或连接专属 API Key。
+## 推理与协议历史
 
-## 隐私与安全
+Claude 的完整签名思考块和 `redacted_thinking`、Chat 的推理正文、Responses 的原始消息边界与阶段会通过有界宿主 metadata 保存，在下一轮回传。状态绑定连接配置、凭据、模型和 API，不能拿到其他模型或密钥下继续使用；工具与可见正文修改或裁剪后会拒绝失配的旧状态。宿主若不提供承载状态所需的 thinking part，扩展会给出一次性提示并禁用原样回放，而不是让请求整体失败。
 
-- API Key 只保存在 VS Code SecretStorage 中，不会写入工作区文件或调试日志。
-- 自定义 `requestHeaders` 值由 VS Code 配置系统保存，不受 SecretStorage 保护；不得在其中放置 API Key、令牌或其他敏感信息。
-- 对话、代码和工具调用内容会发送到你配置的 sub2api 中转站及其上游模型服务；原生视觉请求也会发送图片。视觉代理启用时，原始图片、视觉指令和所在用户消息的有界布局（可能包含工具结果文本）会先发送给你明确选择的已安装视觉模型，目标纯文本 Relay 只接收生成的图片描述。
-- 视觉代理默认关闭，不自动选择模型或 fallback。视觉调用可能由不同提供商独立计费，并受其隐私与数据保留政策约束。
-- 插件不会收集遥测数据。开启调试日志时只记录脱敏请求摘要，不记录 API Key 或提示词正文。
-- 使用公开或第三方中转站前，请确认其隐私政策、日志保留和数据处理方式符合你的要求。
+DeepSeek thinking 的 Chat 请求携带工具时需要所有历史轮次的完整 `reasoning_content`，包括未实际调用工具的轮次。配置示例：
 
-完整说明见 [PRIVACY.md](PRIVACY.md)，问题反馈见 [SUPPORT.md](SUPPORT.md)。
-
-## 发布流程
-
-合并到 `main` 只运行持续集成，不会发布。发布前必须更新 `package.json` 和 `package-lock.json` 的版本号，并同步维护 `CHANGELOG.md`；Marketplace 不允许重复发布同一版本。先等待 `main` 的 CI 全部通过，再单独推送带说明的版本标签：
-
-```bash
-npm version patch --no-git-tag-version
-git commit -am "chore: release x.y.z"
-git push origin main
-git tag -a vx.y.z -m "Release x.y.z"
-git push origin vx.y.z
+```json
+{
+  "id": "deepseek-model",
+  "apiType": "chat-completions",
+  "thinking": true,
+  "toolCalling": true,
+  "openai": { "replayReasoningContent": true }
+}
 ```
 
-推送形如 `v0.3.3` 的语义化版本标签后，GitHub Actions 会校验标签与 `package.json` 版本一致，再执行 lint、源码与测试类型检查、编译、覆盖率门槛、真实 VS Code 扩展宿主冒烟测试、打包和 Marketplace 发布。流水线使用仓库的 `VSCE_PAT` Actions Secret；重复版本会安全跳过，不会覆盖已发布版本。
+新版 Claude 的 adaptive 示例：
+
+```json
+{
+  "id": "company-claude",
+  "apiType": "messages",
+  "thinking": true,
+  "toolCalling": true,
+  "claude": {
+    "thinkingMode": "adaptive",
+    "reasoningEfforts": ["low", "medium", "high", "max"],
+    "defaultReasoningEffort": "high"
+  }
+}
+```
+
+原生目录明确声明 adaptive 支持和 effort 等级时自动采用该信息；能力不完整的 Relay 需要显式配置。manual 继续使用旧式 budget_tokens；adaptive 发送 thinking.type 和 output_config.effort，不发送手动预算。仅填写模型实际允许的 effort，例如不支持 max 的型号应从列表删除。
+
+签名状态同时保存实际 system、工具定义和此前消息的前缀指纹（不计 API cache_control 断点）；前缀变化或旧状态缺指纹时，在 POST 前拒绝并提示新开会话。指纹不会把工具业务参数或 schema 中的同名 cache_control 删除。
+
+状态最多 4 MiB、512 个协议 item，继续受 canonical JSON 的节点、深度与累计大小限制。工具批次只在完整响应和状态校验成功后发布；取消、缺终止事件、无效签名、正文冲突或截断不会发布未完成的工具。Claude 的 model_context_window_exceeded 与 max_tokens 一样视为截断；不发布待执行工具或继续使用受截断的思考状态。Responses 的合法 incomplete 可保留已知消息阶段及部分文本，但不保存未完成的加密推理或工具调用。
+
+旧版本没有保存完整签名、推理或原始 phase 的历史无法补造；升级后建议新开需要原生推理工具链的会话。详细官方依据及已修复记录见 [文档对照审查](CODE_REVIEW_2026-10-06.md)。
+
+工具结果的图片与直接图片使用相同的图片计量；不会将 Base64 当工具文本。Claude manual 工具续接也保守计入已回放思考，避免漏算；仍是估算，并非模型精确 tokenizer，旧模型自动剥离的历史思考可能使估算偏高。
+
+## 隐私与开发
+
+密钥只保存在 VS Code SecretStorage。配置中的自定义请求头仍是普通设置，不受密钥存储保护；连接诊断的持久化标识只用经过规范化的请求头名称、不包含其取值，避免弱随机凭据被离线比对。对话、代码、工具调用及图片会发往所配置的 Relay 和其上游；扩展不收集遥测。完整说明见 [PRIVACY.md](PRIVACY.md)，问题反馈见 [SUPPORT.md](SUPPORT.md)。
+
+```bash
+npm ci
+npm run lint
+npm run typecheck
+npm run compile
+npm run test:coverage
+npm run test:integration
+npm run package:list
+```
+
+合并到 main 只运行 CI，CI 会在声明的最低宿主 VS Code 1.116.0 与最新稳定版上分别运行扩展宿主冒烟测试。发布前同步更新扩展与锁文件版本、CHANGELOG，等待检查通过后推送带说明的语义版本标签；Marketplace 发布流水线会校验标签、`package.json` 与 CHANGELOG 版本一致后运行检查并打包，重复版本会明确失败而不是静默跳过。0.8.0 已就绪但尚未发布。
