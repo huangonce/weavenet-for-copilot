@@ -312,7 +312,41 @@ apiType: 'chat-completions' as const }] });
     expect(information).toHaveLength(1);
     expect(information[0].id).toBe(`weavenet::${WORK_ID}::gpt-snapshot`);
     expect(information[0].capabilities).toMatchObject({ toolCalling: true });
+    // The cached catalog is served without waiting for the Relay; the refresh
+    // that runs behind the silent enumeration still settles the connection.
+    await provider.refreshModels();
     expect(provider.getConnectionStatus()).toMatchObject({ phase: 'degraded', modelCount: 1, warningCount: 1 });
+  });
+
+  it('answers a silent enumeration from the persisted catalog while the Relay is still pending', async () => {
+    const globalState = new InMemoryMemento();
+    const { provider } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState });
+    const revision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'work-key', TEST_ARTIFACT_PEPPER);
+    globalState.values.set(`${MODEL_SNAPSHOT_KEY_PREFIX}${WORK_ID}.${revision}`, { schemaVersion: MODEL_SNAPSHOT_SCHEMA_VERSION,
+profileId: WORK_ID,
+catalogRevision: revision,
+savedAt: Date.now(),
+directory: [{ id: 'gpt-snapshot',
+pickerId: 'gpt-snapshot',
+upstreamId: 'gpt-snapshot',
+toolCalling: true,
+apiType: 'chat-completions' as const }] });
+    let settleCatalog!: (response: Response) => void;
+    const pendingCatalog = new Promise<Response>((resolve) => { settleCatalog = resolve; });
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(pendingCatalog);
+
+    const information = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+
+    expect(information.map((model) => model.id)).toEqual([`weavenet::${WORK_ID}::gpt-snapshot`]);
+
+    settleCatalog(new Response(
+      JSON.stringify({ data: [{ id: 'gpt-live', capabilities: { tool_calling: true } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    ));
+    await provider.refreshModels();
+
+    const refreshed = await provider.provideLanguageModelChatInformation({ silent: true } as never, {} as never);
+    expect(refreshed.map((model) => model.id)).toEqual([`weavenet::${WORK_ID}::gpt-live`]);
   });
 
   it('does not restore a persisted snapshot from a different catalog revision while offline', async () => {

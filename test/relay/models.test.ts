@@ -173,6 +173,21 @@ apiType: 'messages' as const });
     expect(toChatInformation(model, { ...config, visionProxyModel: 'gpt-4o' }, true).capabilities.imageInput).toBe(false);
     expect(toChatInformation(model, { ...config, visionProxyModel: 'copilot/gpt 4o' }, true).capabilities.imageInput).toBe(false);
   });
+
+  it('exposes only the capability fields the host reads without a proposal', () => {
+    // The host throws when a provider returns `capabilities.editTools`,
+    // `capabilities.apiType` or `capabilities.adaptiveThinking` without the
+    // matching enabledApiProposals entry, so the picker payload must stay
+    // limited to the two ungated keys.
+    const model = toRoutedModel({
+      id: 'gpt-capabilities',
+      capabilities: { tool_calling: true, vision: true, reasoning: true, apiType: 'responses', adaptiveThinking: true, editTools: true },
+    } as never, 'chat-completions');
+    const info = toChatInformation(model, extensionConfig(), true);
+
+    expect(Object.keys(info.capabilities).sort()).toEqual(['imageInput', 'toolCalling']);
+    expect(info).not.toHaveProperty('requiresAuthorization');
+  });
 });
 
 describe('catalog source and protocol helpers', () => {

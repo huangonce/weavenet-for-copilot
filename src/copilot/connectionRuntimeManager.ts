@@ -164,6 +164,49 @@ export class ConnectionRuntimeManager {
     if (runtime) await this.requestConnectionRefresh(runtime, force);
   }
 
+  /**
+   * Restores the persisted catalog of every unresolved connection without
+   * contacting the Relay, so a host-driven silent enumeration can answer from
+   * local state. Returns the ids of connections that still have no catalog to
+   * serve; only those need the network round trip.
+   */
+  async restoreLocalCatalogs(): Promise<readonly string[]> {
+    const pending: string[] = [];
+    let changed = false;
+    for (const runtime of this.syncProfiles()) {
+      if (runtime.resolved) continue;
+      const profile = runtime.profile;
+      let apiKey: string | undefined;
+      let artifactPepper: string | undefined;
+      try {
+        apiKey = await this.options.auth.getApiKey(profile);
+        if (apiKey) artifactPepper = await this.options.auth.getCatalogArtifactPepper();
+      } catch (error) {
+        // The awaited refresh path reports an unreadable credential properly.
+        this.options.debug(getConfig(profile), `[models] connection=${profile.name}, API key read failed: ${formatLogError(error)}`);
+        continue;
+      }
+      if (!apiKey || !artifactPepper) continue;
+      const config = getConfig(profile);
+      const artifactRevision = catalogArtifactRevision(config, apiKey, artifactPepper);
+      changed = this.restoreSnapshot(runtime, config, artifactRevision) || changed;
+      if (!runtime.directory.length) pending.push(profile.id);
+    }
+    if (changed) this.rebuildAggregates();
+    return pending;
+  }
+
+  /**
+   * Starts the network refresh of every unresolved connection without waiting
+   * for it. The catalog-change callback re-enumerates the picker once it lands.
+   */
+  startBackgroundRefresh(): void {
+    for (const runtime of this.syncProfiles()) {
+      if (runtime.resolved || runtime.refreshTask) continue;
+      void this.requestConnectionRefresh(runtime, false).catch(() => undefined);
+    }
+  }
+
   async handleSecretChange(secretKey: string): Promise<void> {
     this.syncProfiles();
     const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
@@ -284,13 +327,7 @@ export class ConnectionRuntimeManager {
     }
     const config = getConfig(profile);
     const artifactRevision = catalogArtifactRevision(config, apiKey, artifactPepper);
-    const artifactChanged = runtime.artifactRevision !== artifactRevision;
-    if (artifactChanged) {
-      const restored = this.options.catalog.restore(profile.id, artifactRevision);
-      runtime.artifactRevision = artifactRevision;
-      runtime.directory = restored?.directory ?? [];
-      runtime.models = this.options.catalog.assemble(config, runtime.directory);
-    }
+    const artifactChanged = this.restoreSnapshot(runtime, config, artifactRevision);
     runtime.phase = 'refreshing';
     runtime.message = undefined;
     if (artifactChanged) this.rebuildAggregates();
@@ -328,6 +365,19 @@ export class ConnectionRuntimeManager {
       this.options.debug(config, `[models] connection=${profile.name}, refresh failed: ${formatLogError(error)}`);
     }
     this.rebuildAggregates();
+  }
+
+  /**
+   * Applies the persisted catalog that belongs to this exact credential.
+   * Returns true when the runtime's models were replaced.
+   */
+  private restoreSnapshot(runtime: ConnectionRuntime, config: ExtensionConfig, artifactRevision: string): boolean {
+    if (runtime.artifactRevision === artifactRevision) return false;
+    const restored = this.options.catalog.restore(runtime.profile.id, artifactRevision);
+    runtime.artifactRevision = artifactRevision;
+    runtime.directory = restored?.directory ?? [];
+    runtime.models = this.options.catalog.assemble(config, runtime.directory);
+    return true;
   }
 
   private isCurrentRuntime(runtime: ConnectionRuntime, generation: number, revision: string): boolean {

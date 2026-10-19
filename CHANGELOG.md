@@ -1,5 +1,12 @@
 # Change Log
 
+## Unreleased
+
+- 静默枚举不再等待网络：宿主在启动与 Agent 装配阶段以 `silent` 调用时，先返回已持久化的目录并在后台刷新（目录变化事件会让宿主重新枚举）；只有完全没有本地目录的连接才走一次网络请求，保证首次运行不会为空。
+- 模型选择器契约守护：新增测试锁定 `capabilities` 只暴露宿主无需 proposed API 即可读取的 `toolCalling`/`imageInput`（返回 `apiType`/`adaptiveThinking`/`editTools` 会让宿主抛错），并锁定清单不声明 `enabledApiProposals`、保留 `languageModelChatProviders` 的管理命令入口。
+- 可发现性：`keywords` 增加 `language-models`，使“Chat: Manage Language Models”的 Install Model Providers（`@tag:language-models`）能检索到本扩展；README 补充 Agent 模式工具调用能力与 BYOK 相关宿主设置。
+- 新增 `LANGUAGE_MODEL_PROVIDER_ASSESSMENT.md`：记录 1.116.0→1.141.0 的 provider 契约对照、宿主实现证据（无门槛字段、会让宿主抛错的 proposed 能力、`managementCommand` 在两个版本均已弃用）以及迁移到 `configuration` 的取舍与触发条件。
+
 ## 0.8.0 - 2026-10-09
 
 - 运行时统一使用 apiType，移除 protocol/route/openaiApi 的重复 API 表达；同一 ID 的 Chat、Responses 和 Messages 变体分别保留。

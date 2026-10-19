@@ -206,6 +206,81 @@ describe('connectionRuntimeManager helpers', () => {
     });
   });
 
+  it('restores local catalogs without the network and refreshes them in the background', async () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: <T>(_key: string) => undefined as T,
+      inspect: <T>(key: string) => key === 'profiles'
+        ? { globalValue: [WORK_PROFILE] as T }
+        : undefined,
+    } as never);
+    const restoredModel = routedModel({ id: 'gpt-restored', pickerId: 'gpt-restored', upstreamId: 'gpt-restored' });
+    const liveModel = routedModel({ id: 'gpt-live', pickerId: 'gpt-live', upstreamId: 'gpt-live' });
+    const load = vi.fn().mockResolvedValue({ models: [liveModel], directory: [liveModel] });
+    const manager = new ConnectionRuntimeManager({
+      auth: {
+        getApiKey: vi.fn().mockResolvedValue('key'),
+        getCatalogArtifactPepper: vi.fn().mockResolvedValue('p'.repeat(43)),
+      } as never,
+      diagnosticsStore: { get: vi.fn() } as never,
+      catalog: {
+        restore: vi.fn((): ModelSnapshotRecord => ({
+          schemaVersion: 3,
+          profileId: WORK_ID,
+          catalogRevision: CATALOG_REVISION,
+          savedAt: Date.now(),
+          directory: [restoredModel],
+        })),
+        assemble: (_config: unknown, directory: RoutedModel[]) => directory,
+        load,
+        persistSnapshot: vi.fn().mockResolvedValue(undefined),
+      } as never,
+      debug: vi.fn(),
+      rebuildBindings: vi.fn(),
+      onStatusChanged: vi.fn(),
+      onCatalogChanged: vi.fn(),
+    });
+
+    await expect(manager.restoreLocalCatalogs()).resolves.toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(manager.getRuntime(WORK_ID)?.models).toEqual([restoredModel]);
+
+    manager.startBackgroundRefresh();
+    await manager.getRuntime(WORK_ID)?.refreshTask;
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(manager.getRuntime(WORK_ID)).toMatchObject({ models: [liveModel], resolved: true, phase: 'ready' });
+  });
+
+  it('reports a connection without a persisted catalog instead of faking an empty one', async () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: <T>(_key: string) => undefined as T,
+      inspect: <T>(key: string) => key === 'profiles'
+        ? { globalValue: [WORK_PROFILE] as T }
+        : undefined,
+    } as never);
+    const load = vi.fn();
+    const manager = new ConnectionRuntimeManager({
+      auth: {
+        getApiKey: vi.fn().mockResolvedValue('key'),
+        getCatalogArtifactPepper: vi.fn().mockResolvedValue('p'.repeat(43)),
+      } as never,
+      diagnosticsStore: { get: vi.fn() } as never,
+      catalog: {
+        restore: vi.fn(() => undefined),
+        assemble: vi.fn(() => []),
+        load,
+      } as never,
+      debug: vi.fn(),
+      rebuildBindings: vi.fn(),
+      onStatusChanged: vi.fn(),
+      onCatalogChanged: vi.fn(),
+    });
+
+    await expect(manager.restoreLocalCatalogs()).resolves.toEqual([WORK_ID]);
+    expect(load).not.toHaveBeenCalled();
+    expect(manager.getRuntime(WORK_ID)).toMatchObject({ models: [], resolved: false });
+  });
+
   it('computes a stable catalog revision from profile settings', () => {
     const values: Record<string, unknown> = {};
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({

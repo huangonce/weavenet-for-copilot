@@ -155,6 +155,12 @@ OpenAI 的 `openai.sampling: true` 明确允许采样，false 明确关闭；`sa
 
 现有图片请求的兼容规则与工具图片提升处理继续保留；它们不属于本次协议配置精简。详见隐私说明。
 
+### Agent 模式与工具调用能力
+
+Copilot 的 Agent 模式只会提供声明了工具调用的模型。WeaveNet 按 Relay `/models` 返回的 `capabilities.tool_calling`（以及可选的在线元数据）上报该能力；某个模型在 Agent 模式里看不到时，先确认 Relay 为该模型返回了工具调用能力，再检查是否被已废弃的全局开关 `weavenet-copilot.supportsToolCalling` 关闭。图片能力同理按 `capabilities.vision` 与视觉代理上报。
+
+在“Chat: Manage Language Models”里可以用 `@provider:weavenet`、`@capability:tools`、`@capability:vision` 过滤查看本扩展上报的模型与能力；Agents / Agent Host 会话使用 BYOK 模型由 VS Code 的 `chat.agentHost.byokModels.enabled` 控制，工具类小请求可设置 `chat.utilityModel` / `chat.utilitySmallModel`（或 `chat.byokUtilityModelDefault`）。
+
 ## 从旧版升级
 
 - 保留连接 UUID、名称、地址、密钥与模型能力覆盖。

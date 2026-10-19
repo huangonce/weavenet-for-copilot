@@ -12,6 +12,8 @@ import type { ApiType } from '../src/relay/types';
 interface Manifest {
   engines: { vscode: string };
   l10n?: string;
+  keywords?: string[];
+  enabledApiProposals?: string[];
   devDependencies: Record<string, string>;
   contributes: {
     configuration: {
@@ -19,6 +21,11 @@ interface Manifest {
         items?: { properties?: Record<string, { enum?: readonly ApiType[] }> };
       }>;
     };
+    languageModelChatProviders?: {
+      vendor: string;
+      displayName: string;
+      managementCommand?: string;
+    }[];
   };
 }
 
@@ -85,6 +92,23 @@ describe('extension manifest', () => {
   it('pins the API types to the declared minimum host', () => {
     const floor = manifest.engines.vscode.replace(/^[^\d]*/u, '');
     expect(manifest.devDependencies['@types/vscode']).toBe(floor);
+  });
+
+  it('stays off proposed APIs and keeps the model-provider discovery tag', () => {
+    // The host throws when a provider returns a capability gated behind a
+    // proposal it does not declare (`capabilities.apiType`, `adaptiveThinking`,
+    // `editTools`), so a published manifest must never opt into proposals. The
+    // "Chat: Manage Language Models" editor filters the Marketplace by tag.
+    expect(manifest.enabledApiProposals).toBeUndefined();
+    expect(manifest.keywords).toContain('language-models');
+  });
+
+  it('keeps the Manage Models gear wired to the connection command', () => {
+    expect(manifest.contributes.languageModelChatProviders).toEqual([{
+      vendor: 'weavenet',
+      displayName: 'WeaveNet',
+      managementCommand: 'weavenet-copilot.manageConnections',
+    }]);
   });
 });
 

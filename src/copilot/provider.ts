@@ -179,9 +179,20 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
     try {
-      // A cancelled enumeration must not resolve with a stale catalog, and the
-      // host-owned picker path never shows a refresh toast of its own.
-      await this.refreshModels('passive', false, token);
+      if (options.silent) {
+        // A silent enumeration is host-driven (startup, agent wiring) and must
+        // not block on the network: serve the persisted catalog and let the
+        // refresh land in the background, where the catalog-change event makes
+        // the host enumerate again. A connection without any catalog still pays
+        // for the round trip so a first run is never empty.
+        const pending = await this.runtimeManager.restoreLocalCatalogs();
+        if (pending.length) await this.refreshModels('passive', false, token);
+        else this.runtimeManager.startBackgroundRefresh();
+      } else {
+        // A cancelled enumeration must not resolve with a stale catalog, and the
+        // host-owned picker path never shows a refresh toast of its own.
+        await this.refreshModels('passive', false, token);
+      }
     } catch (error) {
       if (isCancellationError(error)) throw new vscode.CancellationError();
       this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
