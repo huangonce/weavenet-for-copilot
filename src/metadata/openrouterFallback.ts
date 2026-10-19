@@ -83,7 +83,8 @@ export function scheduleOpenRouterRefresh(ttlMs: number, force = false): Promise
  * when exactly one catalog candidate exists, avoiding cross-vendor matches.
  */
 export function parseOpenRouterResponse(payload: OpenRouterResponse): OpenRouterCatalogEntry[] {
-  const models = Array.isArray(payload?.data) ? payload.data : [];
+  if (!Array.isArray(payload?.data)) throw new Error('OpenRouter catalog must contain a data array.');
+  const models = payload.data;
   if (models.length > OPENROUTER_MAX_ENTRIES) {
     throw new Error(`OpenRouter catalog exceeds ${OPENROUTER_MAX_ENTRIES} entries`);
   }
@@ -131,9 +132,10 @@ function toEntry(model: OpenRouterModel): OpenRouterCatalogEntry | undefined {
 
 function toReferencePricing(pricing: OpenRouterModel['pricing']): ReferencePricing | undefined {
   if (!pricing) return undefined;
-  const perMillion = (value: string | undefined): number | undefined => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed * 1_000_000 : undefined;
+  const perMillion = (value: unknown): number | undefined => {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const scaled = Number(value) * 1_000_000;
+    return Number.isFinite(scaled) && scaled >= 0 ? scaled : undefined;
   };
   const inputPer1M = perMillion(pricing.prompt);
   const outputPer1M = perMillion(pricing.completion);
@@ -151,9 +153,22 @@ function toReferencePricing(pricing: OpenRouterModel['pricing']): ReferencePrici
  * Returns the original list untouched if the cache has never been populated.
  */
 export function enrichModelsWithOpenRouter(models: RoutedModel[]): RoutedModel[] {
+  if (models.length === 0) return models;
   const entries = getCachedData<OpenRouterCatalogEntry[]>(OPENROUTER_CACHE_KEY);
   if (!isValidCatalog(entries) || entries.length === 0) return models;
-  return models.map((model) => enrichModelFromOpenRouter(model, entries));
+  const fullIds = new Map<string, OpenRouterCatalogEntry>();
+  const bareIds = new Map<string, OpenRouterCatalogEntry | undefined>();
+  for (const entry of entries) {
+    const fullId = entry.fullId.toLowerCase();
+    const bareId = entry.id.toLowerCase();
+    if (!fullIds.has(fullId)) fullIds.set(fullId, entry);
+    // Even repeated identical full IDs make a bare ID ambiguous, as before.
+    bareIds.set(bareId, bareIds.has(bareId) ? undefined : entry);
+  }
+  return models.map((model) => {
+    const modelId = model.id.toLowerCase();
+    return enrichModelFromOpenRouter(model, fullIds.get(modelId) ?? bareIds.get(modelId));
+  });
 }
 
 function isValidCatalog(value: unknown): value is OpenRouterCatalogEntry[] {
@@ -191,11 +206,8 @@ function isNonEmptyString(value: unknown): value is string {
 
 function enrichModelFromOpenRouter(
   model: RoutedModel,
-  entries: readonly OpenRouterCatalogEntry[],
+  entry: OpenRouterCatalogEntry | undefined,
 ): RoutedModel {
-  const modelId = model.id.toLowerCase();
-  const entry = entries.find((candidate) => candidate.fullId.toLowerCase() === modelId)
-    ?? uniqueBareIdEntry(entries, modelId);
   if (!entry) return model;
 
   const contextWindow = model.contextWindow ?? entry.contextWindow;
@@ -234,14 +246,6 @@ function enrichModelFromOpenRouter(
     referencePricing,
     metadataSources: sources,
   };
-}
-
-function uniqueBareIdEntry(
-  entries: readonly OpenRouterCatalogEntry[],
-  modelId: string,
-): OpenRouterCatalogEntry | undefined {
-  const candidates = entries.filter((candidate) => candidate.id.toLowerCase() === modelId);
-  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function sourceForMissing<T>(

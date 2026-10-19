@@ -134,10 +134,7 @@ export function snapshotChatRequest(
 }
 
 export function snapshotChatResponseOptions(
-  rawOptions: vscode.ProvideLanguageModelChatResponseOptions & {
-    readonly modelConfiguration?: Record<string, unknown>;
-    readonly configuration?: Record<string, unknown>;
-  },
+  rawOptions: vscode.ProvideLanguageModelChatResponseOptions,
 ): CanonicalChatResponseOptions {
   assertHostRecord(rawOptions, 'The response options');
   const rawTools = readHostProperty(rawOptions, 'tools', 'The response options');
@@ -156,24 +153,12 @@ export function snapshotChatResponseOptions(
   const reasoningEffort = snapshotSelectedModelOption(rawOptions, 'reasoningEffort');
   const modelOptions = reasoningEffort === undefined
     ? undefined
-    : Object.freeze({
-      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-    });
+    : Object.freeze({ reasoningEffort });
   return Object.freeze({
     ...(tools === undefined ? {} : { tools }),
     toolMode: (rawToolMode ?? vscode.LanguageModelChatToolMode.Auto) as vscode.LanguageModelChatToolMode,
     ...(modelOptions === undefined ? {} : { modelOptions }),
   });
-}
-
-export function isCanonicalChatRequestSnapshot(value: unknown): value is CanonicalChatRequestSnapshot {
-  if (!value || typeof value !== 'object' || utilTypes.isProxy(value)) return false;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, SNAPSHOT_BRAND);
-    return !!descriptor && 'value' in descriptor && descriptor.value === true;
-  } catch {
-    return false;
-  }
 }
 
 export function createCanonicalSnapshot(
@@ -601,18 +586,13 @@ function jsonStringBytes(value: string): number {
 function snapshotSelectedModelOption(
   options: object,
   key: 'reasoningEffort',
-): unknown {
-  for (const containerKey of ['modelOptions', 'modelConfiguration', 'configuration'] as const) {
-    const container = readHostProperty(options, containerKey, 'The response options');
-    if (container === undefined || container === null) continue;
-    assertHostRecord(container, `The response options.${containerKey}`);
-    const value = readHostProperty(container, key, `The response options.${containerKey}`);
-    if (value === undefined || value === null) continue;
-    // Only strings are consumed by the provider. An inert primitive preserves
-    // the precedence of an invalid non-null value without retaining caller data.
-    return typeof value === 'string' ? value : false;
-  }
-  return undefined;
+): string | undefined {
+  const container = readHostProperty(options, 'modelOptions', 'The response options');
+  if (container === undefined || container === null) return undefined;
+  assertHostRecord(container, 'The response options.modelOptions');
+  const value = readHostProperty(container, key, 'The response options.modelOptions');
+  // Unsupported values use the model default without retaining caller data.
+  return typeof value === 'string' ? value : undefined;
 }
 
 function binaryByteLength(value: unknown, subject: string): number {

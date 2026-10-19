@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { catalogArtifactRevision } from './catalogIdentity';
 import { AuthManager } from '../auth/auth';
+import { RelayClient } from '../relay/client';
+import { canonicalRelayHeaders } from '../relay/headers';
+import { stableJsonValue } from '../json';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ApiType, ConnectionProfile } from '../config/config';
 import { CONFIG_SECTION, VENDOR } from '../constants';
@@ -13,6 +16,7 @@ import {
   ConnectionRuntimeManager,
   isCancellationError,
   isWeaveNetSecretKey,
+  waitForRefresh,
 } from './connectionRuntimeManager';
 import type { ConnectionStatus, ModelRefreshIntent } from './connectionRuntimeManager';
 import { catalogRevision } from './connectionRuntimeManager';
@@ -22,6 +26,7 @@ import type { ConnectionTestResult } from './connectionTestService';
 import { estimateTextTokens } from './helpers';
 import type { ModelOptions } from './helpers';
 import { ModelBindingRegistry } from './modelBindingRegistry';
+import type { BoundModel } from './modelBindingRegistry';
 import { ModelCatalogService } from './modelCatalogService';
 import { ModelSnapshotStore } from './modelSnapshotStore';
 import { provideOpenAIResponse, provideResponsesResponse } from './openaiResponse';
@@ -29,6 +34,7 @@ import type { ProtocolReplayState } from '../relay/replayState';
 import type { RoutedModel } from '../relay/types';
 import { formatLogError } from './requestDiagnostics';
 import { snapshotChatRequest, snapshotChatResponseOptions } from './canonicalRequest';
+import { convertResponsesInput } from './convert';
 import { IMAGE_ONLY_TOOL_RESULT_TEXT, normalizeToolResultBatches } from './toolResultImageNormalization';
 import {
   resolveVisionProxyMessages,
@@ -37,24 +43,6 @@ import {
   VisionDescriptionCache,
 } from './visionProxy';
 import type { VisionDescriptionCacheWrite } from './visionProxy';
-
-export {
-  ConnectionTestError,
-  describeConnectionTestError,
-  safeEndpoint,
-  safeHost,
-  sanitizeLanguageModelError,
-  toLanguageModelError,
-} from './connection';
-export type { ConnectionTestFailure } from './connection';
-export {
-  estimateTextTokens,
-  getConfiguredReasoningEffort,
-  parseToolArguments,
-  toClaudeThinking,
-} from './helpers';
-export type { ConnectionStatus, ConnectionStatusEntry } from './connectionRuntimeManager';
-export type { ConnectionTestResult } from './connectionTestService';
 
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
@@ -68,6 +56,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly connectionTest: ConnectionTestService;
   private readonly visionDescriptionCache = new VisionDescriptionCache();
   private visionCacheGeneration = 0;
+  private modelInformationSignature = '';
+  private visionRoutingSignature = '';
+  private externalVisionModel?: { key: string; signature: string };
+  private externalVisionRefresh?: Promise<void>;
   private connectionStatus: ConnectionStatus = {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
   };
@@ -92,8 +84,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         this.connectionStatusEmitter.fire(status);
       },
       onCatalogChanged: () => {
-        this.invalidateVisionRouting();
-        this.changeEmitter.fire();
+        this.publishModelCatalog();
       },
     });
     this.connectionTest = new ConnectionTestService({
@@ -107,23 +98,22 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.connectionStatusEmitter,
       this.output,
       vscode.lm.onDidChangeChatModels(() => {
-        this.invalidateVisionRouting();
+        this.refreshExternalVisionModel();
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration(CONFIG_SECTION)) {
-          if (
-            event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyEnabled`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyModel`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.visionProxyPrompt`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.supportsImageInput`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.imageInputModels`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.disabledImageInputModels`)
-            || event.affectsConfiguration(`${CONFIG_SECTION}.profiles`)
-          ) {
-            this.invalidateVisionRouting();
-          }
+        if (!event.affectsConfiguration(CONFIG_SECTION)) return;
+        const affects = (setting: string) => event.affectsConfiguration(`${CONFIG_SECTION}.${setting}`);
+        const visionChanged = [
+          'visionProxyEnabled', 'visionProxyModel', 'visionProxyPrompt',
+          'supportsImageInput', 'imageInputModels', 'disabledImageInputModels',
+        ].some(affects);
+        if (visionChanged) this.invalidateVisionRouting();
+        if (affects('profiles') || affects('modelMetadataEnabled')) {
           void this.runtimeManager.reconcileConfiguration();
+        } else if (visionChanged || ['modelNamePrefix', 'maxInputTokens', 'maxOutputTokens', 'supportsToolCalling'].some(affects)) {
+          this.publishModelCatalog();
         }
+        // Request-only settings are read when the next request is constructed.
       }),
       context.secrets.onDidChange((event) => {
         if (isWeaveNetSecretKey(event.key)) {
@@ -174,25 +164,59 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     await this.runtimeManager.refreshConnection(profileId, force);
   }
 
+  refreshModelMetadata(): void {
+    this.runtimeManager.refreshModelMetadata();
+  }
+
+  async getTokenCountingModels(token: vscode.CancellationToken): Promise<vscode.LanguageModelChatInformation[]> {
+    const models = await this.provideLanguageModelChatInformation({ silent: false }, token);
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    return models.filter(model => {
+      const routed = this.bindingRegistry.get(model.id)?.model;
+      return routed?.apiType === 'responses' && routed.openai?.tokenCounting === true;
+    });
+  }
+
+  async compareInputTokenCount(modelId: string, text: string, token: vscode.CancellationToken): Promise<{ localEstimate: number; serverCount: number }> {
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    const binding = this.bindingRegistry.get(modelId);
+    if (!binding) throw new vscode.LanguageModelError(t('Unknown WeaveNet model route: {0}', modelId));
+    if (binding.model.apiType !== 'responses' || binding.model.openai?.tokenCounting !== true) {
+      throw new vscode.LanguageModelError(t('This model does not declare Responses input token counting support.'));
+    }
+    const credential = this.runtimeManager.getRuntime(binding.profileId)?.credentialRevision;
+    const assertCurrent = () => {
+      const profile = this.assertModelConnectionCurrent(binding, credential, token);
+      const current = this.bindingRegistry.get(modelId);
+      if (current?.model.openai?.tokenCounting !== true) {
+        throw vscode.LanguageModelError.NotFound(t('This model connection changed. Refresh models and select it again.'));
+      }
+      return profile;
+    };
+    const profile = assertCurrent();
+    const config = getConfig(profile);
+    const message: vscode.LanguageModelChatRequestMessage = {
+      role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart(text)], name: undefined,
+    };
+    const snapshot = snapshotChatRequest([message]);
+    const { input, instructions } = convertResponsesInput(snapshot, false);
+    const localEstimate = await this.provideTokenCount(toChatInformation(binding.model, config, true), message, token);
+    const apiKey = await this.auth.getApiKey(profile);
+    assertCurrent();
+    if (!apiKey) throw vscode.LanguageModelError.NoPermissions(t('The API key for “{0}” is not configured.', profile.name));
+    const client = new RelayClient({ baseUrl: config.baseUrl, apiKey, requestHeaders: config.requestHeaders,
+      requestTimeoutMs: config.requestTimeoutMs, streamIdleTimeoutMs: config.streamIdleTimeoutMs });
+    const serverCount = await client.countResponsesInputTokens({ model: binding.model.upstreamId, input, ...(instructions ? { instructions } : {}) }, token);
+    assertCurrent();
+    return { localEstimate, serverCount };
+  }
+
   async provideLanguageModelChatInformation(
     options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
     try {
-      if (options.silent) {
-        // A silent enumeration is host-driven (startup, agent wiring) and must
-        // not block on the network: serve the persisted catalog and let the
-        // refresh land in the background, where the catalog-change event makes
-        // the host enumerate again. A connection without any catalog still pays
-        // for the round trip so a first run is never empty.
-        const pending = await this.runtimeManager.restoreLocalCatalogs();
-        if (pending.length) await this.refreshModels('passive', false, token);
-        else this.runtimeManager.startBackgroundRefresh();
-      } else {
-        // A cancelled enumeration must not resolve with a stale catalog, and the
-        // host-owned picker path never shows a refresh toast of its own.
-        await this.refreshModels('passive', false, token);
-      }
+      await this.runtimeManager.prepareCatalog(options.silent, token);
     } catch (error) {
       if (isCancellationError(error)) throw new vscode.CancellationError();
       this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
@@ -209,14 +233,25 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         this.debug(getConfig(runtime.profile), `[models] connection=${runtime.profile.name}, API key status read failed: ${formatLogError(error)}`);
       }
     }));
-    return entries.flatMap(({ profileId, model }) => {
+    const contexts = new Map<string, {
+      config: ReturnType<typeof getConfig>;
+      source: { name: string; host: string | undefined };
+      hasApiKey: boolean;
+    }>();
+    for (const [profileId, hasApiKey] of keyStates) {
       const runtime = this.runtimeManager.getRuntime(profileId);
-      if (!runtime) return [];
-      const hasApiKey = keyStates.get(profileId) === true;
-      const info = toChatInformation(model, getConfig(runtime.profile), hasApiKey, {
-        name: runtime.profile.name,
-        host: safeHost(runtime.profile.baseUrl),
+      if (!runtime) continue;
+      contexts.set(profileId, {
+        config: getConfig(runtime.profile),
+        source: { name: runtime.profile.name, host: safeHost(runtime.profile.baseUrl) },
+        hasApiKey,
       });
+    }
+    return entries.flatMap(({ profileId, model }) => {
+      const context = contexts.get(profileId);
+      if (!context) return [];
+      const { config, source, hasApiKey } = context;
+      const info = toChatInformation(model, config, hasApiKey, source);
       return [hasApiKey ? info : { ...info, statusIcon: new vscode.ThemeIcon('warning') }];
     });
   }
@@ -251,14 +286,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!binding) {
       throw new vscode.LanguageModelError(t('Unknown WeaveNet model route: {0}', model.id));
     }
-    const runtime = this.runtimeManager.getRuntime(binding.profileId);
-    if (!runtime || runtime.revision !== binding.revision) {
-      throw vscode.LanguageModelError.NotFound(t('This model connection changed. Refresh models and select it again.'));
-    }
-    const currentProfile = getProfileConfiguration().profiles.find((profile) => profile.id === binding.profileId);
-    if (!currentProfile || catalogRevision(currentProfile) !== binding.revision) {
-      throw vscode.LanguageModelError.NotFound(t('This model connection is no longer available. Refresh models and select it again.'));
-    }
+    const credential = this.runtimeManager.getRuntime(binding.profileId)?.credentialRevision;
+    const currentProfile = this.assertModelConnectionCurrent(binding, credential, token);
     const config = getConfig(currentProfile);
     const visionCacheGeneration = this.visionCacheGeneration;
     const routedModel = binding.model;
@@ -267,11 +296,16 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       throw new vscode.LanguageModelError(t('Required tool mode needs a tool-capable model and at least one available tool.'));
     }
     const apiKey = await this.auth.getApiKey(currentProfile);
+    this.assertModelConnectionCurrent(binding, credential, token);
     if (!apiKey) {
       throw vscode.LanguageModelError.NoPermissions(t('The API key for “{0}” is not configured.', currentProfile.name));
     }
     this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
     const nativeImageInput = supportsImageInputForRoutedModel(routedModel, config);
+    if (messageSnapshot.hasImages && !nativeImageInput) {
+      await this.waitForExternalVisionRefresh(token);
+      this.assertVisionConfigurationCurrent(visionCacheGeneration, true);
+    }
     let resolvedMessages = messageSnapshot;
     let pendingVisionCacheWrites: readonly VisionDescriptionCacheWrite[] = [];
     try {
@@ -291,7 +325,13 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
             const selected = await selectVisionDescriber(
               configuredModel,
               targetModel,
-              (candidate) => this.isSafeVisionProxyCandidate(candidate),
+              (candidate) => {
+                if (candidate.vendor !== VENDOR) {
+                  const signature = externalVisionSignature(candidate);
+                  this.externalVisionModel = signature ? { key: configuredModel, signature } : undefined;
+                }
+                return this.isSafeVisionProxyCandidate(candidate);
+              },
             );
             this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
             return selected;
@@ -299,6 +339,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         );
         resolvedMessages = vision.messages;
         pendingVisionCacheWrites = vision.pendingCacheWrites;
+        await this.waitForExternalVisionRefresh(token);
         this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
         this.debug(
           config,
@@ -322,6 +363,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         protocolIdentity,
         debug: this.debug.bind(this),
       };
+      this.assertModelConnectionCurrent(binding, credential, token);
       this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
       if (routedModel.apiType === 'messages') await provideClaudeResponse(context);
       else if (routedModel.apiType === 'responses') await provideResponsesResponse(context);
@@ -368,9 +410,83 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
+  private assertModelConnectionCurrent(
+    binding: BoundModel,
+    credential: string | undefined,
+    token: vscode.CancellationToken,
+  ): ConnectionProfile {
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    const current = this.bindingRegistry.get(binding.model.pickerId);
+    const runtime = this.runtimeManager.getRuntime(binding.profileId);
+    if (!current || !runtime || runtime.revision !== binding.revision || current.revision !== binding.revision
+      || current.model.upstreamId !== binding.model.upstreamId || current.model.apiType !== binding.model.apiType
+      || runtime.credentialRevision !== credential) {
+      throw vscode.LanguageModelError.NotFound(t('This model connection changed. Refresh models and select it again.'));
+    }
+    const profile = getProfileConfiguration().profiles.find(candidate => candidate.id === binding.profileId);
+    if (!profile || catalogRevision(profile) !== binding.revision) {
+      throw vscode.LanguageModelError.NotFound(t('This model connection is no longer available. Refresh models and select it again.'));
+    }
+    return profile;
+  }
+
   private invalidateVisionRouting(): void {
     this.visionDescriptionCache.clear();
     this.visionCacheGeneration += 1;
+    this.externalVisionModel = undefined;
+  }
+
+  private publishModelCatalog(): void {
+    const information: unknown[] = [];
+    const routes: unknown[] = [];
+    for (const runtime of this.runtimeManager.getRuntimes()) {
+      const config = getConfig(runtime.profile);
+      const source = { name: runtime.profile.name, host: safeHost(runtime.profile.baseUrl) };
+      const connectionRoute = [runtime.profile.id, runtime.profile.baseUrl, canonicalRelayHeaders(config.requestHeaders), runtime.credentialRevision];
+      for (const model of runtime.models) {
+        information.push([runtime.profile.id, toChatInformation(model, config, true, source)]);
+        routes.push([connectionRoute,
+          model.pickerId, model.upstreamId, model.apiType, supportsImageInputForRoutedModel(model, config), model.openai?.imageCompatibility]);
+      }
+    }
+    const informationSignature = createHash('sha256').update(JSON.stringify(stableJsonValue(information))).digest('hex');
+    const routingSignature = createHash('sha256').update(JSON.stringify(stableJsonValue(routes))).digest('hex');
+    const routingChanged = routingSignature !== this.visionRoutingSignature;
+    const informationChanged = informationSignature !== this.modelInformationSignature;
+    this.modelInformationSignature = informationSignature;
+    this.visionRoutingSignature = routingSignature;
+    if (routingChanged) this.invalidateVisionRouting();
+    if (informationChanged) this.changeEmitter.fire();
+  }
+
+  private refreshExternalVisionModel(): void {
+    const config = getConfig();
+    if (!config.visionProxyEnabled) return;
+    const slash = config.visionProxyModel.indexOf('/');
+    if (slash < 1) return;
+    const vendor = config.visionProxyModel.slice(0, slash);
+    const id = config.visionProxyModel.slice(slash + 1);
+    if (vendor === VENDOR) return; // Our catalog changes already validate our own routes.
+    const previous = this.externalVisionModel;
+    if (!previous || previous.key !== config.visionProxyModel) {
+      this.invalidateVisionRouting();
+      return;
+    }
+    const generation = this.visionCacheGeneration;
+    const task = Promise.resolve(vscode.lm.selectChatModels({ vendor, id })).then(models => {
+      if (this.externalVisionRefresh !== task || generation !== this.visionCacheGeneration) return;
+      const matching = models.filter(model => model.vendor === vendor && model.id === id);
+      if (matching.length !== 1 || externalVisionSignature(matching[0]) !== previous.signature) this.invalidateVisionRouting();
+    }, () => {
+      if (this.externalVisionRefresh === task && generation === this.visionCacheGeneration) this.invalidateVisionRouting();
+    }).finally(() => {
+      if (this.externalVisionRefresh === task) this.externalVisionRefresh = undefined;
+    });
+    this.externalVisionRefresh = task;
+  }
+
+  private async waitForExternalVisionRefresh(token: vscode.CancellationToken): Promise<void> {
+    while (this.externalVisionRefresh) await waitForRefresh(this.externalVisionRefresh, token);
   }
 
   isSafeVisionProxyCandidate(candidate: vscode.LanguageModelChat): boolean {
@@ -387,8 +503,8 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     text: string | vscode.LanguageModelChatRequestMessage,
     _token: vscode.CancellationToken,
   ): Promise<number> {
-    if (typeof text === 'string') return estimateTextTokens(text);
     if (_token.isCancellationRequested) throw new vscode.CancellationError();
+    if (typeof text === 'string') return estimateTextTokens(text);
     const canonical = snapshotChatRequest([text]).messages[0];
     const countImage = (bytes: number) => Math.max(256, Math.ceil(bytes / 768));
     let tokens = 4;
@@ -430,6 +546,14 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         warnings ? t('; {0} warning(s)', warnings) : ''),
     );
   }
+}
+
+function externalVisionSignature(model: vscode.LanguageModelChat): string | undefined {
+  const capabilities = (model as vscode.LanguageModelChat & {
+    readonly capabilities?: { readonly supportsImageToText?: boolean };
+  }).capabilities;
+  if (!model.version || !Number.isFinite(model.maxInputTokens) || capabilities?.supportsImageToText !== true) return undefined;
+  return JSON.stringify([model.vendor, model.id, model.version, model.family, model.maxInputTokens, capabilities.supportsImageToText]);
 }
 
 /** Protocol whose replayed reasoning is resent for this model, if any. */

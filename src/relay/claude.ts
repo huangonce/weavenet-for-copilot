@@ -1,13 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import type { CancellationToken } from 'vscode';
 import { ClaudeReplayCollector } from './claudeReplay';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
-import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readResponseText, readWithIdleTimeout, throwIfNotOk } from './http';
+import { fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, MAX_SSE_EVENT_BYTES, readResponseText, readSseStream, responseDiagnosticsMetadata, throwIfNotOk } from './http';
 import { relayEndpointUrl } from './url';
 import type { ClaudeRequest, ClaudeStreamEvent, StreamCallbacks, ToolCall } from './types';
 
 interface ClaudeParseState { parts: number; started: boolean; replay?: ClaudeReplayCollector }
-
-const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 
 export interface ClaudeRequestOptions {
   readonly baseUrl: string;
@@ -23,43 +22,44 @@ export async function streamClaudeMessages(
   callbacks: StreamCallbacks,
   token?: CancellationToken,
 ): Promise<void> {
-  let currentRequest = request;
-  let fallbackUsed = false;
-  while (true) {
-    const response = await fetchClaude(options, currentRequest, token);
-    callbacks.onResponse?.('Claude', response.status, response.headers.get('content-type') ?? 'unknown');
-    await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
-    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-    if (!currentRequest.stream || !contentType.includes('text/event-stream')) {
-      await processClaudeFullResponse(response, callbacks, options.streamIdleTimeoutMs, token);
-      callbacks.onStreamEnd?.('Claude', 'message_stop');
-      return;
-    }
-    const outcome = await processClaudeStream(response, callbacks, options.streamIdleTimeoutMs, token);
-    if (outcome.terminal) {
-      if (outcome.parts === 0) {
-        throw createIncompleteStreamError('Claude', 'empty-response');
-      }
-      callbacks.onStreamEnd?.('Claude', 'message_stop');
-      return;
-    }
-    if (!fallbackUsed && !outcome.terminal && !outcome.started && outcome.parts === 0) {
-      fallbackUsed = true;
-      currentRequest = { ...request, stream: false };
-      continue;
-    }
-    throw createIncompleteStreamError(
-      'Claude',
-      outcome.parts === 0 ? 'missing-terminal-empty-response' : 'missing-terminal-event',
-    );
+  // A successful but empty stream is still an accepted POST. Retrying it as
+  // non-streaming could duplicate upstream work or billing.
+  const clientRequestId = randomUUID();
+  const response = await fetchClaude(options, request, callbacks, clientRequestId, token);
+  callbacks.onResponse?.('Claude', response.status, response.headers.get('content-type') ?? 'unknown', {
+    ...responseDiagnosticsMetadata(response), clientRequestId,
+  });
+  await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!request.stream || !contentType.includes('text/event-stream')) {
+    await processClaudeFullResponse(response, callbacks, options.streamIdleTimeoutMs, token);
+    callbacks.onStreamEnd?.('Claude', 'message_stop');
+    return;
   }
+  const outcome = await processClaudeStream(response, callbacks, options.streamIdleTimeoutMs, token);
+  if (outcome.terminal) {
+    if (outcome.parts === 0) {
+      throw createIncompleteStreamError('Claude', 'empty-response');
+    }
+    callbacks.onStreamEnd?.('Claude', 'message_stop');
+    return;
+  }
+  throw createIncompleteStreamError(
+    'Claude',
+    outcome.parts === 0 ? 'missing-terminal-empty-response' : 'missing-terminal-event',
+  );
 }
 
 async function fetchClaude(
   options: ClaudeRequestOptions,
   request: ClaudeRequest,
+  callbacks: StreamCallbacks,
+  clientRequestId: string,
   token?: CancellationToken,
 ): Promise<Response> {
+  const body = JSON.stringify(request);
+  callbacks.onRequest?.('Claude', { clientRequestId, bodyBytes: Buffer.byteLength(body),
+    clientRequestIdSent: false, attempt: 1, stream: request.stream });
   return fetchWithResponseTimeout(relayEndpointUrl(options.baseUrl, 'messages'), {
     method: 'POST',
     headers: {
@@ -68,8 +68,10 @@ async function fetchClaude(
       'Content-Type': 'application/json',
       'anthropic-version': options.anthropicVersion ?? '2023-06-01',
     },
-    body: JSON.stringify(request),
-  }, options.requestTimeoutMs, token);
+    body,
+  }, options.requestTimeoutMs, token, diagnostics => callbacks.onRequestSettled?.('Claude', {
+    clientRequestId, ...diagnostics,
+  }));
 }
 
 export async function processClaudeStream(
@@ -79,45 +81,14 @@ export async function processClaudeStream(
   token?: CancellationToken,
   maxEventBytes = MAX_SSE_EVENT_BYTES,
 ): Promise<{ parts: number; started: boolean; terminal: boolean }> {
-  if (!response.body) throw new Error('Relay returned an empty response body.');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
   const tools = new Map<number, ToolCall>();
   const state: ClaudeParseState = { parts: 0, started: false };
-  let buffer = '';
-  let terminal = false;
-  try {
-    while (!terminal) {
-      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-      if (done) break;
-      const consumed = consumeSseChunk(
-        value,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processClaudeSseData(data, tools, callbacks, state),
-        () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    if (!terminal) {
-      const consumed = consumeSseChunk(
-        undefined,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processClaudeSseData(data, tools, callbacks, state),
-        () => createRelayStreamError('Claude', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    if (terminal) state.parts += flushToolCalls(tools, callbacks);
-    return { parts: state.parts, started: state.started, terminal };
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
+  const terminal = await readSseStream(response, {
+    protocol: 'Claude', idleTimeoutMs, token, maxEventBytes,
+    onEventData: (data) => processClaudeSseData(data, tools, callbacks, state),
+  });
+  if (terminal) state.parts += flushToolCalls(tools, callbacks);
+  return { parts: state.parts, started: state.started, terminal };
 }
 
 export function processClaudeSseLine(
@@ -154,9 +125,9 @@ function processClaudeSseData(
     state.started = true;
     callbacks.onProcessingStarted?.('Claude');
   }
-  // `message_start` carries cumulative usage on `message.usage`; `message_delta`
-  // carries an output-token delta on `usage`. Pick whichever this event has so
-  // a single event can never trigger the usage callback twice.
+  // `message_start` carries usage on `message.usage`; `message_delta.usage`
+  // contains cumulative counts, not increments. Pick whichever this event has
+  // so a single event can never trigger the usage callback twice.
   if (event.type === 'message_delta' && event.delta?.stop_reason) callbacks.onClaudeStopReason?.(event.delta.stop_reason);
   const usage = event.usage ?? event.message?.usage;
   if (usage) callbacks.onClaudeUsage?.(usage, event.message?.id);

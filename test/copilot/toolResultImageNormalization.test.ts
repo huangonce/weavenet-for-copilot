@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
 import { snapshotChatRequest } from '../../src/copilot/canonicalRequest';
-import { promoteNativeToolResultImages } from '../../src/copilot/toolResultImageNormalization';
+import { normalizeToolResultBatches } from '../../src/copilot/toolResultImageNormalization';
 
 function user(...content: vscode.LanguageModelInputPart[]): vscode.LanguageModelChatRequestMessage {
   return { role: vscode.LanguageModelChatMessageRole.User, content, name: undefined };
@@ -26,7 +26,7 @@ describe('native tool-result image normalization', () => {
       ])),
     ]);
 
-    const normalized = promoteNativeToolResultImages(snapshot);
+    const normalized = normalizeToolResultBatches(snapshot);
 
     expect(normalized.messages).toEqual([
       expect.objectContaining({ role: 'assistant', content: [expect.objectContaining({ callId: 'call-1' })] }),
@@ -47,7 +47,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('uses a safe text marker for image-only tool results', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(new vscode.LanguageModelToolCallPart('call-1', 'screenshot', {})),
       user(new vscode.LanguageModelToolResultPart('call-1', [
         new vscode.LanguageModelTextPart('   '),
@@ -66,7 +66,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('waits for every parallel tool output across messages before promoting all images', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(
         new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
         new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
@@ -90,7 +90,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('removes unanswered calls and flushes available images at the end of a truncated parallel batch', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(
         new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
         new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
@@ -108,7 +108,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('removes unanswered calls and flushes an abandoned batch before a new assistant turn', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(
         new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
         new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
@@ -139,7 +139,7 @@ describe('native tool-result image normalization', () => {
       ),
     ]);
 
-    const normalized = promoteNativeToolResultImages(snapshot);
+    const normalized = normalizeToolResultBatches(snapshot);
 
     expect(normalized.messages.map((message) => message.content.map((part) => part.kind))).toEqual([
       ['toolCall', 'toolCall'],
@@ -155,7 +155,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('delays ordinary user text and images until after tool outputs', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})),
       user(
         new vscode.LanguageModelTextPart('Context before the screenshot.'),
@@ -175,7 +175,7 @@ describe('native tool-result image normalization', () => {
   });
 
   it('preserves separate deferred user message boundaries and names', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(
         new vscode.LanguageModelToolCallPart('call-1', 'first', {}),
         new vscode.LanguageModelToolCallPart('call-2', 'second', {}),
@@ -212,12 +212,12 @@ describe('native tool-result image normalization', () => {
     ];
 
     for (const messages of cases) {
-      expect(() => promoteNativeToolResultImages(snapshotChatRequest(messages))).toThrow('must match one earlier');
+      expect(() => normalizeToolResultBatches(snapshotChatRequest(messages))).toThrow('must match one earlier');
     }
   });
 
   it('orders a top-level-only image after its tool output', () => {
-    const normalized = promoteNativeToolResultImages(snapshotChatRequest([
+    const normalized = normalizeToolResultBatches(snapshotChatRequest([
       assistant(new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})),
       user(
         image(9),
@@ -238,7 +238,7 @@ describe('native tool-result image normalization', () => {
       assistant(new vscode.LanguageModelToolCallPart('call-1', 'inspect', {})),
       user(new vscode.LanguageModelToolResultPart('call-1', [image(1)])),
     ]);
-    const normalized = promoteNativeToolResultImages(source);
+    const normalized = normalizeToolResultBatches(source);
     const normalizedResult = normalized.messages[1].content[0];
 
     expect(normalized).not.toBe(source);
@@ -252,6 +252,6 @@ describe('native tool-result image normalization', () => {
     expect(Object.isFrozen(normalizedResult.content)).toBe(true);
 
     const toolCallFree = snapshotChatRequest([user(new vscode.LanguageModelTextPart('hello'))]);
-    expect(promoteNativeToolResultImages(toolCallFree)).toBe(toolCallFree);
+    expect(normalizeToolResultBatches(toolCallFree)).toBe(toolCallFree);
   });
 });

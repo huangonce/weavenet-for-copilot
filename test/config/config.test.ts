@@ -90,6 +90,18 @@ apiType: 'chat-completions' as const },
     expect(normalizeConnectionProfiles([])).toEqual([]);
   });
 
+  it('retains explicit diagnostic and caching support in fixed models', () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ get: () => undefined } as never);
+    const [profile] = normalizeConnectionProfiles([{ id: WORK_ID, name: 'Capabilities', baseUrl: 'https://relay.example.com/v1', models: [
+      { id: 'responses', apiType: 'responses', openai: { tokenCounting: true, promptCacheKey: false } },
+      { id: 'claude', apiType: 'messages', claude: { automaticCaching: true } },
+    ] }]);
+    expect(getConfig(profile).models).toMatchObject([
+      { id: 'responses', apiType: 'responses', openai: { tokenCounting: true, promptCacheKey: false } },
+      { id: 'claude', apiType: 'messages', claude: { automaticCaching: true } },
+    ]);
+  });
+
   it('rejects unsafe endpoint forms and protected request headers', () => {
     const profiles = normalizeConnectionProfiles([
       { id: '10000000-0000-4000-8000-000000000001', name: 'Credentials', baseUrl: 'https://key@relay.example.com/v1' },

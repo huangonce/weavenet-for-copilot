@@ -14,6 +14,34 @@ function client(requestHeaders: Record<string, string> = {}): RelayClient {
 }
 
 describe('RelayClient', () => {
+  it('counts Responses inputs once with protected bearer authentication and the complete supplied payload', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"object":"response.input_tokens","input_tokens":42}'));
+    const request = { model: 'model', input: [{ role: 'user' as const, content: [{ type: 'input_text' as const, text: 'hello' }] }],
+      instructions: 'system', tools: [{ type: 'function' as const, name: 'lookup', strict: false }] };
+    await expect(client({ Authorization: 'Bearer ignored', 'X-Tenant': 'work' }).countResponsesInputTokens(request)).resolves.toBe(42);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://relay.example.test/v1/responses/input_tokens');
+    expect(init?.method).toBe('POST');
+    expect(init?.redirect).toBe('error');
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer secret-key');
+    expect(new Headers(init?.headers).get('x-tenant')).toBe('work');
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+
+  it.each(['null', '{}', '{"input_tokens":-1}', '{"input_tokens":1.5}', '{"input_tokens":"5"}', 'not json'])(
+    'rejects invalid token-count responses without retrying: %s', async (body) => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body));
+      await expect(client().countResponsesInputTokens({ model: 'model', input: 'hello' })).rejects.toThrow('invalid input token count');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+  it('does not retry failed token-count diagnostics', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('unavailable', { status: 503 }));
+    await expect(client().countResponsesInputTokens({ model: 'model', input: 'hello' })).rejects.toThrow('503');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('uses the base path, preserves allowed headers, and protects authentication headers', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
       headers: { 'content-type': 'application/json' },
@@ -96,11 +124,19 @@ describe('RelayClient', () => {
       '',
       'data: {"type":"message_stop"}',
       '',
+      '',
     ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }));
     await expect(client().testClaudeMessages('claude-test', true)).resolves.toMatchObject({
       endpoint: '/messages', stream: true, termination: 'message_stop',
     });
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a Claude terminal event without its terminating blank line', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('data: {"type":"message_stop"}\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    await expect(client().testClaudeMessages('claude-test', true)).rejects.toThrow('terminal event');
   });
 
   it('rejects successful HTML and non-terminal streams as invalid protocol responses', async () => {

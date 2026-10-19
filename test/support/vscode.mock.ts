@@ -135,7 +135,11 @@ export const window = {
   showWarningMessage: async (_message: string): Promise<undefined> => undefined,
   showInputBox: async (_options: unknown): Promise<string | undefined> => undefined,
   showQuickPick: async <T>(_items: readonly T[], _options?: unknown): Promise<T | undefined> => undefined,
-  withProgress: async <T>(_options: unknown, task: () => Promise<T>): Promise<T> => task(),
+  withProgress: async <T>(_options: unknown, task: (progress: { report(value: unknown): void }, token: CancellationTokenSource['token']) => Promise<T>): Promise<T> => {
+    const source = new CancellationTokenSource();
+    try { return await task({ report() {} }, source.token); }
+    finally { source.dispose(); }
+  },
   createOutputChannel: (_name: string) => {
     const lines: string[] = [];
     return { lines, appendLine(value: string) { lines.push(value); }, show(_preserveFocus?: boolean) {}, dispose() {} };

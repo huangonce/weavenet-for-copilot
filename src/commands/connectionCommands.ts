@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import type { ConnectionTestFailure, WeaveNetChatProvider } from '../copilot/provider';
-import { ConnectionTestError } from '../copilot/provider';
+import type { WeaveNetChatProvider } from '../copilot/provider';
+import type { ConnectionTestFailure } from '../copilot/connection';
+import { ConnectionTestError, connectionErrorMessage } from '../copilot/connection';
+import { isCancellationError } from '../copilot/connectionRuntimeManager';
 import type { ConnectionProbeResult } from '../copilot/connectionDiagnostics';
 import type { ApiType, ConnectionProfile } from '../config/config';
 import { getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from '../config/config';
@@ -19,18 +21,16 @@ export function registerConnectionCommands(
   return vscode.Disposable.from(
     vscode.commands.registerCommand('weavenet-copilot.setRelayKey', () => configureActiveRelay(provider)),
     vscode.commands.registerCommand('weavenet-copilot.clearRelayKey', () => clearActiveRelayKey(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.switchProfile', () => setDefaultConnection(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.createProfile', () => addConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.addConnection', () => addConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.editConnection', () => editConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.copyConnection', () => copyConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.deleteConnection', () => deleteConnection(provider)),
     vscode.commands.registerCommand('weavenet-copilot.clearAllConnections', () => clearAllConnections(provider)),
     vscode.commands.registerCommand('weavenet-copilot.testConnection', () => testConnection(provider)),
-    vscode.commands.registerCommand('weavenet-copilot.setDefaultConnection', () => setDefaultConnection(provider)),
+    vscode.commands.registerCommand('weavenet-copilot.compareInputTokens', () => compareInputTokens(provider)),
     vscode.commands.registerCommand('weavenet-copilot.manageConnections', () => manageConnections(provider)),
     vscode.commands.registerCommand('weavenet-copilot.refreshModels', () => provider.refreshModels('invalidate', true)),
-    vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata(provider)),
+    vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata()),
     vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel(provider)),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),
     vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', configurationSection)),
@@ -47,6 +47,7 @@ async function manageConnections(provider: WeaveNetChatProvider): Promise<void> 
     { label: t('$(edit) Edit Connection'), command: 'edit' },
     { label: t('$(copy) Copy Connection'), command: 'copy' },
     { label: t('$(beaker) Test Connection'), command: 'test' },
+    { label: t('$(symbol-number) Compare Input Token Counts'), command: 'tokens' },
     { label: t('$(trash) Delete Connection'), command: 'delete' },
     { label: t('$(clear-all) Clear All Relay Connections'), command: 'clearAll' },
     { label: t('$(cloud-download) Refresh Model Metadata'), command: 'metadata' },
@@ -66,9 +67,10 @@ async function manageConnections(provider: WeaveNetChatProvider): Promise<void> 
     case 'edit': await editConnection(provider); break;
     case 'copy': await copyConnection(provider); break;
     case 'test': await testConnection(provider); break;
+    case 'tokens': await compareInputTokens(provider); break;
     case 'delete': await deleteConnection(provider); break;
     case 'clearAll': await clearAllConnections(provider); break;
-    case 'metadata': await refreshModelMetadata(provider); break;
+    case 'metadata': await refreshModelMetadata(); break;
     case 'vision': await pickVisionProxyModel(provider); break;
   }
 }
@@ -88,34 +90,30 @@ export async function addConnection(provider: WeaveNetChatProvider): Promise<voi
   const profile: ConnectionProfile = { id: randomUUID(), name: name.trim(), baseUrl, apiType };
   const apiKey = await provider.promptForRelayKeyValue(profile.name);
   if (!apiKey) return;
-  await runConnectionMutation(async () => {
+  const created = await runConnectionMutation(async () => {
     const { profiles } = getProfileConfiguration();
     if (profiles.some((entry) => entry.name === profile.name)) {
       void vscode.window.showErrorMessage(t('A connection with this name already exists.'));
-      return;
+      return false;
     }
     let configurationSaved = false;
     try {
       await saveProfiles([...profiles, profile]);
       configurationSaved = true;
-      if (apiKey) await provider.storeRelayKey(profile, apiKey);
+      await provider.storeRelayKey(profile, apiKey);
     } catch (error) {
       if (configurationSaved) await restoreProfiles(profiles);
       await provider.clearRelayKeyForProfile(profile).catch(() => undefined);
       void vscode.window.showErrorMessage(t('WeaveNet could not create “{0}”: {1}', profile.name, errorMessage(error)));
-      return;
+      return false;
     }
-    await provider.refreshModels();
-    void vscode.window.showInformationMessage(t('WeaveNet connection “{0}” created and enabled.', profile.name));
+    return true;
   });
-}
-
-export async function setDefaultConnection(provider: WeaveNetChatProvider): Promise<void> {
-  const action = await vscode.window.showInformationMessage(
-    t('All WeaveNet connections are enabled simultaneously; a default connection is no longer required.'),
-    t('Manage Connections'),
-  );
-  if (action === t('Manage Connections')) await manageConnections(provider);
+  if (!created || !await refreshAfterConnectionMutation(provider)) return;
+  // Other mutations may finish while models are loading. Do not announce a
+  // deleted connection or use an out-of-date name when that refresh completes.
+  const current = getProfileConfiguration().profiles.find((entry) => entry.id === profile.id);
+  if (current) void vscode.window.showInformationMessage(t('WeaveNet connection “{0}” created and enabled.', current.name));
 }
 
 export async function configureActiveRelay(provider: WeaveNetChatProvider): Promise<void> {
@@ -179,27 +177,29 @@ export async function editConnection(provider: WeaveNetChatProvider): Promise<vo
   if (!oldProfile) return;
   const profile = await promptConnectionDraft(oldProfile);
   if (!profile) return;
-  await runConnectionMutation(async () => {
+  const saved = await runConnectionMutation(async () => {
     const { profiles } = getProfileConfiguration();
     const current = profiles.find((entry) => entry.id === oldProfile.id);
     if (!current || !profilesEqual(current, oldProfile)) {
       void vscode.window.showErrorMessage(t('This connection was changed while editing. Please try again.'));
-      return;
+      return false;
     }
     if (profile.name !== oldProfile.name && profiles.some((entry) => entry.name === profile.name)) {
       void vscode.window.showErrorMessage(t('A connection with this name already exists.'));
-      return;
+      return false;
     }
     const updated = profiles.map((entry) => entry.id === oldProfile.id ? profile : entry);
     try {
       await saveProfiles(updated);
     } catch (error) {
       void vscode.window.showErrorMessage(t('WeaveNet could not update “{0}”: {1}', oldProfile.name, errorMessage(error)));
-      return;
+      return false;
     }
-    await clearDiagnosticsBestEffort(provider, oldProfile);
-    await provider.refreshModels();
+    return true;
   });
+  if (!saved) return;
+  await clearDiagnosticsBestEffort(provider, oldProfile);
+  await refreshAfterConnectionMutation(provider);
 }
 
 export async function copyConnection(provider: WeaveNetChatProvider): Promise<void> {
@@ -330,7 +330,37 @@ export async function testConnection(provider: WeaveNetChatProvider): Promise<vo
   }
 }
 
-async function refreshModelMetadata(provider: WeaveNetChatProvider): Promise<void> {
+export async function compareInputTokens(provider: WeaveNetChatProvider): Promise<void> {
+  try {
+    const result = await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: t('WeaveNet: Comparing input token counts'),
+      cancellable: true,
+    }, async (_progress, token) => {
+      const models = await provider.getTokenCountingModels(token);
+      if (!models.length) {
+        void vscode.window.showInformationMessage(t('No Responses model declares token counting support. Enable openai.tokenCounting for a model whose Relay supports it.'));
+        return;
+      }
+      const selection = await vscode.window.showQuickPick(models.map(model => ({ label: model.name, description: model.detail, model })), {
+        placeHolder: t('Select a model for token-count diagnostics'),
+      }, token);
+      if (!selection) return;
+      const text = await vscode.window.showInputBox({
+        prompt: t('Enter sample text. It will be sent to the selected Relay for token counting, without generating a response.'),
+        ignoreFocusOut: true,
+      }, token);
+      if (text === undefined) return;
+      return { name: selection.model.name, ...await provider.compareInputTokenCount(selection.model.id, text, token) };
+    });
+    if (result) void vscode.window.showInformationMessage(t('{0}: local estimate {1}, Relay input count {2}. Estimates are unchanged; this comparison covers the sample text only.',
+      result.name, result.localEstimate, result.serverCount));
+  } catch (error) {
+    if (!isCancellationError(error)) void vscode.window.showErrorMessage(t('Input token comparison failed: {0}', connectionErrorMessage(error)));
+  }
+}
+
+async function refreshModelMetadata(): Promise<void> {
   const config = getConfig();
   if (!config.modelMetadataEnabled) {
     void vscode.window.showInformationMessage(t('Online model metadata is disabled. Enable it in WeaveNet settings to refresh.'));
@@ -342,8 +372,9 @@ async function refreshModelMetadata(provider: WeaveNetChatProvider): Promise<voi
     title: t('WeaveNet: Refreshing model metadata'),
     cancellable: false,
   }, async () => {
-    await (scheduleOpenRouterRefresh(refreshHours * 3_600_000, true) ?? Promise.resolve());
-    await provider.refreshModels('invalidate');
+    // A successful cache update synchronously rebuilds the local model list
+    // through onMetadataChanged. No Relay refresh is needed for this command.
+    await scheduleOpenRouterRefresh(refreshHours * 3_600_000, true);
   });
 }
 
@@ -509,6 +540,16 @@ async function clearDiagnosticsBestEffort(provider: WeaveNetChatProvider, profil
   catch (error) { provider.logMetadata(`Could not clear cached diagnostics for “${profile.name}”: ${errorMessage(error)}`); }
 }
 
+async function refreshAfterConnectionMutation(provider: WeaveNetChatProvider): Promise<boolean> {
+  try {
+    await provider.refreshModels();
+    return true;
+  } catch (error) {
+    void vscode.window.showWarningMessage(t('WeaveNet saved the connection settings, but could not refresh models: {0}', errorMessage(error)));
+    return false;
+  }
+}
+
 async function clearAllDiagnosticsBestEffort(provider: WeaveNetChatProvider): Promise<void> {
   try { await provider.clearAllConnectionDiagnostics(); }
   catch (error) { provider.logMetadata(`Could not clear cached connection diagnostics: ${errorMessage(error)}`); }
@@ -525,14 +566,6 @@ export function formatConnectionFailure(failure: ConnectionTestFailure): string 
 
 export function showInitialConnectionPrompt(context: vscode.ExtensionContext): Promise<void> {
   return showConnectionPrompt(context, 'weavenet-copilot.addConnectionPrompted', t('WeaveNet needs a Relay connection before models can be loaded.'));
-}
-
-export async function showLegacyResetPrompt(): Promise<void> {
-  const action = await vscode.window.showInformationMessage(
-    t('WeaveNet removed the previous connection format and legacy API keys. Add a Relay connection to continue.'),
-    t('Add Relay Connection'),
-  );
-  if (action === t('Add Relay Connection')) await vscode.commands.executeCommand('weavenet-copilot.addConnection');
 }
 
 async function showConnectionPrompt(context: vscode.ExtensionContext, promptKey: string, message: string): Promise<void> {

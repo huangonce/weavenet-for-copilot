@@ -20,6 +20,8 @@ import {
   isWeaveNetSecretKey,
 } from '../../src/copilot/connectionRuntimeManager';
 import { ModelCatalogService } from '../../src/copilot/modelCatalogService';
+import { assembleModelCatalog } from '../../src/copilot/modelRegistry';
+import { catalogArtifactRevision } from '../../src/copilot/catalogIdentity';
 import { ModelSnapshotStore } from '../../src/copilot/modelSnapshotStore';
 import type { ModelSnapshotRecord } from '../../src/copilot/modelSnapshotStore';
 import { currentProfileFingerprint, diagnosticsOptions } from '../../src/copilot/connectionDiagnosticsStore';
@@ -251,6 +253,60 @@ describe('connectionRuntimeManager helpers', () => {
     expect(manager.getRuntime(WORK_ID)).toMatchObject({ models: [liveModel], resolved: true, phase: 'ready' });
   });
 
+  it.each([
+    { configurationChanged: false, completedRefresh: true },
+    { configurationChanged: true, completedRefresh: true },
+    { configurationChanged: true, completedRefresh: false },
+  ])('ignores stale local restoration (configuration changed=$configurationChanged, refreshed=$completedRefresh)', async ({ configurationChanged, completedRefresh }) => {
+    let profiles = [WORK_PROFILE];
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: (key: string) => key === 'modelMetadataEnabled' ? false : undefined,
+      inspect: (key: string) => key === 'profiles' ? { globalValue: profiles } : undefined,
+    } as never);
+    const pepper = 'p'.repeat(43);
+    const oldRevision = catalogArtifactRevision(getConfig(WORK_PROFILE), 'old-key', pepper);
+    const oldModel = routedModel({ id: 'gpt-old', pickerId: 'gpt-old', upstreamId: 'gpt-old' });
+    const liveModel = routedModel({ id: 'gpt-live', pickerId: 'gpt-live', upstreamId: 'gpt-live' });
+    let releaseKey!: (value: string) => void;
+    const getApiKey = vi.fn().mockImplementationOnce(() => new Promise<string>(resolve => { releaseKey = resolve; }))
+      .mockResolvedValue('new-key');
+    let snapshotDeleted = false;
+    const load = vi.fn(async (config: ReturnType<typeof getConfig>) => ({
+      directory: [liveModel], models: assembleModelCatalog(config, [liveModel]),
+    }));
+    const onCatalogChanged = vi.fn();
+    const manager = new ConnectionRuntimeManager({
+      auth: { getApiKey, getCatalogArtifactPepper: async () => pepper } as never,
+      diagnosticsStore: { get: vi.fn() } as never,
+      catalog: {
+        restore: (_profileId: string, revision: string) => !snapshotDeleted && revision === oldRevision
+          ? { schemaVersion: 3, profileId: WORK_ID, catalogRevision: revision, savedAt: Date.now(), directory: [oldModel] }
+          : undefined,
+        assemble: assembleModelCatalog, load,
+        deleteProfile: async () => { snapshotDeleted = true; },
+        persistSnapshot: async () => undefined,
+      } as never,
+      debug: vi.fn(), rebuildBindings: vi.fn(), onStatusChanged: vi.fn(), onCatalogChanged,
+    });
+    const restore = manager.restoreLocalCatalogs();
+    await vi.waitFor(() => expect(releaseKey).toBeDefined());
+    if (configurationChanged) profiles = [{ ...WORK_PROFILE, models: [{ id: 'gpt-new-fixed', apiType: 'chat-completions' }] }];
+    if (completedRefresh) await manager.refreshAll(false);
+    else manager.syncProfiles();
+    const completed = { ...manager.getRuntime(WORK_ID)! };
+    onCatalogChanged.mockClear();
+
+    releaseKey('old-key');
+    await restore;
+    if (completedRefresh) await manager.refreshAll(false);
+
+    expect(manager.getRuntime(WORK_ID)).toEqual(completed);
+    expect(manager.getRuntime(WORK_ID)?.models.map(model => model.id)).toEqual(!completedRefresh ? []
+      : configurationChanged ? ['gpt-live', 'gpt-new-fixed'] : ['gpt-fixed', 'gpt-live']);
+    expect(load).toHaveBeenCalledTimes(completedRefresh ? 1 : 0);
+    expect(onCatalogChanged).not.toHaveBeenCalled();
+  });
+
   it('reports a connection without a persisted catalog instead of faking an empty one', async () => {
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
       get: <T>(_key: string) => undefined as T,
@@ -279,6 +335,67 @@ describe('connectionRuntimeManager helpers', () => {
     await expect(manager.restoreLocalCatalogs()).resolves.toEqual([WORK_ID]);
     expect(load).not.toHaveBeenCalled();
     expect(manager.getRuntime(WORK_ID)).toMatchObject({ models: [], resolved: false });
+  });
+
+  it.each(['ready', 'degraded', 'refreshing'] as const)('updates metadata without changing %s connection health or its refresh task', (phase) => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: () => undefined,
+      inspect: (key: string) => key === 'profiles' ? { globalValue: [WORK_PROFILE] } : undefined,
+    } as never);
+    const assemble = vi.fn((_config: unknown, directory: readonly RoutedModel[]) => directory.map(model => ({ ...model, imageInput: true })));
+    const getApiKey = vi.fn();
+    const load = vi.fn();
+    const persistSnapshot = vi.fn();
+    const rebuildBindings = vi.fn();
+    const onCatalogChanged = vi.fn();
+    const onStatusChanged = vi.fn();
+    const manager = new ConnectionRuntimeManager({
+      auth: { getApiKey } as never, diagnosticsStore: { get: vi.fn() } as never,
+      catalog: { assemble, load, persistSnapshot } as never, debug: vi.fn(),
+      rebuildBindings, onCatalogChanged, onStatusChanged,
+    });
+    const current = manager.syncProfiles()[0];
+    Object.assign(current, { artifactRevision: CATALOG_REVISION, directory: [routedModel()], models: [routedModel()],
+      phase, resolved: phase !== 'refreshing', generation: 7, refreshedAt: 123, message: 'existing status',
+      refreshTask: new Promise<void>(() => undefined) });
+    const before = { ...current };
+    vi.clearAllMocks();
+
+    manager.refreshModelMetadata();
+
+    expect(current.models).toEqual([expect.objectContaining({ imageInput: true })]);
+    expect({ ...current, models: before.models }).toEqual(before);
+    expect(getApiKey).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+    expect(persistSnapshot).not.toHaveBeenCalled();
+    expect(onStatusChanged).not.toHaveBeenCalled();
+    expect(rebuildBindings).toHaveBeenCalledOnce();
+    expect(onCatalogChanged).toHaveBeenCalledOnce();
+  });
+
+  it('does not assemble unverified catalogs or connections with metadata disabled', () => {
+    const values: Record<string, unknown> = {};
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
+      get: (key: string) => values[key],
+      inspect: (key: string) => key === 'profiles' ? { globalValue: [WORK_PROFILE] } : undefined,
+    } as never);
+    const assemble = vi.fn();
+    const onCatalogChanged = vi.fn();
+    const manager = new ConnectionRuntimeManager({
+      auth: {} as never, diagnosticsStore: { get: vi.fn() } as never,
+      catalog: { assemble } as never, debug: vi.fn(), rebuildBindings: vi.fn(), onCatalogChanged, onStatusChanged: vi.fn(),
+    });
+    const current = manager.syncProfiles()[0];
+    onCatalogChanged.mockClear();
+
+    manager.refreshModelMetadata();
+    current.artifactRevision = CATALOG_REVISION;
+    values.modelMetadataEnabled = false;
+    manager.refreshModelMetadata();
+
+    expect(assemble).not.toHaveBeenCalled();
+    expect(onCatalogChanged).not.toHaveBeenCalled();
+    expect(current.models).toEqual([]);
   });
 
   it('computes a stable catalog revision from profile settings', () => {

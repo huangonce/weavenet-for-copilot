@@ -22,6 +22,7 @@ export function normalizeOpenAIRequestCapabilities(value: unknown): OpenAIReques
   const result: OpenAIRequestCapabilities = {
     tokenLimitField,
     promptCacheKey: optionalBoolean(record.promptCacheKey),
+    tokenCounting: optionalBoolean(record.tokenCounting),
     store: optionalBoolean(record.store),
     strictTools: optionalBoolean(record.strictTools),
     parallelToolCalls: optionalBoolean(record.parallelToolCalls),

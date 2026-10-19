@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as vscode from 'vscode';
-import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readWithIdleTimeout, throwIfNotOk } from '../../src/relay/http';
+import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readSseStream, readWithIdleTimeout, throwIfNotOk } from '../../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -24,6 +24,131 @@ function controlledCancellationToken(): { token: vscode.CancellationToken; cance
     },
   };
 }
+
+describe('shared SSE reader', () => {
+  function chunksResponse(value: string, bytewise = false): Response {
+    const bytes = new TextEncoder().encode(value);
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (bytewise) for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        else controller.enqueue(bytes);
+        controller.close();
+      },
+    }));
+  }
+
+  it.each(['\n', '\r\n', '\r'])('folds data fields and decodes UTF-8 with %j line endings across byte boundaries', async (newline) => {
+    const response = chunksResponse([
+      '\uFEFF: heartbeat',
+      'event: message',
+      'id: ignored',
+      'data:  汉🙂',
+      'data: second',
+      'data',
+      '',
+      '',
+    ].join(newline), true);
+    const onEventData = vi.fn(() => false);
+
+    await expect(readSseStream(response, { protocol: 'OpenAI', idleTimeoutMs: 1_000, onEventData })).resolves.toBe(false);
+
+    expect(onEventData).toHaveBeenCalledExactlyOnceWith(' 汉🙂\nsecond\n');
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it('treats split CRLF as one line ending and supports mixed newline styles', async () => {
+    const onEventData = vi.fn(() => false);
+    await readSseStream(chunksResponse('data: first\r\ndata: second\rdata: third\n\r\n', true), {
+      protocol: 'Claude', idleTimeoutMs: 1_000, onEventData,
+    });
+    expect(onEventData).toHaveBeenCalledExactlyOnceWith('first\nsecond\nthird');
+  });
+
+  it.each(['', '\n', '\r', '\r\n'])('discards the pending event at EOF after %j', async (ending) => {
+    const onEventData = vi.fn(() => false);
+    await expect(readSseStream(chunksResponse(`data: incomplete${ending}`, true), {
+      protocol: 'Responses', idleTimeoutMs: 1_000, onEventData,
+    })).resolves.toBe(false);
+    expect(onEventData).not.toHaveBeenCalled();
+  });
+
+  it('dispatches an empty data field but ignores comments and unrelated fields', async () => {
+    const onEventData = vi.fn(() => false);
+    await readSseStream(chunksResponse(': heartbeat\nunknown: ignored\n\ndata\n\n'), {
+      protocol: 'OpenAI', idleTimeoutMs: 1_000, onEventData,
+    });
+    expect(onEventData).toHaveBeenCalledExactlyOnceWith('');
+  });
+
+  it('stops at the protocol terminal event and releases an open reader', async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: terminal\n\ndata: ignored\n\n')); },
+      cancel,
+    }));
+    const onEventData = vi.fn(() => true);
+
+    await expect(readSseStream(response, { protocol: 'Responses', idleTimeoutMs: 1_000, onEventData })).resolves.toBe(true);
+
+    expect(onEventData).toHaveBeenCalledExactlyOnceWith('terminal');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it('bounds a whole event assembled from individually small data lines', async () => {
+    const onEventData = vi.fn(() => false);
+    await expect(readSseStream(chunksResponse('data: aa\ndata: bb\ndata: cc\n\n', true), {
+      protocol: 'Claude', idleTimeoutMs: 1_000, maxEventBytes: 20, onEventData,
+    })).rejects.toThrow('SSE event exceeds 20 bytes');
+    expect(onEventData).not.toHaveBeenCalled();
+  });
+
+  it('counts UTF-8 bytes and bounds an unterminated line', async () => {
+    await expect(readSseStream(chunksResponse('data: 汉汉', true), {
+      protocol: 'OpenAI', idleTimeoutMs: 1_000, maxEventBytes: 11, onEventData: () => false,
+    })).rejects.toThrow('SSE event exceeds 11 bytes');
+  });
+
+  it('resets the event budget between many events in one large network chunk', async () => {
+    const onEventData = vi.fn(() => false);
+    await readSseStream(chunksResponse('data: ok\n\n'.repeat(10_000)), {
+      protocol: 'OpenAI', idleTimeoutMs: 1_000, maxEventBytes: 16, onEventData,
+    });
+    expect(onEventData).toHaveBeenCalledTimes(10_000);
+  });
+
+  it('propagates protocol errors and releases the reader', async () => {
+    const response = chunksResponse('data: invalid\n\n');
+    const failure = new Error('protocol error');
+    await expect(readSseStream(response, {
+      protocol: 'Responses', idleTimeoutMs: 1_000, onEventData: () => { throw failure; },
+    })).rejects.toBe(failure);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it('cancels an idle reader and releases its lock after timeout', async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel }));
+    await expect(readSseStream(response, {
+      protocol: 'Claude', idleTimeoutMs: 5, onEventData: () => false,
+    })).rejects.toMatchObject({ name: 'RelayTimeoutError', phase: 'stream' });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it('honors cancellation while waiting for the next event', async () => {
+    const cancellation = controlledCancellationToken();
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel }));
+    const pending = readSseStream(response, {
+      protocol: 'OpenAI', idleTimeoutMs: 1_000, token: cancellation.token, onEventData: () => false,
+    });
+    cancellation.cancel();
+    await expect(pending).rejects.toMatchObject({ name: 'CancellationError' });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  });
+});
 
 describe('relay HTTP safety', () => {
   it('refuses redirects for authenticated Relay requests', async () => {

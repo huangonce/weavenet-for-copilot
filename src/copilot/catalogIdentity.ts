@@ -3,6 +3,7 @@ import { getConfig } from '../config/config';
 import type { ConnectionProfile, ExtensionConfig } from '../config/config';
 import { canonicalRelayHeaders } from '../relay/headers';
 import { normalizeRelayBaseUrl } from '../relay/url';
+import { stableJsonValue } from '../json';
 
 /**
  * Process-local equality token for catalog-affecting connection settings.
@@ -40,7 +41,7 @@ export function hashCatalogIdentity(config: ExtensionConfig): string {
 }
 
 function canonicalCatalogIdentity(config: ExtensionConfig): string {
-  return JSON.stringify(stableValue({
+  return JSON.stringify(stableJsonValue({
     profileId: config.profileId,
     baseUrl: normalizeRelayBaseUrl(config.baseUrl) ?? config.baseUrl.trim(),
     apiType: config.apiType,
@@ -56,12 +57,4 @@ function canonicalCatalogIdentity(config: ExtensionConfig): string {
 
 function normalizedPatterns(patterns: readonly RegExp[]): string[] {
   return [...new Set(patterns.map((pattern) => pattern.source))].sort();
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, entry]) => [key, stableValue(entry)]));
 }

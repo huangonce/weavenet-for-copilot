@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { CancellationToken } from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
-import { consumeSseChunk, fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, readRelayErrorResponse, readResponseText, readWithIdleTimeout, responseDiagnosticsMetadata } from './http';
+import { fetchWithResponseTimeout, MAX_COMPLETE_RESPONSE_BYTES, MAX_SSE_EVENT_BYTES, readRelayErrorResponse, readResponseText, readSseStream, responseDiagnosticsMetadata } from './http';
 import type { ChatRequest, OpenAIFullResponse, StreamCallbacks, StreamChunk, ToolCall } from './types';
 import { relayEndpointUrl } from './url';
 
@@ -19,9 +19,14 @@ interface OpenAIStreamState {
   sawFinishReason: boolean;
   finishReason?: string;
   toolCalls?: number;
+  pendingToolBytes?: number;
+  pendingArgumentEnds?: Map<number, number>;
 }
 
-const MAX_SSE_EVENT_BYTES = 1024 * 1024;
+// Local Extension Host memory guards, not upstream API limits. The event size
+// guard alone cannot bound a tool assembled from arbitrarily many small deltas.
+const MAX_PENDING_TOOL_BYTES = 4 * 1024 * 1024;
+const MAX_PENDING_TOOL_CALLS = 512;
 
 export async function streamOpenAIChatCompletion(
   options: OpenAIRequestOptions,
@@ -30,7 +35,6 @@ export async function streamOpenAIChatCompletion(
   token?: CancellationToken,
 ): Promise<void> {
   let currentRequest = request;
-  let fallbackUsed = false;
   const clientRequestId = randomUUID();
   let attempt = 0;
   while (true) {
@@ -44,8 +48,7 @@ export async function streamOpenAIChatCompletion(
     );
     if (!response.ok) {
       const failure = await readRelayErrorResponse(response, options.streamIdleTimeoutMs, token);
-      if (!fallbackUsed && currentRequest.stream && isStreamingUnsupported(response.status, response.statusText, failure.body)) {
-        fallbackUsed = true;
+      if (currentRequest.stream && isStreamingUnsupported(response.status, response.statusText, failure.body)) {
         currentRequest = { ...request, stream: false, stream_options: undefined };
         continue;
       }
@@ -67,11 +70,6 @@ export async function streamOpenAIChatCompletion(
       }
       callbacks.onStreamEnd?.('OpenAI', outcome.terminal ? '[DONE]' : 'finish_reason');
       return;
-    }
-    if (!fallbackUsed && !outcome.terminal && !outcome.started && outcome.responseParts === 0) {
-      fallbackUsed = true;
-      currentRequest = { ...request, stream: false, stream_options: undefined };
-      continue;
     }
     throw createIncompleteStreamError(
       'OpenAI',
@@ -127,55 +125,28 @@ export async function processOpenAIStream(
   toolCalls: number;
   terminal: boolean;
 }> {
-  if (!response.body) throw new Error('Relay returned an empty response body.');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
   const pendingToolCalls = new Map<number, ToolCall>();
   const state: OpenAIStreamState = { responseParts: 0, started: false, sawFinishReason: false };
-  let buffer = '';
-  let terminal = false;
-
-  try {
-    while (!terminal) {
-      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-      if (done) break;
-      const consumed = consumeSseChunk(
-        value,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processOpenAISseData(data, pendingToolCalls, callbacks, state),
-        () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    if (!terminal) {
-      const consumed = consumeSseChunk(
-        undefined,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processOpenAISseData(data, pendingToolCalls, callbacks, state),
-        () => createRelayStreamError('OpenAI', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    if (terminal && !state.sawFinishReason) {
-      const flushed = flushToolCalls(pendingToolCalls, callbacks);
-      state.responseParts += flushed;
-      state.toolCalls = (state.toolCalls ?? 0) + flushed;
-    } else if ((terminal || state.sawFinishReason) && pendingToolCalls.size > 0) {
-      throw createRelayStreamError(
-        'OpenAI',
-        `finish_reason=${state.finishReason ?? 'unknown'} was received with unfinished tool calls`,
-      );
-    }
-    return { ...state, toolCalls: state.toolCalls ?? 0, terminal };
-  } finally {
-    await reader.cancel().catch(() => undefined);
+  const terminal = await readSseStream(response, {
+    protocol: 'OpenAI', idleTimeoutMs, token, maxEventBytes,
+    onEventData: (data) => processOpenAISseData(data, pendingToolCalls, callbacks, state),
+  });
+  if (terminal && !state.sawFinishReason) {
+    const flushed = flushToolCalls(pendingToolCalls, callbacks);
+    state.pendingToolBytes = 0;
+    state.pendingArgumentEnds?.clear();
+    state.responseParts += flushed;
+    state.toolCalls = (state.toolCalls ?? 0) + flushed;
+  } else if ((terminal || state.sawFinishReason) && pendingToolCalls.size > 0) {
+    throw createRelayStreamError(
+      'OpenAI',
+      `finish_reason=${state.finishReason ?? 'unknown'} was received with unfinished tool calls`,
+    );
   }
+  return {
+    responseParts: state.responseParts, started: state.started, sawFinishReason: state.sawFinishReason,
+    finishReason: state.finishReason, toolCalls: state.toolCalls ?? 0, terminal,
+  };
 }
 
 export function processOpenAISseLine(
@@ -228,13 +199,15 @@ function processOpenAISseData(
     callbacks.onRefusal?.(delta.refusal);
     state.responseParts++;
   }
-  if (delta?.tool_calls) mergeToolCallDeltas(delta.tool_calls, pendingToolCalls);
+  if (delta?.tool_calls) mergeToolCallDeltas(delta.tool_calls, pendingToolCalls, state);
   if (choice?.finish_reason) {
     state.sawFinishReason = true;
     state.finishReason = choice.finish_reason;
     callbacks.onOpenAIFinishReason?.(choice.finish_reason);
     if (choice.finish_reason === 'tool_calls') {
       const flushed = flushToolCalls(pendingToolCalls, callbacks);
+      state.pendingToolBytes = 0;
+      state.pendingArgumentEnds?.clear();
       state.responseParts += flushed;
       state.toolCalls = (state.toolCalls ?? 0) + flushed;
     }
@@ -279,13 +252,26 @@ export async function processOpenAIFullResponse(
 function mergeToolCallDeltas(
   deltas: NonNullable<NonNullable<StreamChunk['choices']>[number]['delta']>['tool_calls'],
   pendingToolCalls: Map<number, ToolCall>,
+  state: OpenAIStreamState,
 ): void {
+  let pendingBytes = state.pendingToolBytes ?? [...pendingToolCalls.values()].reduce((bytes, call) => bytes + toolCallBytes(call), 0);
+  const argumentEnds = state.pendingArgumentEnds ??= new Map<number, number>();
   for (const delta of deltas ?? []) {
-    const current = pendingToolCalls.get(delta.index) ?? {
+    if (!Number.isSafeInteger(delta.index) || delta.index < 0) {
+      throw createRelayStreamError('OpenAI', 'received an invalid tool call index');
+    }
+    const prior = pendingToolCalls.get(delta.index);
+    if (!prior && pendingToolCalls.size >= MAX_PENDING_TOOL_CALLS) {
+      throw createRelayStreamError('OpenAI', `pending tool calls exceed the local ${MAX_PENDING_TOOL_CALLS}-call buffer limit`);
+    }
+    const current: ToolCall = prior ? { ...prior, function: { ...prior.function } } : {
       id: delta.id ?? `call_${delta.index}`,
       type: 'function' as const,
       function: { name: '', arguments: '' },
     };
+    let argumentEnd = argumentEnds.get(delta.index)
+      ?? (prior ? prior.function.arguments.charCodeAt(prior.function.arguments.length - 1) : NaN);
+    let argumentBytesChange = 0;
     if (delta.id) current.id = delta.id;
     if (delta.function?.name) {
       const nameDelta = delta.function.name;
@@ -297,25 +283,61 @@ function mergeToolCallDeltas(
     }
     const argumentsDelta: unknown = delta.function?.arguments;
     if (typeof argumentsDelta === 'string') {
-      current.function.arguments = mergeToolArgumentDelta(current.function.arguments, argumentsDelta);
+      const merged = mergeToolArgumentDelta(current.function.arguments, argumentsDelta, argumentEnd);
+      current.function.arguments = merged.value;
+      argumentBytesChange = merged.bytesChange;
+      argumentEnd = merged.end;
     } else if (argumentsDelta !== undefined && argumentsDelta !== null) {
       current.function.arguments = JSON.stringify(argumentsDelta);
+      argumentBytesChange = Buffer.byteLength(current.function.arguments, 'utf8')
+        - Buffer.byteLength(prior?.function.arguments ?? '', 'utf8');
+      argumentEnd = current.function.arguments.charCodeAt(current.function.arguments.length - 1);
     }
+    const idBytesChange = current.id === prior?.id ? 0
+      : Buffer.byteLength(current.id, 'utf8') - Buffer.byteLength(prior?.id ?? '', 'utf8');
+    const nameBytesChange = current.function.name === prior?.function.name ? 0
+      : Buffer.byteLength(current.function.name, 'utf8') - Buffer.byteLength(prior?.function.name ?? '', 'utf8');
+    const bytes = pendingBytes + idBytesChange + nameBytesChange + argumentBytesChange;
+    if (bytes > MAX_PENDING_TOOL_BYTES) {
+      throw createRelayStreamError('OpenAI', `pending tool calls exceed the local ${MAX_PENDING_TOOL_BYTES}-byte buffer limit`);
+    }
+    state.pendingToolBytes = pendingBytes = bytes;
+    argumentEnds.set(delta.index, argumentEnd);
     pendingToolCalls.set(delta.index, current);
   }
 }
 
-function mergeToolArgumentDelta(current: string, incoming: string): string {
-  if (!current) return incoming;
-  const currentLooksLikeObject = current.trimStart().startsWith('{');
-  const incomingLooksLikeObject = incoming.trimStart().startsWith('{');
-  if (currentLooksLikeObject && incomingLooksLikeObject && incoming.length > current.length && incoming.startsWith(current)) {
-    return incoming;
+function toolCallBytes(call: ToolCall): number {
+  return Buffer.byteLength(call.id, 'utf8') + Buffer.byteLength(call.function.name, 'utf8')
+    + Buffer.byteLength(call.function.arguments, 'utf8');
+}
+
+function mergeToolArgumentDelta(current: string, incoming: string, previousEnd: number): {
+  value: string; bytesChange: number; end: number;
+} {
+  // Most events are small append-only deltas. Inspect the incoming fragment
+  // first so ordinary appends never scan or flatten the accumulated string.
+  if (current && incoming.trimStart().startsWith('{')) {
+    if (current.trimStart().startsWith('{') && incoming.length > current.length && incoming.startsWith(current)) {
+      return {
+        value: incoming,
+        bytesChange: Buffer.byteLength(incoming, 'utf8') - Buffer.byteLength(current, 'utf8'),
+        end: incoming.charCodeAt(incoming.length - 1),
+      };
+    }
+    if ((incoming === current || current.startsWith(incoming)) && isCompleteJsonObject(current)) {
+      return { value: current, bytesChange: 0, end: previousEnd };
+    }
   }
-  if (incomingLooksLikeObject && (incoming === current || current.startsWith(incoming)) && isCompleteJsonObject(current)) {
-    return current;
-  }
-  return current + incoming;
+  // A JSON string can encode the two halves of a surrogate pair in separate
+  // events. Joined UTF-8 then uses four bytes rather than two replacements (6).
+  const first = incoming.charCodeAt(0);
+  const joinedSurrogate = previousEnd >= 0xd800 && previousEnd <= 0xdbff && first >= 0xdc00 && first <= 0xdfff;
+  return {
+    value: current + incoming,
+    bytesChange: Buffer.byteLength(incoming, 'utf8') - (joinedSurrogate ? 2 : 0),
+    end: incoming.length ? incoming.charCodeAt(incoming.length - 1) : previousEnd,
+  };
 }
 
 function isCompleteJsonObject(value: string): boolean {

@@ -1,9 +1,10 @@
 import type { CancellationToken } from 'vscode';
-import type { ResponseDiagnosticsMetadata } from './types';
-import { createRelayRequestError, RelayRequestError } from './errors';
+import type { RelayProtocol, ResponseDiagnosticsMetadata } from './types';
+import { createRelayRequestError, createRelayStreamError, RelayRequestError } from './errors';
 
 export const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 export const MAX_COMPLETE_RESPONSE_BYTES = 10 * 1024 * 1024;
+export const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 
 export class RelayTimeoutError extends Error {
   constructor(readonly phase: 'response' | 'stream', readonly timeoutMs: number) {
@@ -37,9 +38,13 @@ export interface RelayErrorResponse {
   readonly error: RelayRequestError;
 }
 
-export interface SseChunkResult {
-  readonly buffer: string;
-  readonly stopped: boolean;
+export interface SseReaderOptions {
+  readonly protocol: RelayProtocol;
+  readonly idleTimeoutMs: number;
+  readonly token?: CancellationToken;
+  readonly maxEventBytes?: number;
+  /** Return true only when this protocol has received its terminal event. */
+  readonly onEventData: (data: string) => boolean;
 }
 
 export interface SafeResponseMetadata {
@@ -56,7 +61,7 @@ export function safeResponseMetadata(response: Response): SafeResponseMetadata {
   return {
     status: response.status,
     responseType: safeHeaderValue(response.headers.get('content-type'), MAX_RESPONSE_TYPE_LENGTH) ?? 'unknown',
-    requestId: safeHeaderValue(response.headers.get('x-request-id'), MAX_REQUEST_ID_LENGTH),
+    requestId: responseRequestId(response),
   };
 }
 
@@ -68,7 +73,7 @@ export function responseDiagnosticsMetadata(response: Response): ResponseDiagnos
   const rawProcessingMs = response.headers.get('openai-processing-ms');
   const processing = rawProcessingMs === null ? NaN : Number(rawProcessingMs);
   return {
-    requestId: safe('x-request-id'),
+    requestId: responseRequestId(response),
     clientRequestId: safe('x-client-request-id'),
     processingMs: Number.isFinite(processing) && processing >= 0 ? processing : undefined,
     rateLimitLimitRequests: safe('x-ratelimit-limit-requests'),
@@ -81,6 +86,11 @@ export function responseDiagnosticsMetadata(response: Response): ResponseDiagnos
   };
 }
 
+function responseRequestId(response: Response): string | undefined {
+  return safeHeaderValue(response.headers.get('request-id'), MAX_REQUEST_ID_LENGTH)
+    ?? safeHeaderValue(response.headers.get('x-request-id'), MAX_REQUEST_ID_LENGTH);
+}
+
 function safeHeaderValue(value: string | null, maximumLength: number): string | undefined {
   if (!value) return undefined;
   const printable = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, '').trim();
@@ -88,65 +98,99 @@ function safeHeaderValue(value: string | null, maximumLength: number): string | 
   return printable.length <= maximumLength ? printable : `${printable.slice(0, maximumLength - 3)}...`;
 }
 
-export function consumeSseChunk(
-  value: Uint8Array | undefined,
-  decoder: TextDecoder,
-  initialBuffer: string,
-  maxEventBytes: number,
-  onEventData: (data: string) => boolean,
-  oversizedError: () => Error,
-): SseChunkResult {
-  let buffer = initialBuffer;
-  const consumeDecoded = (decoded: string, flush = false): boolean => {
-    buffer += decoded;
-    let boundary = findSseEventBoundary(buffer);
-    while (boundary) {
-      const event = buffer.slice(0, boundary.index);
-      buffer = buffer.slice(boundary.index + boundary.length);
-      if (Buffer.byteLength(event) > maxEventBytes) throw oversizedError();
-      const data = sseEventData(event);
-      if (data !== undefined && onEventData(data)) return true;
-      boundary = findSseEventBoundary(buffer);
+/**
+ * Shared bounded UTF-8 transport. Protocol handlers retain their own terminal
+ * and error semantics; EOF itself never dispatches an unfinished SSE event.
+ */
+export async function readSseStream(response: Response, options: SseReaderOptions): Promise<boolean> {
+  if (!response.body) throw new Error('Relay returned an empty response body.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new SseDataParser(options);
+  try {
+    while (true) {
+      const { value, done } = await readWithIdleTimeout(reader, options.idleTimeoutMs, options.token);
+      if (done) return parser.consume(decoder.decode());
+      for (let offset = 0; offset < value.byteLength; offset += SSE_DECODE_SLICE_BYTES) {
+        const slice = value.subarray(offset, Math.min(offset + SSE_DECODE_SLICE_BYTES, value.byteLength));
+        if (parser.consume(decoder.decode(slice, { stream: true }))) return true;
+      }
     }
-    if (flush && buffer) {
-      if (Buffer.byteLength(buffer) > maxEventBytes) throw oversizedError();
-      const data = sseEventData(buffer);
-      buffer = '';
-      if (data !== undefined && onEventData(data)) return true;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+/**
+ * WHATWG SSE parsing: CRLF/CR/LF lines, blank-line dispatch and data folding.
+ * https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation
+ */
+class SseDataParser {
+  private line = '';
+  private readonly data: string[] = [];
+  private eventBytes = 0;
+  private skipLineFeed = false;
+  private readonly maxEventBytes: number;
+
+  constructor(private readonly options: SseReaderOptions) {
+    this.maxEventBytes = options.maxEventBytes ?? MAX_SSE_EVENT_BYTES;
+  }
+
+  consume(decoded: string): boolean {
+    let start = 0;
+    for (let index = 0; index < decoded.length; index++) {
+      const code = decoded.charCodeAt(index);
+      if (this.skipLineFeed) {
+        this.skipLineFeed = false;
+        if (code === 10) {
+          if (this.eventBytes > 0) this.reserve(1);
+          start = index + 1;
+          continue;
+        }
+      }
+      if (code !== 10 && code !== 13) continue;
+      this.append(decoded.slice(start, index));
+      this.skipLineFeed = code === 13;
+      start = index + 1;
+      if (this.endLine()) return true;
     }
-    if (Buffer.byteLength(buffer) > maxEventBytes) throw oversizedError();
+    this.append(decoded.slice(start));
     return false;
-  };
-
-  if (!value) {
-    const stopped = consumeDecoded(decoder.decode(), true);
-    return { buffer, stopped };
   }
-  for (let offset = 0; offset < value.byteLength; offset += SSE_DECODE_SLICE_BYTES) {
-    const slice = value.subarray(offset, Math.min(offset + SSE_DECODE_SLICE_BYTES, value.byteLength));
-    if (consumeDecoded(decoder.decode(slice, { stream: true }))) return { buffer, stopped: true };
+
+  private append(value: string): void {
+    this.reserve(Buffer.byteLength(value, 'utf8'));
+    this.line += value;
   }
-  return { buffer, stopped: false };
-}
 
-function findSseEventBoundary(value: string): { index: number; length: number } | undefined {
-  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/u.exec(value);
-  return match?.index === undefined ? undefined : { index: match.index, length: match[0].length };
-}
+  private reserve(bytes: number): void {
+    this.eventBytes += bytes;
+    if (this.eventBytes > this.maxEventBytes) {
+      throw createRelayStreamError(this.options.protocol, `SSE event exceeds ${this.maxEventBytes} bytes`);
+    }
+  }
 
-/** Implements SSE field folding: every data field is joined with a newline. */
-function sseEventData(event: string): string | undefined {
-  const data: string[] = [];
-  for (const line of event.split(/\r\n|\r|\n/u)) {
-    if (!line || line.startsWith(':')) continue;
+  private endLine(): boolean {
+    const line = this.line;
+    this.line = '';
+    if (!line) {
+      const data = this.data.length > 0 ? this.data.join('\n') : undefined;
+      this.data.length = 0;
+      this.eventBytes = 0;
+      return data !== undefined && this.options.onEventData(data);
+    }
+    // Include field/comment line endings in the local event memory budget.
+    this.reserve(1);
+    if (line.startsWith(':')) return false;
     const colon = line.indexOf(':');
     const field = colon < 0 ? line : line.slice(0, colon);
-    if (field !== 'data') continue;
+    if (field !== 'data') return false;
     let value = colon < 0 ? '' : line.slice(colon + 1);
     if (value.startsWith(' ')) value = value.slice(1);
-    data.push(value);
+    this.data.push(value);
+    return false;
   }
-  return data.length > 0 ? data.join('\n') : undefined;
 }
 
 export async function throwIfNotOk(
@@ -179,7 +223,7 @@ export async function readRelayErrorResponse(
       response.statusText,
       response.headers.get('content-type') ?? '',
       body,
-      response.headers.get('x-request-id') ?? undefined,
+      responseRequestId(response),
     ),
   };
 }
@@ -291,7 +335,7 @@ async function fetchJsonOnce<T>(
         response.statusText,
         response.headers.get('content-type') ?? '',
         body,
-        response.headers.get('x-request-id') ?? undefined,
+        responseRequestId(response),
       );
     }
     const metadata = safeResponseMetadata(response);

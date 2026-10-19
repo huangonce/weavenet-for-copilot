@@ -45,26 +45,19 @@ jobs:
             exit 1
           fi
 
-      - name: Lint source
-        run: npm run lint
-
-      - name: Type-check source and tests
-        run: npm run typecheck
-
-      - name: Compile extension
-        run: npm run compile
-
-      - name: Run tests with coverage
-        run: npm run test:coverage
-
-      - name: Run VS Code extension host smoke test
-        run: xvfb-run -a npm run test:integration
-
-      - name: Inspect extension package contents
-        run: npm run package:list
+      - name: Run quality checks
+        run: npm run check
 
       - name: Package extension
         run: npm run package -- --out weavenet-for-copilot.vsix
+
+      - name: Run installed VSIX regression
+        env:
+          VSCODE_TEST_VSIX: ${{ github.workspace }}/weavenet-for-copilot.vsix
+        run: xvfb-run -a node test/integration/run.cjs
+
+      - name: Inspect extension package contents
+        run: npm run package:list
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
@@ -76,6 +69,6 @@ jobs:
       - name: Publish to Visual Studio Marketplace
         # No --skip-duplicate: publishing an already-released version must fail
         # loudly instead of reporting a green build that published nothing.
-        run: npx vsce publish --packagePath weavenet-for-copilot.vsix
+        run: npm run publish:marketplace -- weavenet-for-copilot.vsix
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

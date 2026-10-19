@@ -2,7 +2,7 @@
   "name": "weavenet-for-copilot",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "huangonce",
   "icon": "resources/icon.png",
   "author": "huangonce",
@@ -62,10 +62,6 @@
         "title": "%command.clearRelayKey%"
       },
       {
-        "command": "weavenet-copilot.createProfile",
-        "title": "%command.createProfile%"
-      },
-      {
         "command": "weavenet-copilot.addConnection",
         "title": "%command.addConnection%"
       },
@@ -88,6 +84,10 @@
       {
         "command": "weavenet-copilot.testConnection",
         "title": "%command.testConnection%"
+      },
+      {
+        "command": "weavenet-copilot.compareInputTokens",
+        "title": "%command.compareInputTokens%"
       },
       {
         "command": "weavenet-copilot.manageConnections",
@@ -205,6 +205,10 @@
                         },
                         "promptCacheKey": {
                           "type": "boolean"
+                        },
+                        "tokenCounting": {
+                          "type": "boolean",
+                          "description": "%configuration.modelOpenAI.tokenCounting.description%"
                         },
                         "store": {
                           "type": "boolean"
@@ -350,6 +354,10 @@
                         "forcedToolChoice": {
                           "type": "boolean",
                           "description": "%configuration.modelClaude.forcedToolChoice.description%"
+                        },
+                        "automaticCaching": {
+                          "type": "boolean",
+                          "description": "%configuration.modelClaude.automaticCaching.description%"
                         }
                       }
                     }
@@ -542,10 +550,6 @@
           "when": "false"
         },
         {
-          "command": "weavenet-copilot.createProfile",
-          "when": "false"
-        },
-        {
           "command": "weavenet-copilot.editConnection",
           "when": "false"
         },
@@ -568,6 +572,10 @@
         {
           "command": "weavenet-copilot.pickVisionProxyModel",
           "when": "false"
+        },
+        {
+          "command": "weavenet-copilot.compareInputTokens",
+          "when": "false"
         }
       ]
     }
@@ -580,13 +588,15 @@
     "watch": "npm run clean && tsc -watch -p ./",
     "lint": "eslint src test",
     "lint:fix": "eslint src test --fix",
+    "check": "npm run lint && npm run typecheck && npm run test:coverage",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "npm run compile && node test/integration/run.cjs",
     "test:watch": "vitest",
+    "benchmark": "npm run compile && node --expose-gc scripts/benchmark.cjs",
     "package:list": "vsce ls --no-dependencies",
     "package": "vsce package --no-dependencies",
-    "publish:marketplace": "vsce publish --no-dependencies"
+    "publish:marketplace": "vsce publish --packagePath"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

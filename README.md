@@ -116,6 +116,8 @@ OpenAI 的 `openai.sampling: true` 明确允许采样，false 明确关闭；`sa
 
 采样、强制工具与摘要是独立能力，不会通过模型 ID 名字猜测；模型 `claude`/`openai` 字段是已验证能力声明。既有 UUID、密钥与协议保持不变。新增安全默认可能省略旧版发送的可选字段：需要这些字段时，请明确配置对应能力，而非回到全局盲目发送。
 
+提示词缓存同样使用明确能力。开启 `openaiPromptCaching` 后，模型声明 `openai.promptCacheKey: true` 才自动生成工作区稳定键；填写 `openaiPromptCacheKey` 也表示明确要求发送该键。模型显式 `promptCacheKey: false` 始终优先禁用，不再根据 `gpt-` 名称推断。Claude 模型声明 `claude.automaticCaching: true` 时发送顶层 `cache_control`，同时停止添加块级断点；未声明该能力的 Relay 继续使用现有显式断点。`claudePromptCaching: "disabled"` 关闭两种方式，TTL 仍由 `claudePromptCachingTTL` 选择 `5m` 或 `1h`。
+
 ## 命令与诊断
 
 命令面板保留六个主要入口：
@@ -127,13 +129,17 @@ OpenAI 的 `openai.sampling: true` 明确允许采样，false 明确关闭；`sa
 - `WeaveNet: Open Settings`
 - `WeaveNet: Show Debug Log`
 
-编辑、复制、删除、密钥管理、元数据刷新和视觉模型选择集中在管理菜单；旧命令 ID 暂时保留兼容，常用命令面板不再逐一展示。
+编辑、复制、删除、密钥管理、元数据刷新、视觉模型选择和输入 Token 对比集中在管理菜单。新增连接统一使用 `weavenet-copilot.addConnection`；旧的 `createProfile`、`switchProfile`、`setDefaultConnection` 命令已移除，自定义快捷键或脚本请改用添加连接或管理连接入口。
 
 连接测试只由用户主动触发。测试读取 `/models`，并为实际配置的每种 API 选择一个模型，执行最小流式与非流式请求；不测试未配置的 API。最小请求可能产生少量费用。测试会展示脱敏 Host、端点、HTTP 状态、响应类型和请求 ID；结果是该代表模型的证据，不保证连接中的所有模型和能力都已验证。声明 max_completion_tokens 的 Chat 模型会用对应字段测试；声明不允许输出上限的模型不会执行无界生成测试。
 
+“对比输入 Token 数量”（`weavenet-copilot.compareInputTokens`）仅列出 `apiType: "responses"` 且声明 `openai.tokenCounting: true` 的模型。选择模型并输入样本文本后，扩展对同一条用户消息显示本地估算与 Relay `/responses/input_tokens` 的计数。只发送手动输入的文本，不读取编辑器或会话历史，不生成回复、不自动重试，也不改变现有估算器。日常聊天和宿主 `countTokens` 继续本地计算，不增加网络请求。
+
 某条连接刷新失败时，仅恢复该连接最后一次成功目录并显示降级状态；其他连接继续可用。每条连接保存一份 `directory`，v3 快照最多保留 2000 个 API 模型条目；固定模型、能力覆盖、过滤和可选公开元数据在在线刷新与离线恢复时按同一规则组装，不再额外持久化最终模型列表。目录快照绑定连接配置与凭据，修改 API、模型规则、地址或密钥后不会复用旧身份的快照。取消、超时、截断流和无效工具参数会明确报告，聊天 POST 不会盲目重试。
 
-开启 `debug` 后记录脱敏请求摘要、usage、首输出时延、请求 ID 等。API Key、提示词正文与工具参数正文不写入日志。`cacheRead` 等字段缺失只表示上游没有返回用量，不代表未命中缓存。
+开启 `debug` 后记录脱敏请求摘要、usage、首输出时延、请求 ID 等。每个请求在完成、取消或失败时只结算一次用量摘要，累计计数覆盖前值，不重复相加；缺失字段保留已知值或显示 `n/a`。`cacheRead`、`cacheWrite` 与 Claude 的 5m/1h 写入分开记录；只有未缓存输入、缓存读取和缓存写入都已知时才计算 Claude 输入总量。API Key、提示词正文与工具参数正文不写入日志。字段缺失只表示上游没有返回用量，不代表未命中缓存。
+
+三个协议共用传输诊断；Claude 原生 `request-id` 与 OpenAI 的 `x-request-id` 都会保留。请求体只在传输层序列化，调试摘要复用其字节数。Responses 同一个工具的参数完成与输出项完成事件只计一次工具，不重复解析或累计预算。
 
 运行时界面文案跟随 VS Code 的显示语言：当前内置简体中文（`l10n/bundle.l10n.zh-cn.json`），未翻译的条目自动回退英文。新增语言只需在 `l10n/` 下添加 `bundle.l10n.<locale>.json`；`npm test` 会校验翻译键与代码中的引用一一对应、占位符一致，且没有空值或遗留条目。
 
@@ -144,6 +150,8 @@ OpenAI 的 `openai.sampling: true` 明确允许采样，false 明确关闭；`sa
 `modelMetadataEnabled` 默认开启，使用 OpenRouter 公开目录补充 Relay 缺失的图片、工具、推理能力和参考价格。关闭后既不刷新公开目录，也不使用已缓存的公开元数据，只读取 Relay 和模型声明。`metadataRefreshHours` 控制缓存刷新间隔；管理菜单可手动刷新。
 
 用户配置与 Relay 元数据优先；无法确认的能力保持关闭。参考价格不是 Relay 实际扣费，应以 Relay 的用量日志为准。公开目录也不能证明某条具体 Relay 路由接受相同功能，必要时用模型覆盖关闭能力。
+
+元数据服务返回损坏的响应结构时保留已有缓存；合法的 `data: []` 仍表示空目录。缺失、空值、非法类型和溢出的价格保持未知，只有明确的零价才显示为零。
 
 ### 纯文本模型的视觉代理
 
@@ -222,12 +230,47 @@ DeepSeek thinking 的 Chat 请求携带工具时需要所有历史轮次的完�
 
 ```bash
 npm ci
-npm run lint
-npm run typecheck
-npm run compile
-npm run test:coverage
+npm run check
 npm run test:integration
 npm run package:list
 ```
 
-合并到 main 只运行 CI，CI 会在声明的最低宿主 VS Code 1.116.0 与最新稳定版上分别运行扩展宿主冒烟测试。发布前同步更新扩展与锁文件版本、CHANGELOG，等待检查通过后推送带说明的语义版本标签；Marketplace 发布流水线会校验标签、`package.json` 与 CHANGELOG 版本一致后运行检查并打包，重复版本会明确失败而不是静默跳过。0.8.0 已就绪但尚未发布。
+合并到 main 只运行 CI，CI 会在声明的最低宿主 VS Code 1.116.0 与最新稳定版上分别运行扩展宿主冒烟测试。发布前同步更新扩展与锁文件版本、CHANGELOG，等待检查通过后推送带说明的语义版本标签；Marketplace 发布流水线会校验标签、`package.json` 与 CHANGELOG 版本一致后运行检查并打包，重复版本会明确失败而不是静默跳过。
+
+`npm run check` 执行 lint、源码和测试类型检查、带覆盖率的测试。CI 质量任务通过后只编译、打包一次，两个宿主任务下载并安装同一 VSIX，不再分别编译源码。发布同样检查、打包、安装测试并发布同一个文件。手动发布已经验证的包使用 `npm run publish:marketplace -- <文件路径.vsix>`，不会再次从源码构建。
+
+`npm run test:integration` 同时加载独立测试扩展，通过已注册模型的 `selectChatModels` / `sendRequest` / `countTokens` 验证宿主 RPC，覆盖三协议文本、工具 Schema、思考工作量和协议状态跨轮回放，并检查缓存控制、手动 Token 对比、取消及错误不会重发生成请求。测试只连接本地模拟 Relay，期间关闭在线元数据并在结束时恢复设置；使用隔离的宿主用户目录与扩展安装目录。可通过 `VSCODE_VERSION` 选择版本，或通过 `VSCODE_EXECUTABLE_PATH` 使用已经准备好的测试宿主而跳过下载。对已打包产物执行 `VSCODE_TEST_VSIX=/绝对路径/extension.vsix node test/integration/run.cjs`，可跳过源码编译并测试真实安装文件。2026-10-19 的已安装 VSIX 回归已通过 Linux VS Code 1.116.0 和 1.142.0；真实上游服务和 Windows/macOS 界面不在该自动化测试范围内。
+
+`npm run benchmark` 编译后执行不联网的 CPU 基准，覆盖目录匹配、工具参数、文本计数与多轮 Claude 前缀校验；也可用 `node --expose-gc scripts/benchmark.cjs <out目录>` 测量已保存的构建。夹具生成和输出校验不计入耗时，预热 2 次，取 5 或 7 轮中位数。2026-10-19 在 Node 24.20.0 / Linux x64 / Ryzen 5 5600X 上，使用相同脚本比较目录与工具参数优化前后的结果：
+
+| 场景 | 优化前 | 优化后 |
+| --- | ---: | ---: |
+| 500 模型 × 1000 元数据，完整/裸 ID 混合 | 11.61 ms | 0.36 ms |
+| 2000 模型 × 10000 元数据，裸 ID | 610.54 ms | 3.30 ms |
+| 约 1 MiB ASCII 工具参数，每片 128 UTF-16 单元 | 3348.95 ms | 11.22 ms |
+| 约 1 MiB 中文工具参数，每片 128 UTF-16 单元 | 1186.21 ms | 3.78 ms |
+
+这些是本地处理耗时，不含 Relay 网络或模型生成；不代表整次聊天同倍加速。目录索引仅存活于当前补全批次，工具计量状态仅存活于当前请求，不缓存凭据，也不降低输入和资源限制。基准不设耗时通过门槛。
+
+### 维护与协议边界
+
+以下边界于 2026-10-19 对照官方文档核实，并由测试守护：
+
+- `src/relay/http.ts` 共用一套有界 SSE reader，按 [WHATWG event stream 格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、CRLF/CR/LF、空行派发与多行 data；EOF 不派发缺少最终空行的事件。三种协议共享解码、超时、取消和 reader 释放。
+- [OpenAI Responses](https://developers.openai.com/api/docs/guides/streaming-responses) 的语义事件与 [Claude Messages](https://platform.claude.com/docs/en/build-with-claude/streaming) 的 content block/message_stop 流程分别保留在协议适配器；工具发布仍须经过对应协议的完整性验证。
+- Chat 与 Responses 共用 function tool 定义转换，但保留各自嵌套/平铺格式。按 [OpenAI strict mode 文档](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)，Responses 省略 strict 会尝试规范化 schema；因此未启用严格模式或 schema 不能安全严格化时明确发送 strict: false，以保留可选参数语义。兼容的显式严格配置发送 true；Chat 非严格模式继续省略该字段。
+- 严格转换遵循 [OpenAI 支持的 Schema 子集](https://developers.openai.com/api/docs/guides/structured-outputs#some-type-specific-keywords-are-not-yet-supported)。`allOf` 等不支持或无法安全转换的组合不强行封闭或展开对象，而是沿用现有非严格模式并保留约束；业务键和字面量不按 Schema 关键字判定。
+- Schema 清理仅遍历真正的子 Schema；按照 [JSON Schema 对象规范](https://json-schema.org/understanding-json-schema/reference/object)，保留 `properties`、`$defs` 等映射中的业务名称及 `enum`、`const`、`default`、`examples` 字面量，不把名为 `errorMessage` 或 `$schema` 的业务数据误删。
+- 按 [OpenAI Token 计数](https://developers.openai.com/api/docs/guides/token-counting) 提供主动样本诊断；按 [Claude 缓存文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) 为明确支持的路由选择顶层自动缓存，避免与显式断点叠加。流式用量依据官方累计语义汇总，缺省不记为零。
+- `src/copilot/responseLifecycle.ts` 统一流式输出和诊断的完成、取消、异常收尾；请求构造、推理回放和工具原子发布保留在各适配器。[VS Code Provider 文档](https://code.visualstudio.com/api/extension-guides/ai/language-model-chat-provider) 定义 progress 输出及 silent 不提示用户的约定；缓存优先枚举、只等待缺目录连接和共享并发上限 3 是扩展自身的性能策略。
+- 一次模型枚举按连接准备展示上下文；公开元数据变更仅重新组装已验证目录，不改连接健康状态，也不重复请求 Relay。请求专用配置在下次请求时读取，展示、能力和视觉配置分别更新对应状态。新增、编辑的写事务只等待持久化与必要回滚，网络刷新在事务外完成。
+- 聊天与 Token 诊断复用连接一致性校验：异步密钥读取或视觉准备期间配置/凭据变更时终止过期请求，不自动重发。目录恢复复用在线刷新的版本守卫，晚到结果不能覆盖已完成的新目录。外部视觉目录复核使用可取消等待，取消当前聊天不终止其他请求共享的复核。
+- Claude 前缀验证在一次请求内只遍历消息一次，使用 [Node Hash.copy](https://nodejs.org/api/crypto.html#hashcopyoptions) 取得各历史前缀的摘要。已有指纹的 JSON 字节格式、缓存标记剥离范围及业务字段语义不变；不增加跨请求提示词缓存或旧格式分支。
+- `src/json.ts` 仅复用已规范化数据的稳定键排序，保留原 localeCompare、数组顺序和 undefined 行为，以兼容现有目录 HMAC 与旧版迁移。它不替代 canonical 请求校验；历史配置规范化、Claude 前缀指纹、诊断脱敏身份和视觉缓存身份仍按各自语义处理。
+- 未完成 Chat 工具调用最多累计 4 MiB UTF-8 数据、512 个调用；索引只需是非负安全整数，可以不连续。这些是扩展的本地资源上限，不是官方 API 限额。空的成功流直接报告错误，不再次生成；只有明确的“不支持流式”错误允许一次非流式降级。
+
+新增、编辑和刷新不增加确认步骤；删除连接及密钥保留一次确认。输入校验、跨连接身份校验、工具批次完整性、取消/超时和持久化回滚仍负责各自实际边界。兼容处理限于已有配置迁移、明确选择的旧网关格式和已知宿主能力差异，不根据模糊失败猜测协议或追加生成请求。
+
+运行时宿主选项只使用当前公开的 `modelOptions`，不再读取 `modelConfiguration` / `configuration` 别名；旧默认连接入口、重复函数包装和无调用的辅助函数已移除。最早期全局连接格式不再在启动时自动重置或删除，其值不参与当前连接读取；清空连接命令仍保留遗留密钥清理。已有连接/密钥/目录的升级迁移与旧会话读取仍用于保留用户数据；全局能力设置和显式 `legacy-relay` 仍有实际行为，不能视为无调用代码。
+
+本项目保留针对多 Relay 的直接 API 适配。这是基于现有兼容性与资源约束的工程选择。官方 [OpenAI TypeScript SDK](https://developers.openai.com/api/reference/typescript) 和 [Anthropic TypeScript SDK](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript) 均提供流式和取消能力，也默认重试部分失败请求；将来采用 SDK 时需显式配置重试、超时和日志，并继续保留本项目的字节边界与错误脱敏。不能通过 [Anthropic 的 OpenAI 兼容层](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) 统一三种协议，因为该兼容层不支持 Claude prompt caching 和原生 thinking 输出。

@@ -4,14 +4,11 @@ import { isClaudeEffort } from '../relay/claudeCapabilities';
 import { isReasoningEffort } from '../relay/openaiCapabilities';
 import type { ClaudeEffort, ClaudeThinking, ReasoningEffort, RoutedModel } from '../relay/types';
 
-export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions & {
-  readonly modelConfiguration?: Record<string, unknown>;
-  readonly configuration?: Record<string, unknown>;
-};
+export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions;
 
 export function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
   if (!model?.thinking) return undefined;
-  const value = options.modelOptions?.reasoningEffort ?? options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort;
+  const value = options.modelOptions?.reasoningEffort;
   if (model.apiType === 'messages' && model.claude?.thinkingMode === 'adaptive') {
     const efforts: readonly ClaudeEffort[] = model.claude.reasoningEfforts ?? ['low', 'medium', 'high', 'max'];
     if (isClaudeEffort(value) && efforts.includes(value)) return value;
@@ -73,16 +70,6 @@ export function estimateTextTokens(value: string): number {
     else other++;
   }
   return Math.max(1, cjk + Math.ceil(other / 4));
-}
-
-export function reportThinking(
-  progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-  text: string,
-  id?: string,
-  metadata?: Record<string, unknown>,
-): void {
-  const part = createThinkingPart(text, id, metadata);
-  if (part) progress.report(part);
 }
 
 type ThinkingPartConstructor = new (

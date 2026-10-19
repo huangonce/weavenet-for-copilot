@@ -16,6 +16,25 @@ function callbacks() {
   } satisfies StreamCallbacks;
 }
 
+function toolBudgetHarness() {
+  const cb = callbacks();
+  const state: Parameters<typeof processOpenAISseLine>[3] = { responseParts: 0, started: false, sawFinishReason: false };
+  const pending = new Map<number, ToolCall>();
+  return {
+    cb, state, pending,
+    delta: (value: unknown) => processOpenAISseLine(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [value] } }] })}`, pending, cb, state),
+    finish: () => processOpenAISseLine('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}', pending, cb, state),
+    expectExactBytes: () => {
+      const actual = [...pending.values()].reduce((sum, call) => sum + Buffer.byteLength(call.id, 'utf8')
+        + Buffer.byteLength(call.function.name, 'utf8') + Buffer.byteLength(call.function.arguments, 'utf8'), 0);
+      expect(state.pendingToolBytes).toBe(actual);
+      for (const [index, call] of pending) {
+        expect(state.pendingArgumentEnds?.get(index)).toBe(call.function.arguments.charCodeAt(call.function.arguments.length - 1));
+      }
+    },
+  };
+}
+
 function completedStreamResponse(headers?: HeadersInit): Response {
   const responseHeaders = new Headers(headers);
   responseHeaders.set('content-type', 'text/event-stream');
@@ -24,7 +43,7 @@ function completedStreamResponse(headers?: HeadersInit): Response {
     '',
     'data: [DONE]',
     '',
-  ].join('\n'), { headers: responseHeaders });
+  ].join('\n') + '\n', { headers: responseHeaders });
 }
 
 describe('OpenAI response parsing', () => {
@@ -144,6 +163,102 @@ describe('OpenAI response parsing', () => {
     }));
   });
 
+  it('keeps incremental tool byte accounting equal to the complete UTF-8 payload after every update', () => {
+    const harness = toolBudgetHarness();
+    const events = [
+      { index: 7, function: { name: 'read_', arguments: '{"path":"\ud83d' } },
+      { index: 3, id: 'long_call_identifier', function: { name: 'alpha', arguments: '{"n":"a longer value"}' } },
+      { index: 7, id: 'call_😀', function: { name: 'file', arguments: '' } },
+      { index: 7, function: { name: 'read_file', arguments: '\ude00' } },
+      { index: 7, function: { arguments: '"}' } },
+      { index: 7, function: { arguments: '{"path":"😀"}' } },
+      { index: 7, function: { arguments: '{"path":' } },
+      { index: 3, id: 's', function: { name: 'alpha_long', arguments: { n: 1 } } },
+      { index: 3, function: { name: 'al', arguments: '' } },
+      { index: 7, function: { arguments: {} } },
+      { index: 7, function: { arguments: '\udc00' } },
+      { index: 7, function: { arguments: { path: 'done' } } },
+      { index: 11, id: 'snapshot', function: { name: 'echo', arguments: '{"emoji":"\ud83d' } },
+      { index: 11, function: { arguments: '{"emoji":"😀"}' } },
+    ];
+    for (const event of events) {
+      harness.delta(event);
+      harness.expectExactBytes();
+    }
+    expect(harness.pending.get(3)).toMatchObject({ id: 's', function: { name: 'alpha_long', arguments: '{"n":1}' } });
+    expect(harness.pending.get(7)?.function.arguments).toBe('{"path":"done"}');
+    expect(harness.pending.get(11)?.function.arguments).toBe('{"emoji":"😀"}');
+    expect(harness.cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('clears byte and argument-tail state before a flushed tool index is reused', () => {
+    const harness = toolBudgetHarness();
+    harness.delta({ index: 0, id: 'old', function: { name: 'echo', arguments: '{"x":"😀"}' } });
+    harness.finish();
+    expect(harness.pending.size).toBe(0);
+    expect(harness.state.pendingToolBytes).toBe(0);
+    expect(harness.state.pendingArgumentEnds?.size).toBe(0);
+
+    for (const argumentsDelta of ['{"x":"\ud83d', '', '\ude00', '"}']) {
+      harness.delta({ index: 0, id: 'new', function: { name: 'echo', arguments: argumentsDelta } });
+      harness.expectExactBytes();
+    }
+    harness.finish();
+    expect(harness.cb.onToolCall.mock.calls.map(([call]) => call.id)).toEqual(['old', 'new']);
+    expect(harness.pending.size).toBe(0);
+    expect(harness.state.pendingToolBytes).toBe(0);
+    expect(harness.state.pendingArgumentEnds?.size).toBe(0);
+  });
+
+  it('accepts exactly 4 MiB across split surrogate deltas and rejects the next byte without changing pending state', () => {
+    const harness = toolBudgetHarness();
+    const limit = 4 * 1024 * 1024;
+    harness.delta({ index: 0, id: 'i', function: { name: 'f', arguments: '{"x":"' } });
+    // Two ASCII identity bytes + eight JSON framing bytes + four emoji bytes.
+    let remaining = limit - 14;
+    while (remaining > 0) {
+      const size = Math.min(remaining, 512 * 1024);
+      harness.delta({ index: 0, function: { arguments: 'a'.repeat(size) } });
+      remaining -= size;
+    }
+    harness.delta({ index: 0, function: { arguments: '\ud83d' } });
+    expect(harness.state.pendingToolBytes).toBe(limit - 3);
+    harness.delta({ index: 0, function: { arguments: '' } });
+    expect(harness.state.pendingToolBytes).toBe(limit - 3);
+    harness.delta({ index: 0, function: { arguments: '\ude00' } });
+    expect(harness.state.pendingToolBytes).toBe(limit - 2);
+    harness.delta({ index: 0, function: { arguments: '"}' } });
+    harness.expectExactBytes();
+    expect(harness.state.pendingToolBytes).toBe(limit);
+
+    const accepted = harness.pending.get(0);
+    expect(() => harness.delta({ index: 0, function: { arguments: ' ' } })).toThrow('local 4194304-byte buffer limit');
+    expect(() => harness.delta({ index: 0, id: 'changed', function: { arguments: ' ' } })).toThrow('local 4194304-byte buffer limit');
+    expect(harness.pending.get(0)).toBe(accepted);
+    harness.expectExactBytes();
+    expect(harness.cb.onToolCall).not.toHaveBeenCalled();
+    harness.finish();
+    expect(harness.cb.onToolCall).toHaveBeenCalledOnce();
+    expect(harness.state.pendingToolBytes).toBe(0);
+    expect(harness.state.pendingArgumentEnds?.size).toBe(0);
+  });
+
+  it('replaces a long sequence of small argument deltas with its complete snapshot only once', () => {
+    const harness = toolBudgetHarness();
+    harness.delta({ index: 0, id: 'call', function: { name: 'echo', arguments: '{"value":"' } });
+    for (let index = 0; index < 256; index++) harness.delta({ index: 0, function: { arguments: '字😀' } });
+    const snapshot = JSON.stringify({ value: '字😀'.repeat(256) });
+    harness.delta({ index: 0, function: { arguments: snapshot } });
+    harness.expectExactBytes();
+    const completeBytes = harness.state.pendingToolBytes;
+    harness.delta({ index: 0, function: { arguments: snapshot } });
+    harness.delta({ index: 0, function: { arguments: '{"value":' } });
+    harness.expectExactBytes();
+    expect(harness.state.pendingToolBytes).toBe(completeBytes);
+    harness.finish();
+    expect(harness.cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({ function: { name: 'echo', arguments: snapshot } }));
+  });
+
   it('combines truly fragmented tool names without duplicating full snapshots', () => {
     const cb = callbacks();
     const state = { responseParts: 0, started: false, sawFinishReason: false };
@@ -192,7 +307,7 @@ describe('OpenAI response parsing', () => {
       '',
       'data: [DONE]',
       '',
-    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } }));
+    ].join('\n') + '\n', { headers: { 'content-type': 'text/event-stream' } }));
 
     await expect(streamOpenAIChatCompletion({
       baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
@@ -200,7 +315,7 @@ describe('OpenAI response parsing', () => {
     expect(cb.onContent).toHaveBeenCalledWith('partial');
   });
 
-  it('parses a standard SSE event with metadata and multiple data fields', async () => {
+  it.each(['\n', '\r\n', '\r'])('parses folded SSE data using %j line endings', async (newline) => {
     const cb = callbacks();
     const response = new Response([
       'event: message',
@@ -210,7 +325,7 @@ describe('OpenAI response parsing', () => {
       '',
       'data: [DONE]',
       '',
-    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } });
+    ].join(newline) + newline, { headers: { 'content-type': 'text/event-stream' } });
 
     await expect(processOpenAIStream(response, cb, 1_000)).resolves.toMatchObject({
       terminal: true,
@@ -250,7 +365,7 @@ describe('OpenAI response parsing', () => {
       '',
       'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
       '',
-    ].join('\n'), { headers: { 'content-type': 'text/event-stream' } });
+    ].join('\n') + '\n', { headers: { 'content-type': 'text/event-stream' } });
 
     await expect(processOpenAIStream(response, cb, 1_000)).rejects.toThrow('invalid tool call arguments');
     expect(cb.onToolCall).not.toHaveBeenCalled();
@@ -278,6 +393,7 @@ describe('OpenAI response parsing', () => {
         ? { value: chunks[readIndex++], done: false }
         : { value: undefined, done: true }),
       cancel,
+      releaseLock: vi.fn(),
     } as unknown as ReadableStreamDefaultReader<Uint8Array>;
     const response = { body: { getReader: () => reader } } as unknown as Response;
     const cb = callbacks();
@@ -299,10 +415,78 @@ describe('OpenAI response parsing', () => {
     const reader = {
       read: vi.fn().mockResolvedValueOnce({ value: new TextEncoder().encode('data: 123456'), done: false }),
       cancel,
+      releaseLock: vi.fn(),
     } as unknown as ReadableStreamDefaultReader<Uint8Array>;
     const response = { body: { getReader: () => reader } } as unknown as Response;
     await expect(processOpenAIStream(response, callbacks(), 1_000, undefined, 8)).rejects.toThrow('exceeds 8 bytes');
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('bounds tool buffers accumulated across small events before any finish signal', async () => {
+    const cb = callbacks();
+    const cancel = vi.fn();
+    let fragments = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // Each event stays below 1 MiB; the aggregate of both pending calls
+        // must be rejected before an untrusted relay supplies a finish event.
+        const index = fragments++ % 2;
+        const event = { choices: [{ delta: { tool_calls: [{
+          index, id: `call_${index}`, function: { name: 'write_file', arguments: '汉'.repeat(170_000) },
+        }] } }] };
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+      },
+      cancel,
+    }));
+
+    await expect(processOpenAIStream(response, cb, 1_000)).rejects.toThrow('local 4194304-byte buffer limit');
+
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])('rejects an invalid tool index: %s', async (index) => {
+    const cb = callbacks();
+    const event = { choices: [{ delta: { tool_calls: [{ index, id: 'call', function: { name: 'test', arguments: '{}' } }] } }] };
+    const response = new Response(`data: ${JSON.stringify(event)}\n\n`);
+    await expect(processOpenAIStream(response, cb, 1_000)).rejects.toThrow('invalid tool call index');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('accepts sparse tool indices above the local call-count limit', async () => {
+    const cb = callbacks();
+    const calls = [4096, 512].map(index => ({ index, id: `call_${index}`, function: { name: 'test', arguments: '{}' } }));
+    const event = { choices: [{ delta: { tool_calls: calls }, finish_reason: 'tool_calls' }] };
+    await processOpenAIStream(new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`), cb, 1_000);
+    expect(cb.onToolCall.mock.calls.map(([call]) => call.id)).toEqual(['call_512', 'call_4096']);
+  });
+
+  it('bounds the number of pending calls while allowing updates at the limit', () => {
+    const cb = callbacks();
+    const state = { responseParts: 0, started: false, sawFinishReason: false };
+    const pending = new Map<number, ToolCall>();
+    const line = (index: number) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [
+      { index, id: `call_${index}`, function: { name: 'test' } },
+    ] } }] })}`;
+    for (let index = 0; index < 512; index++) processOpenAISseLine(line(index * 2), pending, cb, state);
+    expect(() => processOpenAISseLine(line(1022), pending, cb, state)).not.toThrow();
+    expect(pending.size).toBe(512);
+    expect(() => processOpenAISseLine(line(1024), pending, cb, state)).toThrow('local 512-call buffer limit');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it.each(['', ': heartbeat\n\n', 'data: {"choices":[{"delta":{"content":"unfinished"}}]}'])('does not retry a successful but empty or unframed stream: %j', async (body) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    const cb = callbacks();
+    await expect(streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, cb)).rejects.toThrow('terminal event');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(cb.onContent).not.toHaveBeenCalled();
+    expect(cb.onToolCall).not.toHaveBeenCalled();
   });
 
   it('falls back once to a non-streaming request when the relay rejects streaming', async () => {
@@ -322,6 +506,16 @@ describe('OpenAI response parsing', () => {
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('accept')).toBe('text/event-stream');
     expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('accept')).toBe('application/json');
     expect(cb.onContent).toHaveBeenCalledWith('fallback');
+  });
+
+  it('does not repeat the explicit streaming fallback when the second request also fails', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('streaming is not supported', { status: 422 }));
+    await expect(streamOpenAIChatCompletion({
+      baseUrl: 'https://relay.example.test/v1', headers: {}, requestTimeoutMs: 100, streamIdleTimeoutMs: 100,
+    }, { model: 'gpt-test', messages: [], stream: true }, callbacks())).rejects.toThrow('422');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).stream)).toEqual([true, false]);
   });
 
   it('reports safe successful-response diagnostics metadata', async () => {

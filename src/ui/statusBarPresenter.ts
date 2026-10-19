@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ConnectionStatus } from '../copilot/provider';
+import type { ConnectionStatus } from '../copilot/connectionRuntimeManager';
 import type { WeaveNetChatProvider } from '../copilot/provider';
 import { t } from '../l10n';
 

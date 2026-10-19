@@ -6,32 +6,34 @@ import {
   clearAllConnections,
   configureActiveRelay,
   copyConnection,
+  compareInputTokens,
   deleteConnection,
   editConnection,
   formatConnectionFailure,
   pickVisionProxyModel,
   registerConnectionCommands,
-  setDefaultConnection,
   testConnection,
   validateProfileName,
 } from '../src/commands/connectionCommands';
-import { errorMessage, queueConnectionMutation, saveProfiles } from '../src/config/connectionMutations';
+import { errorMessage, queueConnectionMutation, runConnectionMutation, saveProfiles } from '../src/config/connectionMutations';
 import { createStatusBarItem, renderStatus } from '../src/ui/statusBarPresenter';
 import type { ConnectionProfile } from '../src/config/config';
-import type { ConnectionStatus, WeaveNetChatProvider } from '../src/copilot/provider';
+import type { WeaveNetChatProvider } from '../src/copilot/provider';
+import type { ConnectionStatus } from '../src/copilot/connectionRuntimeManager';
+import * as openrouterFallback from '../src/metadata/openrouterFallback';
 
 const WORK_ID = '11111111-1111-4111-8111-111111111111';
 const PERSONAL_ID = '22222222-2222-4222-8222-222222222222';
 const WORK_PROFILE: ConnectionProfile = { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1', apiType: 'chat-completions' };
 const PERSONAL_PROFILE: ConnectionProfile = { id: PERSONAL_ID, name: 'Personal', baseUrl: 'https://personal.example.test/v1', apiType: 'chat-completions' };
 
-function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFILE]) {
+function configurationFixture(initialProfiles: ConnectionProfile[] = [WORK_PROFILE], settings: Record<string, unknown> = {}) {
   let profiles = initialProfiles;
   const update = vi.fn(async (key: string, value: unknown) => {
     if (key === 'profiles') profiles = (value ?? []) as ConnectionProfile[];
   });
   vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({
-    get: <T>() => undefined as T | undefined,
+    get: <T>(key: string) => settings[key] as T | undefined,
     inspect: <T>(key: string) => key === 'profiles' ? { globalValue: profiles as T } : undefined,
     update,
   } as never);
@@ -67,6 +69,8 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     logMetadata: vi.fn(),
     refreshModels: vi.fn().mockResolvedValue(undefined),
     refreshConnection: vi.fn().mockResolvedValue(undefined),
+    getTokenCountingModels: vi.fn().mockResolvedValue([{ id: 'model', name: 'Sample model', detail: 'Relay' }]),
+    compareInputTokenCount: vi.fn().mockResolvedValue({ localEstimate: 7, serverCount: 9 }),
     isSafeVisionProxyCandidate: vi.fn().mockReturnValue(true),
     ...overrides,
   };
@@ -78,6 +82,49 @@ function pickProfile(profile: ConnectionProfile): void {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('manual input token comparison', () => {
+  it('sends only the user-entered sample to the selected eligible model and reports both counts', async () => {
+    configurationFixture();
+    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('sample text');
+    const message = vi.spyOn(vscode.window, 'showInformationMessage');
+    const provider = providerFixture();
+    await compareInputTokens(provider);
+    expect(provider.compareInputTokenCount).toHaveBeenCalledWith('model', 'sample text', expect.any(Object));
+    expect(message).toHaveBeenCalledWith(expect.stringContaining('local estimate 7, Relay input count 9'));
+    expect(provider.refreshModels).not.toHaveBeenCalled();
+  });
+
+  it('does not prompt for text or send a diagnostic without a declared capable model', async () => {
+    configurationFixture();
+    const input = vi.spyOn(vscode.window, 'showInputBox');
+    const provider = providerFixture({ getTokenCountingModels: vi.fn().mockResolvedValue([]) });
+    await compareInputTokens(provider);
+    expect(input).not.toHaveBeenCalled();
+    expect(provider.compareInputTokenCount).not.toHaveBeenCalled();
+  });
+
+  it('does not send a count request when the sample entry is cancelled', async () => {
+    configurationFixture();
+    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue(undefined);
+    const provider = providerFixture();
+    await compareInputTokens(provider);
+    expect(provider.compareInputTokenCount).not.toHaveBeenCalled();
+  });
+
+  it('keeps cancellation quiet and reports failures without retrying', async () => {
+    configurationFixture();
+    vi.spyOn(vscode.window, 'showInputBox').mockResolvedValue('sample');
+    const error = vi.spyOn(vscode.window, 'showErrorMessage');
+    const comparison = vi.fn().mockRejectedValueOnce(new vscode.CancellationError()).mockRejectedValueOnce(new Error('offline'));
+    const provider = providerFixture({ compareInputTokenCount: comparison });
+    await compareInputTokens(provider);
+    expect(error).not.toHaveBeenCalled();
+    await compareInputTokens(provider);
+    expect(comparison).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledOnce();
+  });
+});
 
 describe('connection mutation queue', () => {
   it('runs queued mutations strictly in order and continues after failures', async () => {
@@ -191,6 +238,79 @@ describe('connection mutation queue', () => {
     expect(showError).toHaveBeenCalledWith(expect.stringContaining('secret failure'));
   });
 
+  it.each([
+    ['creation', addConnection],
+    ['editing', editConnection],
+  ] as const)('releases the mutation queue after %s while still awaiting its model refresh', async (_name, operation) => {
+    const config = configurationFixture([WORK_PROFILE]);
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const provider = providerFixture({ refreshModels: vi.fn(() => { started.resolve(); return release.promise; }) });
+    pickProfile(WORK_PROFILE);
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Personal')
+      .mockResolvedValueOnce('https://personal.example.test/v1')
+      .mockResolvedValueOnce('{}')
+      .mockResolvedValueOnce('[]');
+    let completed = false;
+    const command = operation(provider).then(() => { completed = true; });
+    await started.promise;
+    const nextMutation = runConnectionMutation(() => saveProfiles([...config.profiles, { ...PERSONAL_PROFILE, name: 'Queued' }]));
+    try {
+      await vi.waitFor(() => expect(config.profiles.some((profile) => profile.name === 'Queued')).toBe(true));
+      expect(completed).toBe(false);
+    } finally {
+      release.resolve();
+      await Promise.all([command, nextMutation]);
+    }
+    expect(completed).toBe(true);
+  });
+
+  it.each([
+    ['creation', addConnection],
+    ['editing', editConnection],
+  ] as const)('keeps saved %s changes and reports only the refresh failure', async (_name, operation) => {
+    const config = configurationFixture([WORK_PROFILE]);
+    const provider = providerFixture({ refreshModels: vi.fn().mockRejectedValue(new Error('catalog offline')) });
+    pickProfile(WORK_PROFILE);
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Personal')
+      .mockResolvedValueOnce('https://personal.example.test/v1')
+      .mockResolvedValueOnce('{}')
+      .mockResolvedValueOnce('[]');
+    const warning = vi.spyOn(vscode.window, 'showWarningMessage');
+    const error = vi.spyOn(vscode.window, 'showErrorMessage');
+
+    await expect(operation(provider)).resolves.toBeUndefined();
+
+    expect(config.profiles.some((profile) => profile.name === 'Personal')).toBe(true);
+    expect(config.update).toHaveBeenCalledOnce();
+    expect(provider.clearRelayKeyForProfile).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledExactlyOnceWith('WeaveNet saved the connection settings, but could not refresh models: catalog offline');
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('does not announce a created connection after it was deleted during its refresh', async () => {
+    const config = configurationFixture([]);
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const provider = providerFixture({ refreshModels: vi.fn(() => { started.resolve(); return release.promise; }) });
+    vi.spyOn(vscode.window, 'showInputBox')
+      .mockResolvedValueOnce('Personal')
+      .mockResolvedValueOnce('https://personal.example.test/v1');
+    const info = vi.spyOn(vscode.window, 'showInformationMessage');
+    const command = addConnection(provider);
+    await started.promise;
+    const deletion = runConnectionMutation(() => saveProfiles([]));
+    try {
+      await vi.waitFor(() => expect(config.profiles).toEqual([]));
+    } finally {
+      release.resolve();
+      await Promise.all([command, deletion]);
+    }
+    expect(info).not.toHaveBeenCalled();
+  });
+
   it('deletes a connection and always deletes its UUID-scoped key', async () => {
     const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
     const provider = providerFixture();
@@ -236,21 +356,6 @@ describe('connection mutation queue', () => {
     expect(provider.clearAllRelayKeys).toHaveBeenCalledWith([WORK_PROFILE, PERSONAL_PROFILE]);
     expect(provider.clearAllConnectionDiagnostics).toHaveBeenCalledOnce();
     expect(provider.refreshModels).toHaveBeenCalledOnce();
-  });
-
-  it('keeps legacy default commands compatible without changing routing state', async () => {
-    const config = configurationFixture([WORK_PROFILE, PERSONAL_PROFILE]);
-    const provider = providerFixture();
-    const info = vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue(undefined);
-
-    await setDefaultConnection(provider);
-
-    expect(info).toHaveBeenCalledWith(
-      'All WeaveNet connections are enabled simultaneously; a default connection is no longer required.',
-      'Manage Connections',
-    );
-    expect(config.update).not.toHaveBeenCalled();
-    expect(provider.refreshModels).not.toHaveBeenCalled();
   });
 
   it('edits a connection while preserving its UUID and key identity', async () => {
@@ -485,6 +590,59 @@ describe('pick vision proxy model', () => {
 });
 
 describe('command registration', () => {
+  function metadataCommand(provider: WeaveNetChatProvider): () => Promise<void> {
+    let command: (() => Promise<void>) | undefined;
+    vi.spyOn(vscode.commands, 'registerCommand').mockImplementation((id, handler) => {
+      if (id === 'weavenet-copilot.refreshModelMetadata') command = handler;
+      return new vscode.Disposable(() => undefined);
+    });
+    registerConnectionCommands({ subscriptions: [] } as never, provider);
+    return command!;
+  }
+
+  it('awaits the manual metadata refresh without refreshing Relay connections', async () => {
+    configurationFixture([WORK_PROFILE], { metadataRefreshHours: 3 });
+    const pending = Promise.withResolvers<void>();
+    const refresh = vi.spyOn(openrouterFallback, 'scheduleOpenRouterRefresh').mockReturnValue(pending.promise);
+    const provider = providerFixture();
+    let completed = false;
+    const command = metadataCommand(provider)().then(() => { completed = true; });
+    try {
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(3 * 3_600_000, true);
+      await Promise.resolve();
+      expect(completed).toBe(false);
+    } finally {
+      pending.resolve();
+      await command;
+    }
+    expect(provider.refreshModels).not.toHaveBeenCalled();
+    expect(provider.refreshConnection).not.toHaveBeenCalled();
+  });
+
+  it('does not issue a fallback Relay refresh when metadata refresh has no work', async () => {
+    configurationFixture([WORK_PROFILE]);
+    vi.spyOn(openrouterFallback, 'scheduleOpenRouterRefresh').mockReturnValue(undefined);
+    const provider = providerFixture();
+
+    await metadataCommand(provider)();
+
+    expect(provider.refreshModels).not.toHaveBeenCalled();
+    expect(provider.refreshConnection).not.toHaveBeenCalled();
+  });
+
+  it('respects disabled online metadata without prompting or contacting a provider', async () => {
+    configurationFixture([WORK_PROFILE], { modelMetadataEnabled: false });
+    const refresh = vi.spyOn(openrouterFallback, 'scheduleOpenRouterRefresh');
+    const provider = providerFixture();
+    const warning = vi.spyOn(vscode.window, 'showWarningMessage');
+
+    await metadataCommand(provider)();
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(provider.refreshModels).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+  });
+
   it('registers every connection management command against the shared provider', () => {
     const registered: string[] = [];
     const register = vi.spyOn(vscode.commands, 'registerCommand').mockImplementation((_id: string, _handler: unknown) => {
@@ -495,19 +653,17 @@ describe('command registration', () => {
 
     const disposable = registerConnectionCommands({ subscriptions: [] } as never, provider);
 
-    expect(register).toHaveBeenCalledTimes(17);
+    expect(register).toHaveBeenCalledTimes(15);
     expect(registered).toEqual([
       'weavenet-copilot.setRelayKey',
       'weavenet-copilot.clearRelayKey',
-      'weavenet-copilot.switchProfile',
-      'weavenet-copilot.createProfile',
       'weavenet-copilot.addConnection',
       'weavenet-copilot.editConnection',
       'weavenet-copilot.copyConnection',
       'weavenet-copilot.deleteConnection',
       'weavenet-copilot.clearAllConnections',
       'weavenet-copilot.testConnection',
-      'weavenet-copilot.setDefaultConnection',
+      'weavenet-copilot.compareInputTokens',
       'weavenet-copilot.manageConnections',
       'weavenet-copilot.refreshModels',
       'weavenet-copilot.refreshModelMetadata',

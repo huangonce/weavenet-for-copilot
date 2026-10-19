@@ -1,19 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { ResponsesReplayCollector } from './responsesReplay';
+import { MAX_PROTOCOL_REPLAY_ITEMS } from './replayState';
+import { stableJsonValue } from '../json';
 import type { CancellationToken } from 'vscode';
 import { createIncompleteStreamError, createRelayStreamError } from './errors';
 import {
-  consumeSseChunk,
   fetchWithResponseTimeout,
   MAX_COMPLETE_RESPONSE_BYTES,
+  MAX_SSE_EVENT_BYTES,
   readRelayErrorResponse,
   readResponseText,
-  readWithIdleTimeout,
+  readSseStream,
   responseDiagnosticsMetadata,
 } from './http';
 import type {
   OpenAIUsage,
   ResponsesFullResponse,
+  ResponsesOutputItemFunctionCall,
   ResponsesRequest,
   ResponsesStreamEvent,
   StreamCallbacks,
@@ -29,15 +32,21 @@ export interface OpenAIResponsesRequestOptions {
   readonly sendClientRequestId?: boolean;
 }
 
+interface ResponsesFunctionState {
+  itemId?: string;
+  callId?: string;
+  name?: string;
+  argumentsDone?: boolean;
+}
+
 interface ResponsesStreamState {
   parts: number;
   started: boolean;
   replay?: ResponsesReplayCollector;
+  functions?: Map<number, ResponsesFunctionState>;
   /** Which terminal event closed the stream: normal completion or truncation. */
   termination?: 'completed' | 'incomplete';
 }
-
-const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 
 export async function streamOpenAIResponses(
   options: OpenAIResponsesRequestOptions,
@@ -110,44 +119,13 @@ export async function processResponsesStream(
   token?: CancellationToken,
   maxEventBytes = MAX_SSE_EVENT_BYTES,
 ): Promise<{ parts: number; started: boolean; terminal: boolean; termination?: 'completed' | 'incomplete' }> {
-  if (!response.body) throw new Error('Relay returned an empty response body.');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
   const pendingFunctionCalls = new Map<number, ToolCall>();
   const state: ResponsesStreamState = { parts: 0, started: false };
-  let buffer = '';
-  let terminal = false;
-  try {
-    while (!terminal) {
-      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-      if (done) break;
-      const consumed = consumeSseChunk(
-        value,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processResponsesSseData(data, pendingFunctionCalls, callbacks, state),
-        () => createRelayStreamError('Responses', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    if (!terminal) {
-      const consumed = consumeSseChunk(
-        undefined,
-        decoder,
-        buffer,
-        maxEventBytes,
-        (data) => processResponsesSseData(data, pendingFunctionCalls, callbacks, state),
-        () => createRelayStreamError('Responses', `SSE event exceeds ${maxEventBytes} bytes`),
-      );
-      buffer = consumed.buffer;
-      terminal = consumed.stopped;
-    }
-    return { parts: state.parts, started: state.started, termination: state.termination, terminal };
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
+  const terminal = await readSseStream(response, {
+    protocol: 'Responses', idleTimeoutMs, token, maxEventBytes,
+    onEventData: (data) => processResponsesSseData(data, pendingFunctionCalls, callbacks, state),
+  });
+  return { parts: state.parts, started: state.started, termination: state.termination, terminal };
 }
 
 export function processResponsesSseLine(
@@ -204,16 +182,22 @@ function processResponsesSseData(
     case 'response.output_item.added': {
       if (event.item?.type === 'function_call') {
         const index = event.output_index ?? 0;
-        pendingFunctionCalls.set(index, {
-          id: event.item.call_id ?? event.item.id ?? `call_${index}`,
-          type: 'function',
-          function: { name: event.item.name ?? '', arguments: '' },
-        });
+        const identity = rememberFunctionIdentity(state, index, event.item.id, event.item.call_id, event.item.name);
+        const prior = pendingFunctionCalls.get(index);
+        if (identity.argumentsDone && prior && event.item.arguments) assertMatchingFunctionArguments(prior.function.arguments, event.item.arguments);
+        const call = functionCallFromItem(event.item, index, prior);
+        if (prior) call.function.arguments = prior.function.arguments;
+        pendingFunctionCalls.set(index, call);
       }
       return false;
     }
     case 'response.function_call_arguments.delta': {
       const index = event.output_index ?? 0;
+      const identity = rememberFunctionIdentity(state, index, event.item_id);
+      if (identity.argumentsDone) {
+        if (event.delta) throw createRelayStreamError('Responses', 'received function arguments after the call completed');
+        return false;
+      }
       const current = pendingFunctionCalls.get(index) ?? {
         id: `call_${index}`,
         type: 'function' as const,
@@ -225,24 +209,23 @@ function processResponsesSseData(
     }
     case 'response.function_call_arguments.done': {
       const index = event.output_index ?? 0;
-      const current = pendingFunctionCalls.get(index);
-      if (current) {
-        if (event.arguments !== undefined) current.function.arguments = event.arguments;
-        state.parts += flushFunctionCall(index, pendingFunctionCalls, callbacks);
+      const identity = rememberFunctionIdentity(state, index, event.item_id);
+      const current = pendingFunctionCalls.get(index) ?? {
+        id: identity.callId ?? identity.itemId ?? `call_${index}`, type: 'function' as const,
+        function: { name: identity.name ?? '', arguments: '' },
+      };
+      if (event.arguments !== undefined) {
+        if (identity.argumentsDone) assertMatchingFunctionArguments(current.function.arguments, event.arguments);
+        current.function.arguments = event.arguments;
       }
+      identity.argumentsDone = true;
+      pendingFunctionCalls.set(index, current);
       return false;
     }
     case 'response.output_item.done': {
       if (event.item?.type === 'function_call') {
         const index = event.output_index ?? 0;
-        const current = pendingFunctionCalls.get(index);
-        if (current) {
-          if (event.item.arguments) current.function.arguments = event.item.arguments;
-          state.parts += flushFunctionCall(index, pendingFunctionCalls, callbacks);
-        } else if (event.item.call_id && event.item.name) {
-          callbacks.onToolCall({ id: event.item.call_id, type: 'function', function: { name: event.item.name, arguments: event.item.arguments } });
-          state.parts++;
-        }
+        completeFunctionItem(state, index, event.item, pendingFunctionCalls);
       } else if (event.item?.type === 'reasoning') {
         // Carries the server-side `id` and, with `include: ["reasoning.encrypted_content"]`,
         // the encrypted payload that a stateless replay must send back verbatim.
@@ -256,13 +239,26 @@ function processResponsesSseData(
       // hit max_output_tokens). The partially generated output is still valid,
       // so it is reported as a terminal event rather than an error; the
       // termination value distinguishes truncation from normal completion.
+      if (event.type === 'response.completed') {
+        // A terminal snapshot can fill omitted item events, but cannot rewrite
+        // an identity or argument value already finalized by an earlier event.
+        for (const [index, item] of (event.response?.output ?? []).entries()) {
+          if (item.type === 'function_call') {
+            completeFunctionItem(state, index, item, pendingFunctionCalls);
+          } else if (state.functions?.get(index)?.argumentsDone) {
+            throw createRelayStreamError('Responses', 'a completed function call changed output type');
+          }
+        }
+      }
       if (event.response?.usage) {
         const usage = toOpenAIUsage(event.response.usage);
         if (usage) callbacks.onOpenAIUsage?.(usage);
       }
       if (state.replay) callbacks.onResponsesOutputItems?.(state.replay.finish(event.response?.output));
       state.termination = event.type === 'response.incomplete' ? 'incomplete' : 'completed';
-      state.parts += flushFunctionCalls(pendingFunctionCalls, callbacks);
+      // Even item/argument "done" events can contain truncated JSON when the
+      // response ends incomplete. Only a completed response releases calls.
+      if (state.termination === 'completed') state.parts += flushFunctionCalls(pendingFunctionCalls, callbacks);
       return true;
     case 'response.failed':
       throw createRelayStreamError('Responses', event.response?.error ?? 'response failed');
@@ -307,7 +303,7 @@ export async function processResponsesFullResponse(
           parts++;
         }
       }
-    } else if (item.type === 'function_call') {
+    } else if (item.type === 'function_call' && payload.status !== 'incomplete') {
       callbacks.onToolCall({
         id: item.call_id ?? item.id ?? 'call',
         type: 'function',
@@ -359,6 +355,54 @@ function flushFunctionCalls(pending: Map<number, ToolCall>, callbacks: StreamCal
   return count;
 }
 
+function rememberFunctionIdentity(
+  state: ResponsesStreamState, index: number, itemId?: string, callId?: string, name?: string,
+): ResponsesFunctionState {
+  const identities = state.functions ??= new Map();
+  if (!identities.has(index) && identities.size >= MAX_PROTOCOL_REPLAY_ITEMS) {
+    throw createRelayStreamError('Responses', 'received too many function calls');
+  }
+  const identity = identities.get(index) ?? {};
+  const incoming = { itemId, callId, name };
+  for (const key of ['itemId', 'callId', 'name'] as const) {
+    const value = incoming[key];
+    if (!value) continue;
+    if (identity[key] && identity[key] !== value) {
+      throw createRelayStreamError('Responses', 'received inconsistent function call identity');
+    }
+    identity[key] = value;
+  }
+  identities.set(index, identity);
+  return identity;
+}
+
+function functionCallFromItem(item: ResponsesOutputItemFunctionCall, index: number, prior?: ToolCall): ToolCall {
+  return { id: item.call_id ?? prior?.id ?? item.id ?? `call_${index}`, type: 'function',
+    function: { name: item.name ?? prior?.function.name ?? '', arguments: item.arguments ?? prior?.function.arguments ?? '' } };
+}
+
+function completeFunctionItem(
+  state: ResponsesStreamState, index: number, item: ResponsesOutputItemFunctionCall, pending: Map<number, ToolCall>,
+): void {
+  const identity = rememberFunctionIdentity(state, index, item.id, item.call_id, item.name);
+  const prior = pending.get(index);
+  const call = functionCallFromItem(item, index, prior);
+  if (identity.argumentsDone && prior) assertMatchingFunctionArguments(prior.function.arguments, call.function.arguments);
+  identity.argumentsDone = true;
+  pending.set(index, call);
+}
+
+function assertMatchingFunctionArguments(expected: string, actual: string): void {
+  if (expected === actual) return;
+  // Relays may reformat the final JSON. Compare values only on this uncommon
+  // path; the standard identical snapshots need no extra parsing or cloning.
+  try {
+    if (JSON.stringify(stableJsonValue(JSON.parse(expected.trim() || '{}')))
+      === JSON.stringify(stableJsonValue(JSON.parse(actual.trim() || '{}')))) return;
+  } catch { /* Report the protocol disagreement without exposing arguments. */ }
+  throw createRelayStreamError('Responses', 'received inconsistent function call arguments');
+}
+
 function parseResponsesEvent(value: string): ResponsesStreamEvent {
   try {
     return JSON.parse(value) as ResponsesStreamEvent;
@@ -372,12 +416,16 @@ function toOpenAIUsage(usage: ResponsesFullResponse['usage'] | ResponsesStreamEv
   const inputTokens = usage.input_tokens;
   const outputTokens = usage.output_tokens;
   const cachedTokens = usage.input_tokens_details?.cached_tokens;
+  const cacheWriteTokens = usage.input_tokens_details?.cache_write_tokens;
   const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
   return {
     prompt_tokens: inputTokens,
     completion_tokens: outputTokens,
     total_tokens: usage.total_tokens,
-    prompt_tokens_details: cachedTokens === undefined ? undefined : { cached_tokens: cachedTokens },
+    prompt_tokens_details: cachedTokens === undefined && cacheWriteTokens === undefined ? undefined : {
+      ...(cachedTokens === undefined ? {} : { cached_tokens: cachedTokens }),
+      ...(cacheWriteTokens === undefined ? {} : { cache_write_tokens: cacheWriteTokens }),
+    },
     completion_tokens_details: reasoningTokens === undefined ? undefined : { reasoning_tokens: reasoningTokens },
   };
 }

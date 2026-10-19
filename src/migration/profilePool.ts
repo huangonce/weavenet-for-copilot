@@ -14,6 +14,7 @@ import { MAX_SNAPSHOT_MODELS } from '../copilot/modelSnapshotStore';
 import { catalogArtifactRevision } from '../copilot/catalogIdentity';
 import { assignUniquePickerIds, toRoutedModel } from '../relay/models';
 import { readLegacyCatalogSnapshot } from './catalogUpgrade';
+import { stableJsonValue } from '../json';
 
 interface LegacyCatalog {
   models: RoutedModel[];
@@ -126,7 +127,7 @@ async function legacyCatalog(context: vscode.ExtensionContext, entry: Record<str
     try { return typeof item === 'string' && item.trim() ? [new RegExp(item.trim()).source] : []; } catch { return []; }
   }))].sort() : [];
   const oldModels = legacyConfiguredModels(entry.models);
-  const oldIdentity = stable({ profileId: profile.id, baseUrl: normalizeRelayBaseUrl(entry.baseUrl as string) ?? entry.baseUrl,
+  const oldIdentity = stableJsonValue({ profileId: profile.id, baseUrl: normalizeRelayBaseUrl(entry.baseUrl as string) ?? entry.baseUrl,
     openaiApiStrategy: strategy, requestHeaders: legacyRequestHeaders(entry.requestHeaders),
     includeModels: patterns(entry.includeModels), excludeModels: patterns(entry.excludeModels), models: oldModels });
   const revision = createHmac('sha256', pepper).update('credential\0').update(apiKey).update('\0catalog\0').update(JSON.stringify(oldIdentity)).digest('hex');
@@ -214,9 +215,5 @@ function legacyOpenAICapabilities(value: unknown): Record<string, unknown> | und
     if (typeof value[key] === 'boolean') result[key] = value[key];
   }
   return Object.values(result).some(item => item !== undefined) ? result : undefined;
-}
-function stable(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stable);
-  return record(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
 }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }

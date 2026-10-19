@@ -14,6 +14,7 @@ export function normalizeClaudeRequestCapabilities(value: unknown): ClaudeReques
     && (!reasoningEfforts?.length || reasoningEfforts.includes(record.defaultReasoningEffort)) ? record.defaultReasoningEffort : undefined;
   const sampling = typeof record.sampling === 'boolean' ? record.sampling : undefined;
   const forcedToolChoice = typeof record.forcedToolChoice === 'boolean' ? record.forcedToolChoice : undefined;
-  return thinkingMode || reasoningEfforts?.length || defaultReasoningEffort || sampling !== undefined || forcedToolChoice !== undefined
-    ? { thinkingMode, reasoningEfforts, defaultReasoningEffort, sampling, forcedToolChoice } : undefined;
+  const automaticCaching = typeof record.automaticCaching === 'boolean' ? record.automaticCaching : undefined;
+  return thinkingMode || reasoningEfforts?.length || defaultReasoningEffort || sampling !== undefined || forcedToolChoice !== undefined || automaticCaching !== undefined
+    ? { thinkingMode, reasoningEfforts, defaultReasoningEffort, sampling, forcedToolChoice, automaticCaching } : undefined;
 }

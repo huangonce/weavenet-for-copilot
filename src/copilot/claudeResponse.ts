@@ -2,23 +2,21 @@ import * as vscode from 'vscode';
 import type { ExtensionConfig } from '../config/config';
 import { RelayClient } from '../relay/client';
 import { supportsImageInputForRoutedModel, supportsToolCallingForModel } from '../relay/models';
-import type { ClaudeRequest, ClaudeUsage, RoutedModel } from '../relay/types';
+import type { ClaudeRequest, RoutedModel } from '../relay/types';
 import { convertClaudeMessages, convertClaudeTools } from './convert';
 import { claudePrefix, validateClaudePrefixes } from './claudePrefix';
-import { toLanguageModelError } from './connection';
 import {
   clampClaudeTemperature,
   getConfiguredReasoningEffort,
   parseToolArguments,
   toClaudeThinking,
 } from './helpers';
-import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 import { cloneReplayState, ReplayBudget } from '../relay/replayState';
 import { hasProtocolReplayCarrier, prepareProtocolTools, reconcileProtocolText, reportProtocolReplay, warnProtocolReplayUnavailable } from './protocolState';
 import type { ClaudeContentBlock, ToolCall } from '../relay/types';
-import { ResponsePartEmitter } from './responsePartEmitter';
+import { runResponseLifecycle } from './responseLifecycle';
 
 export interface ClaudeResponseContext {
   readonly config: ExtensionConfig;
@@ -34,13 +32,16 @@ export interface ClaudeResponseContext {
 }
 
 export async function provideClaudeResponse(context: ClaudeResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, token, apiKey, debug } = context;
   // Without the host carrier no signed thinking block can survive a turn, so
   // native thinking is disabled for the request instead of failing it.
   const replayAvailable = hasProtocolReplayCarrier();
   if (!replayAvailable) warnProtocolReplayUnavailable('Claude');
+  const caching = config.claudePromptCaching !== 'disabled';
+  const automaticCaching = caching && routedModel.claude?.automaticCaching === true;
+  const explicitCaching = caching && !automaticCaching;
   const tools = supportsToolCallingForModel(routedModel, config)
-    ? convertClaudeTools(options.tools, config.claudePromptCaching !== 'disabled', config.claudePromptCachingTTL)
+    ? convertClaudeTools(options.tools, explicitCaching, config.claudePromptCachingTTL)
     : undefined;
   const required = !!tools?.length && options.toolMode === vscode.LanguageModelChatToolMode.Required;
   const manual = (routedModel.claude?.thinkingMode ?? 'manual') === 'manual';
@@ -60,15 +61,20 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   );
   const converted = convertClaudeMessages(messages, {
     supportsImageInput: supportsImageInputForRoutedModel(routedModel, config),
-    promptCaching: config.claudePromptCaching !== 'disabled', cacheTTL: config.claudePromptCachingTTL,
+    promptCaching: explicitCaching, cacheTTL: config.claudePromptCachingTTL,
     protocolIdentity: context.protocolIdentity, requiresThinkingState: !!thinking,
   });
   const request: ClaudeRequest = {
     model: routedModel.upstreamId,
     max_tokens: model.maxOutputTokens ?? config.maxOutputTokens,
     messages: converted.messages,
-    system: converted.system,
+    // Keep one system block shape in every cache mode so enabling, disabling or
+    // moving cache controls does not change the signed conversation prefix hash.
+    system: typeof converted.system === 'string'
+      ? [{ type: 'text', text: converted.system }] : converted.system,
     stream: true,
+    ...(automaticCaching ? { cache_control: { type: 'ephemeral' as const,
+      ...(config.claudePromptCachingTTL === '1h' ? { ttl: '1h' as const } : {}) } } : {}),
     temperature: !thinking && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? clampClaudeTemperature(config.temperature) : undefined,
     top_p: !thinking && config.temperature === undefined && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? config.topP : undefined,
     ...(tools?.length ? {
@@ -83,8 +89,6 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   validateClaudePrefixes(messages, request, context.protocolIdentity);
   const signedPrefix = claudePrefix(request);
   logClaudeRequest(debug, config, request);
-  const diagnostics = createRequestDiagnostics(debug, config, 'Claude', model.id, request.messages.length, request.tools?.length ?? 0);
-  const output = new ResponsePartEmitter(progress);
   const replayBudget = new ReplayBudget();
   let replyText = '';
   let hasThinking = false;
@@ -101,7 +105,7 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
 
-  try {
+  await runResponseLifecycle(context, 'Claude', request.messages.length, request.tools?.length ?? 0, async (output, diagnostics) => {
     await client.streamClaudeMessages(request, {
       onContent: (text) => {
         diagnostics.onContent();
@@ -115,7 +119,9 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
       },
       onClaudeStopReason: (reason) => { stopReason = reason; },
       onClaudeAssistantContent: (blocks) => { replyContent = cloneReplayState(blocks); },
-      onClaudeUsage: (usage, responseId) => logClaudeUsage(debug, config, usage, responseId),
+      onClaudeUsage: diagnostics.onClaudeUsage,
+      onRequest: diagnostics.onRequest,
+      onRequestSettled: diagnostics.onRequestSettled,
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onToolCall: (toolCall) => {
@@ -139,46 +145,18 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     const parts = prepareProtocolTools(calls);
     if (replayAvailable) reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'messages', displayText: replyText, claude: savedBlocks, claudePrefix: signedPrefix });
     for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
-    output.flush();
-    diagnostics.complete();
-  } catch (error) {
-    if (token.isCancellationRequested) {
-      output.discard();
-      diagnostics.cancelled();
-      throw new vscode.CancellationError();
-    }
-    try { output.flush(); } catch { /* Preserve the stream failure. */ }
-    diagnostics.failed(error);
-    throw toLanguageModelError(error);
-  }
+  });
 }
 
 function logClaudeRequest(debug: DebugLogger, config: ExtensionConfig, request: ClaudeRequest): void {
   if (!config.debug) return;
+  const cacheMode = request.cache_control ? 'automatic' : config.claudePromptCaching === 'disabled' ? 'disabled' : 'explicit';
   const systemChars = typeof request.system === 'string'
     ? request.system.length
     : request.system?.reduce((total, block) => total + block.text.length, 0) ?? 0;
   debug(
     config,
-    `Claude Messages request: model=${request.model}, cacheMode=${config.claudePromptCaching}, `
-      + `messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, systemChars=${systemChars}, `
-      + `bodyBytes=${Buffer.byteLength(JSON.stringify(request))}`,
-  );
-}
-
-function logClaudeUsage(
-  debug: DebugLogger,
-  config: ExtensionConfig,
-  usage: ClaudeUsage,
-  responseId?: string,
-): void {
-  const value = (tokenCount: number | undefined): string => tokenCount === undefined ? 'n/a' : String(tokenCount);
-  const fields = Object.keys(usage).sort().join(',') || 'none';
-  debug(
-    config,
-    `Claude Messages usage${responseId ? ` (${responseId})` : ''}: `
-      + `input=${value(usage.input_tokens)}, cacheRead=${value(usage.cache_read_input_tokens)}, `
-      + `cacheWrite=${value(usage.cache_creation_input_tokens)}, output=${value(usage.output_tokens)}, `
-      + `usageFields=${fields}`,
+    `Claude Messages request: model=${request.model}, cacheMode=${cacheMode}, `
+      + `messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, systemChars=${systemChars}`,
   );
 }

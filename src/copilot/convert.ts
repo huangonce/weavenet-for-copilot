@@ -33,9 +33,6 @@ const CLAUDE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'ima
 const OPENAI_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 /** Thinking models reject empty reasoning_text, so tool calls without recoverable thinking need a stand-in. */
 const REASONING_PLACEHOLDER = '(reasoning omitted)';
-/** Namespaced so the shared thinking-part metadata bag cannot collide with other providers. */
-export const RESPONSES_REASONING_METADATA_KEY = 'weavenetResponsesReasoning';
-
 /**
  * Rebuilds the original reasoning item from a replayed thinking part. The
  * encrypted payload is opaque and is only ever passed back verbatim, which is
@@ -155,19 +152,18 @@ export function convertTools(
     return undefined;
   }
 
-  return tools.map((tool) => {
-    const parameters = sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} };
-    const strictParameters = enableStrict ? toStrictJsonSchema(parameters) : undefined;
-    return {
-      type: 'function',
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: strictParameters ?? parameters,
-        ...(strictParameters ? { strict: true as const } : {}),
-      },
-    };
-  });
+  return tools.map((tool) => ({ type: 'function', function: convertFunctionTool(tool, enableStrict) }));
+}
+
+function convertFunctionTool(tool: vscode.LanguageModelChatTool, enableStrict: boolean): ToolDefinition['function'] {
+  const parameters = sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} };
+  const strictParameters = enableStrict ? toStrictJsonSchema(parameters) : undefined;
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: strictParameters ?? parameters,
+    ...(strictParameters ? { strict: true as const } : {}),
+  };
 }
 
 /**
@@ -350,15 +346,10 @@ export function convertResponsesTools(
   }
 
   return tools.map((tool) => {
-    const parameters = sanitizeJsonSchema(tool.inputSchema) ?? { type: 'object', properties: {} };
-    const strictParameters = enableStrict ? toStrictJsonSchema(parameters) : undefined;
-    return {
-      type: 'function',
-      name: tool.name,
-      description: tool.description,
-      parameters: strictParameters ?? parameters,
-      ...(strictParameters ? { strict: true as const } : {}),
-    };
+    const definition = convertFunctionTool(tool, enableStrict);
+    // Responses may normalize an omitted strict flag into strict mode. Explicitly
+    // opt out when disabled or unsafe so optional parameters stay optional.
+    return { type: 'function', ...definition, strict: definition.strict ?? false };
   });
 }
 

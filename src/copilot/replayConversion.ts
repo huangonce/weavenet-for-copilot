@@ -6,13 +6,7 @@ import type { ApiType } from '../config/config';
 import type { ProtocolReplayState } from '../relay/replayState';
 import { parseToolArguments } from './helpers';
 import { replayDisplayText } from '../relay/replayState';
-
-function stable(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stable);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, entry]) => [key, stable(entry)]));
-}
+import { stableJsonValue } from '../json';
 
 /** Match the visible history as well as identity; never resurrect deleted/edited tool calls. */
 export function matchingReplayStates(message: CanonicalChatMessage, apiType: ApiType, identity?: string): readonly ProtocolReplayState[] {
@@ -35,7 +29,7 @@ export function matchingReplayStates(message: CanonicalChatMessage, apiType: Api
       id: item.call_id ?? '', name: item.name, input: parseToolArguments(item.arguments),
     }] : []);
   });
-  if (displayText !== expectedText || payloadText !== expectedText || JSON.stringify(stable(actualTools)) !== JSON.stringify(stable(expectedTools))) {
+  if (displayText !== expectedText || payloadText !== expectedText || JSON.stringify(stableJsonValue(actualTools)) !== JSON.stringify(stableJsonValue(expectedTools))) {
     throw new vscode.LanguageModelError(t('The saved protocol state no longer matches this conversation. Start a new conversation after editing or trimming its assistant/tool history.'));
   }
   return states;

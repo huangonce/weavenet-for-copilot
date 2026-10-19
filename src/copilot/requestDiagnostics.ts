@@ -3,6 +3,8 @@ import { RelayRequestError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
 import { InvalidToolArgumentsError } from './helpers';
 import type {
+  ClaudeUsage,
+  OpenAIUsage,
   RelayProtocol,
   RequestDiagnosticsMetadata,
   RequestTransportDiagnosticsMetadata,
@@ -17,6 +19,8 @@ export interface RequestDiagnostics {
   onRequest(protocol: RelayProtocol, metadata: RequestDiagnosticsMetadata): void;
   onRequestSettled(protocol: RelayProtocol, metadata: RequestTransportDiagnosticsMetadata): void;
   onOpenAIFinishReason(reason: string): void;
+  onOpenAIUsage(usage: OpenAIUsage): void;
+  onClaudeUsage(usage: ClaudeUsage, responseId?: string): void;
   onResponse(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
   onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete'): void;
   complete(): void;
@@ -25,6 +29,10 @@ export interface RequestDiagnostics {
 }
 
 export type DebugLogger = (config: ExtensionConfig, message: string) => void;
+
+type UsageField = 'inputTotal' | 'inputUncached' | 'output' | 'total' | 'cacheRead' | 'cacheWrite'
+  | 'cacheWrite5m' | 'cacheWrite1h' | 'reasoning' | 'predictionAccepted' | 'predictionRejected';
+type UsageCounts = Partial<Record<UsageField, number>>;
 
 export function createRequestDiagnostics(
   debug: DebugLogger,
@@ -47,6 +55,9 @@ export function createRequestDiagnostics(
   let responseMetadata: ResponseDiagnosticsMetadata | undefined;
   let requestMetadata: RequestDiagnosticsMetadata | undefined;
   let transportMetadata: RequestTransportDiagnosticsMetadata | undefined;
+  const usage: UsageCounts = {};
+  let usageResponseId: string | undefined;
+  let settled = false;
 
   const elapsed = (): number => Date.now() - startedAt;
   const summary = (): string =>
@@ -58,9 +69,23 @@ export function createRequestDiagnostics(
       + (finishReason ? ` finishReason=${safeDiagnosticValue(finishReason)}` : '')
       + formatRequestMetadata(requestMetadata)
       + formatTransportMetadata(transportMetadata)
-      + formatResponseMetadata(responseMetadata);
+      + formatResponseMetadata(responseMetadata)
+      + formatUsage(protocol, usage)
+      + (usageResponseId ? ` usageResponseId=${safeDiagnosticValue(usageResponseId)}` : '');
   const markFirstOutput = (): void => {
     firstOutputAt ??= Date.now();
+  };
+  const recordUsage = (update: UsageCounts): void => {
+    if (settled) return;
+    for (const field of Object.keys(update) as UsageField[]) {
+      const value = update[field];
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) usage[field] = value;
+    }
+  };
+  const settle = (outcome: 'completed' | 'cancelled' | 'failed', details = ''): void => {
+    if (settled) return;
+    settled = true;
+    debug(config, `${protocol} request ${outcome}: ${summary()}${details}`);
   };
 
   debug(config, `${protocol} request started: model=${model}, messages=${messageCount}, tools=${toolCount}`);
@@ -92,6 +117,29 @@ export function createRequestDiagnostics(
     onOpenAIFinishReason: (reason) => {
       finishReason = reason;
     },
+    onOpenAIUsage: (value) => recordUsage({
+      inputTotal: value.prompt_tokens,
+      output: value.completion_tokens,
+      total: value.total_tokens,
+      cacheRead: value.prompt_tokens_details?.cached_tokens,
+      cacheWrite: value.prompt_tokens_details?.cache_write_tokens,
+      reasoning: value.completion_tokens_details?.reasoning_tokens,
+      predictionAccepted: value.completion_tokens_details?.accepted_prediction_tokens,
+      predictionRejected: value.completion_tokens_details?.rejected_prediction_tokens,
+    }),
+    onClaudeUsage: (value, responseId) => {
+      // message_delta usage is cumulative. Replace supplied fields and retain
+      // earlier fields omitted by a later event; never add successive counts.
+      recordUsage({
+        inputUncached: value.input_tokens,
+        output: value.output_tokens,
+        cacheRead: value.cache_read_input_tokens,
+        cacheWrite: value.cache_creation_input_tokens,
+        cacheWrite5m: value.cache_creation?.ephemeral_5m_input_tokens,
+        cacheWrite1h: value.cache_creation?.ephemeral_1h_input_tokens,
+      });
+      if (!settled && typeof responseId === 'string' && responseId) usageResponseId = responseId;
+    },
     onResponse: (_responseProtocol, status, contentType, metadata) => {
       responseStatus = status;
       responseContentType = contentType;
@@ -101,10 +149,32 @@ export function createRequestDiagnostics(
     onStreamEnd: (_responseProtocol, event) => {
       terminalEvent = event;
     },
-    complete: () => debug(config, `${protocol} request completed: ${summary()}`),
-    cancelled: () => debug(config, `${protocol} request cancelled: ${summary()} cancellationSource=vscode tokenCancellationRequested=true`),
-    failed: (error) => debug(config, `${protocol} request failed: ${summary()} error=${formatLogError(error)}`),
+    complete: () => settle('completed'),
+    cancelled: () => settle('cancelled', ' cancellationSource=vscode tokenCancellationRequested=true'),
+    failed: (error) => settle('failed', ` error=${formatLogError(error)}`),
   };
+}
+
+function formatUsage(protocol: RelayProtocol, usage: UsageCounts): string {
+  const inputTotal = protocol === 'Claude'
+    ? sumKnownCounts(usage.inputUncached, usage.cacheRead, usage.cacheWrite)
+    : usage.inputTotal;
+  const total = usage.total ?? sumKnownCounts(inputTotal, usage.output);
+  const values: UsageCounts = { inputTotal, output: usage.output, total,
+    cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+    ...(protocol === 'Claude' ? {
+      inputUncached: usage.inputUncached, cacheWrite5m: usage.cacheWrite5m, cacheWrite1h: usage.cacheWrite1h,
+    } : {
+      reasoning: usage.reasoning, predictionAccepted: usage.predictionAccepted, predictionRejected: usage.predictionRejected,
+    }),
+  };
+  return ` usage={${Object.entries(values).map(([name, value]) => `${name}:${value ?? 'n/a'}`).join(',')}}`;
+}
+
+function sumKnownCounts(...values: Array<number | undefined>): number | undefined {
+  if (values.some(value => value === undefined)) return undefined;
+  const sum = values.reduce<number>((total, value) => total + value!, 0);
+  return Number.isSafeInteger(sum) ? sum : undefined;
 }
 
 function formatRequestMetadata(metadata: RequestDiagnosticsMetadata | undefined): string {

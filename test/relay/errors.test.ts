@@ -5,7 +5,7 @@ import {
   describeConnectionTestError,
   sanitizeLanguageModelError,
   toLanguageModelError,
-} from '../../src/copilot/provider';
+} from '../../src/copilot/connection';
 
 describe('relay error mapping', () => {
   it('preserves safe structured SSE error fields and maps rate limits', () => {
