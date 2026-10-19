@@ -8,7 +8,7 @@ import type {
 } from './types';
 import { streamClaudeMessages } from './claude';
 import { canonicalRelayHeaders } from './headers';
-import { fetchJsonWithRetryMetadata } from './http';
+import { fetchJsonWithRetryMetadata, fetchWithResponseTimeout, MAX_ERROR_RESPONSE_BYTES, readResponseText, throwIfNotOk } from './http';
 import { streamOpenAIChatCompletion } from './openai';
 import { streamOpenAIResponses } from './openaiResponses';
 import {
@@ -43,6 +43,28 @@ export class RelayClient {
 
   async listModels(token?: CancellationToken): Promise<ModelsResponse> {
     return (await this.readCatalog(token)).value;
+  }
+
+  /** Explicit diagnostic only; ordinary chat and host token estimates never call this endpoint. */
+  async countResponsesInputTokens(
+    request: Pick<ResponsesRequest, 'model' | 'input' | 'instructions' | 'tools'>,
+    token?: CancellationToken,
+  ): Promise<number> {
+    const response = await fetchWithResponseTimeout(this.endpoint('responses/input_tokens'), {
+      method: 'POST',
+      headers: { ...this.headersFor('bearer'), 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(request),
+    }, this.options.requestTimeoutMs, token);
+    await throwIfNotOk(response, this.options.streamIdleTimeoutMs, token);
+    const text = await readResponseText(response, this.options.streamIdleTimeoutMs, token, MAX_ERROR_RESPONSE_BYTES);
+    let payload: unknown;
+    try { payload = JSON.parse(text); }
+    catch { throw new Error('The Relay returned an invalid input token count.'); }
+    const count = payload && typeof payload === 'object' ? (payload as { input_tokens?: unknown }).input_tokens : undefined;
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error('The Relay returned an invalid input token count.');
+    }
+    return count;
   }
 
   async testModels(token?: CancellationToken): Promise<{ models: ModelsResponse; diagnostic: RelayEndpointTestResult }> {

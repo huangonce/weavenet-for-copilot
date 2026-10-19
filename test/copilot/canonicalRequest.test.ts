@@ -12,6 +12,8 @@ import {
   convertMessages,
   convertResponsesInput,
 } from '../../src/copilot/convert';
+import { getConfiguredReasoningEffort } from '../../src/copilot/helpers';
+import { fromConfiguredModel } from '../../src/relay/models';
 
 function user(...content: vscode.LanguageModelInputPart[]): vscode.LanguageModelChatRequestMessage {
   return { role: vscode.LanguageModelChatMessageRole.User, content, name: undefined };
@@ -278,6 +280,52 @@ describe('canonical chat request snapshot', () => {
 });
 
 describe('canonical response options snapshot', () => {
+  it.each(['modelConfiguration', 'configuration'])('ignores the obsolete %s field when selecting reasoning effort', (alias) => {
+    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
+    const legacy = { toolMode: vscode.LanguageModelChatToolMode.Auto, [alias]: { reasoningEffort: 'max' } };
+
+    expect(snapshotChatResponseOptions(legacy)).toEqual({ toolMode: vscode.LanguageModelChatToolMode.Auto });
+    expect(getConfiguredReasoningEffort(model, legacy)).toBe('high');
+
+    const current = { ...legacy, modelOptions: { reasoningEffort: 'low' } };
+    expect(snapshotChatResponseOptions(current).modelOptions).toEqual({ reasoningEffort: 'low' });
+    expect(getConfiguredReasoningEffort(model, current)).toBe('low');
+  });
+
+  it.each([undefined, 'low'])('reads the official option once without touching legacy getters, effort=%s', (effort) => {
+    let optionReads = 0;
+    let effortReads = 0;
+    let legacyReads = 0;
+    const options = {
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+      get modelOptions() {
+        optionReads++;
+        return effort === undefined ? undefined : { get reasoningEffort() { effortReads++; return effort; } };
+      },
+    };
+    for (const alias of ['modelConfiguration', 'configuration']) {
+      Object.defineProperty(options, alias, { get() { legacyReads++; throw new Error('obsolete getter must not run'); } });
+    }
+
+    const snapshot = snapshotChatResponseOptions(options);
+
+    expect(snapshot.modelOptions).toEqual(effort === undefined ? undefined : { reasoningEffort: effort });
+    expect(optionReads).toBe(1);
+    expect(effortReads).toBe(effort === undefined ? 0 : 1);
+    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
+    expect(getConfiguredReasoningEffort(model, options)).toBe(effort ?? 'high');
+    expect(legacyReads).toBe(0);
+  });
+
+  it('discards unsupported model option data and uses the model default', () => {
+    const options = { toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { reasoningEffort: { mutable: true } } };
+    const snapshot = snapshotChatResponseOptions(options);
+    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
+
+    expect(snapshot).toEqual({ toolMode: vscode.LanguageModelChatToolMode.Auto });
+    expect(getConfiguredReasoningEffort(model, snapshot)).toBe('high');
+  });
+
   it('detaches tools, schemas, tool mode, and consumed model options', () => {
     const schema = { type: 'object', properties: { query: { type: 'string' } } };
     const tool = { name: 'search', description: 'Search docs', inputSchema: schema };

@@ -23,17 +23,16 @@ const mocks = vi.hoisted(() => {
     migrateRelayKeys: vi.fn(async () => undefined),
     logMetadata: vi.fn(),
     refreshModels: vi.fn(async () => undefined),
+    refreshModelMetadata: vi.fn(),
   };
   return {
     provider,
     providerCtor: vi.fn(function providerCtor() { return provider; }),
-    resetLegacyInstallation: vi.fn(),
     migrateProfilePoolConfiguration: vi.fn(),
     initMetadataCache: vi.fn(),
-    onMetadataChanged: vi.fn(() => ({ dispose: () => undefined })),
+    onMetadataChanged: vi.fn((_listener: () => void) => ({ dispose: () => undefined })),
     registerConnectionCommands: vi.fn(() => ({ dispose: () => undefined })),
     showInitialConnectionPrompt: vi.fn(),
-    showLegacyResetPrompt: vi.fn(),
     createStatusBarItem: vi.fn(() => ({ dispose: () => undefined })),
     registerProvider: vi.fn(() => ({ dispose: () => undefined })),
     order: [] as string[],
@@ -41,7 +40,6 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('../src/copilot/provider', () => ({ WeaveNetChatProvider: mocks.providerCtor }));
-vi.mock('../src/migration/legacyReset', () => ({ resetLegacyInstallation: mocks.resetLegacyInstallation }));
 vi.mock('../src/migration/profilePool', () => ({ migrateProfilePoolConfiguration: mocks.migrateProfilePoolConfiguration }));
 vi.mock('../src/metadata/metadataCache', () => ({
   initMetadataCache: mocks.initMetadataCache,
@@ -50,7 +48,6 @@ vi.mock('../src/metadata/metadataCache', () => ({
 vi.mock('../src/commands/connectionCommands', () => ({
   registerConnectionCommands: mocks.registerConnectionCommands,
   showInitialConnectionPrompt: mocks.showInitialConnectionPrompt,
-  showLegacyResetPrompt: mocks.showLegacyResetPrompt,
 }));
 vi.mock('../src/ui/statusBarPresenter', () => ({ createStatusBarItem: mocks.createStatusBarItem }));
 
@@ -68,10 +65,6 @@ function configurationFixture(profiles: ConnectionProfile[]): void {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.order.length = 0;
-  mocks.resetLegacyInstallation.mockImplementation(async () => {
-    mocks.order.push('legacyReset');
-    return { cleaned: false, removedBaseUrl: false, removedSecretCount: 0 };
-  });
   mocks.migrateProfilePoolConfiguration.mockImplementation(async () => { mocks.order.push('profilePool'); });
   mocks.providerCtor.mockImplementation(function providerCtor() { mocks.order.push('provider'); return mocks.provider; });
   mocks.provider.migrateRelayKeys.mockImplementation(async () => { mocks.order.push('keys'); });
@@ -92,25 +85,24 @@ describe('extension activation', () => {
 
     await activate(context);
 
-    expect(mocks.order).toEqual(['legacyReset', 'profilePool', 'provider', 'keys', 'statusBar', 'commands', 'registerProvider', 'refresh']);
+    expect(mocks.order).toEqual(['profilePool', 'provider', 'keys', 'statusBar', 'commands', 'registerProvider', 'refresh']);
     expect(mocks.provider.migrateRelayKeys).toHaveBeenCalledWith([WORK_PROFILE]);
     expect(register).toHaveBeenCalledWith('weavenet', mocks.provider);
     expect(context.subscriptions).toHaveLength(4);
     expect(mocks.initMetadataCache).toHaveBeenCalledWith(context, expect.any(Function));
     expect(mocks.showInitialConnectionPrompt).toHaveBeenCalledWith(context);
-    expect(mocks.showLegacyResetPrompt).not.toHaveBeenCalled();
     expect(mocks.provider.refreshModels).toHaveBeenCalledOnce();
   });
 
-  it('prompts about removed legacy data instead of the first-run prompt', async () => {
-    configurationFixture([]);
-    vi.spyOn(vscode.lm, 'registerLanguageModelChatProvider').mockImplementation(() => mocks.registerProvider() as never);
-    mocks.resetLegacyInstallation.mockResolvedValue({ cleaned: true, removedBaseUrl: true, removedSecretCount: 2 });
-
+  it('applies changed metadata locally without starting another Relay refresh', async () => {
+    configurationFixture([WORK_PROFILE]);
     await activate(contextFixture());
+    mocks.provider.refreshModels.mockClear();
 
-    expect(mocks.showLegacyResetPrompt).toHaveBeenCalledOnce();
-    expect(mocks.showInitialConnectionPrompt).not.toHaveBeenCalled();
+    mocks.onMetadataChanged.mock.calls[0][0]();
+
+    expect(mocks.provider.refreshModelMetadata).toHaveBeenCalledOnce();
+    expect(mocks.provider.refreshModels).not.toHaveBeenCalled();
   });
 
   it('reports a failed key migration without stopping activation', async () => {
@@ -142,19 +134,18 @@ describe('extension activation', () => {
     expect(mocks.showInitialConnectionPrompt).not.toHaveBeenCalled();
   });
 
-  it('continues activation when legacy cleanup fails and logs a failed Copilot activation', async () => {
+  it('logs a failed Copilot activation without stopping the extension', async () => {
     configurationFixture([]);
     vi.spyOn(vscode.lm, 'registerLanguageModelChatProvider').mockImplementation(() => mocks.registerProvider() as never);
-    const error = vi.spyOn(vscode.window, 'showErrorMessage');
-    mocks.resetLegacyInstallation.mockRejectedValueOnce(new Error('settings locked'));
     const activateChat = vi.fn(async () => { throw new Error('copilot chat failed'); });
     vi.spyOn(vscode.extensions, 'getExtension').mockReturnValue({ activate: activateChat } as never);
 
     await activate(contextFixture());
     await vi.waitFor(() => expect(mocks.provider.logMetadata).toHaveBeenCalled());
 
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('could not clear settings from the previous connection format'));
     expect(activateChat).toHaveBeenCalledOnce();
     expect(mocks.provider.logMetadata).toHaveBeenCalledWith(expect.stringContaining('copilot chat failed'));
+    expect(mocks.showInitialConnectionPrompt).toHaveBeenCalledOnce();
+    expect(mocks.provider.refreshModels).toHaveBeenCalledOnce();
   });
 });

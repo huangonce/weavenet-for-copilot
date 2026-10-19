@@ -1,0 +1,19 @@
+{
+  "name": "provider-bridge",
+  "displayName": "WeaveNet regression provider bridge",
+  "publisher": "weavenet-tests",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.116.0"
+  },
+  "main": "./extension.cjs",
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "weavenet-regression",
+        "displayName": "WeaveNet regression"
+      }
+    ]
+  }
+}

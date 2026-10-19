@@ -9,9 +9,21 @@ const expectedCommands = [
   'weavenet-copilot.refreshModels',
   'weavenet-copilot.setRelayKey',
   'weavenet-copilot.testConnection',
+  'weavenet-copilot.compareInputTokens',
 ];
 
 async function run() {
+  const configuration = vscode.workspace.getConfiguration('weavenet-copilot');
+  const previousMetadataEnabled = configuration.inspect('modelMetadataEnabled')?.globalValue;
+  try {
+    await configuration.update('modelMetadataEnabled', false, vscode.ConfigurationTarget.Global);
+    await runChecks();
+  } finally {
+    await configuration.update('modelMetadataEnabled', previousMetadataEnabled, vscode.ConfigurationTarget.Global);
+  }
+}
+
+async function runChecks() {
   const extension = vscode.extensions.getExtension(extensionId);
   assert.ok(extension, `Extension ${extensionId} was not discovered.`);
 
@@ -93,19 +105,18 @@ async function run() {
     assert.ok(commands.includes(command), `Command ${command} was not registered.`);
   }
 
-  await checkHostProviderContract(extension, profileId);
+  await checkHostProviderContract();
 
-  await checkUnknownSnapshotSchemaIgnored(profileId);
+  await checkUnknownSnapshotSchemaIgnored(extension, profileId);
 
   await checkLiveRequestPaths(extension);
 }
 
 /**
- * Exercises the provider through the real host and directly through the compiled
- * module. The smoke host has no credentials, so this asserts fail-closed
- * degradation instead of a live model exchange.
+ * Exercises discovery through the production provider registered in the host.
+ * Positive requests and token counting use the separately registered RPC fixture.
  */
-async function checkHostProviderContract(extension, profileId) {
+async function checkHostProviderContract() {
   const configuration = vscode.workspace.getConfiguration('weavenet-copilot');
   const previousProfiles = configuration.inspect('profiles')?.globalValue ?? [];
   await configuration.update('profiles', [{
@@ -122,25 +133,11 @@ async function checkHostProviderContract(extension, profileId) {
   } finally {
     await configuration.update('profiles', previousProfiles, vscode.ConfigurationTarget.Global);
   }
-
-  const { WeaveNetChatProvider } = require(path.join(extension.extensionPath, 'out', 'copilot', 'provider.js'));
-  const { context } = createHostContext();
-  const direct = new WeaveNetChatProvider(context);
-  const source = new vscode.CancellationTokenSource();
-  try {
-    const information = await direct.provideLanguageModelChatInformation({ silent: true }, source.token);
-    assert.ok(Array.isArray(information), 'provideLanguageModelChatInformation must resolve through the host contract.');
-    const counted = await direct.provideTokenCount({ id: 'smoke-model' }, 'hello world', source.token);
-    assert.ok(Number.isInteger(counted) && counted > 0, 'provideTokenCount must return a positive token count.');
-  } finally {
-    source.dispose();
-    for (const disposable of context.subscriptions) disposable?.dispose?.();
-  }
 }
 
 /** The compiled snapshot store must ignore an unknown schema version. */
-async function checkUnknownSnapshotSchemaIgnored(profileId) {
-  const { ModelSnapshotStore } = require(path.join(__dirname, '..', '..', 'out', 'copilot', 'modelSnapshotStore.js'));
+async function checkUnknownSnapshotSchemaIgnored(extension, profileId) {
+  const { ModelSnapshotStore } = require(path.join(extension.extensionPath, 'out', 'copilot', 'modelSnapshotStore.js'));
   const stored = new Map([[`weavenet-copilot.modelSnapshots.v3.${profileId}.${'b'.repeat(64)}`, {
     schemaVersion: 4, profileId, catalogRevision: 'b'.repeat(64), savedAt: Date.now(), directory: [],
   }]]);
@@ -175,20 +172,27 @@ const MOCK_DIRECTORY = {
   data: [
     { id: 'mock-chat', context_length: 16384, max_completion_tokens: 8192, capabilities: { tool_calling: true } },
     { id: 'mock-claude', context_length: 16384, max_completion_tokens: 8192,
-      capabilities: { tool_calling: true, reasoning: true, claude: { thinkingMode: 'manual', sampling: true, forcedToolChoice: true } } },
-    { id: 'mock-responses', context_length: 16384, max_completion_tokens: 8192, capabilities: { tool_calling: true, reasoning: true } },
+      capabilities: { tool_calling: true, reasoning: true, claude: { thinkingMode: 'manual', sampling: true, forcedToolChoice: true, automaticCaching: true } } },
+    { id: 'mock-responses', context_length: 16384, max_completion_tokens: 8192,
+      capabilities: { tool_calling: true, reasoning: true, openai: { tokenCounting: true, strictTools: true } } },
   ],
 };
 
-const sseBody = events => events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('');
+const sseBody = (events, newline = '\n', folded = false) => events.map(event =>
+  JSON.stringify(event, null, folded ? 2 : undefined).split('\n').map(line => `data: ${line}`).join(newline)
+    + newline + newline).join('');
+
+const RESPONSES_TOOL = { type: 'function_call', id: 'fc_live', call_id: 'call_responses', name: 'search',
+  arguments: JSON.stringify({ q: 'response docs' }), status: 'completed' };
 
 const MOCK_SSE = {
   '/v1/chat/completions': sseBody([
     { choices: [{ delta: { content: 'mock answer' } }] },
     { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_live', type: 'function',
-      function: { name: 'search', arguments: JSON.stringify({ q: 'docs' }) } }] } }] },
+      function: { name: 'search', arguments: '{"q":"docs \ud83d' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '\ude00汉"}' } }] } }] },
     { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
-  ]) + 'data: [DONE]\n\n',
+  ], '\r\n', true) + 'data: [DONE]\r\n\r\n',
   '/v1/messages': sseBody([
     { type: 'message_start', message: { id: 'msg_live', usage: { input_tokens: 5, output_tokens: 1 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
@@ -204,12 +208,18 @@ const MOCK_SSE = {
   '/v1/responses': sseBody([
     { type: 'response.created', response: { id: 'resp_live' } },
     { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'mock answer' },
-    { type: 'response.completed', response: { id: 'resp_live', status: 'completed', usage: { input_tokens: 5, output_tokens: 7, total_tokens: 12 } } },
+    { type: 'response.output_item.added', output_index: 1, item: { ...RESPONSES_TOOL, arguments: '', status: 'in_progress' } },
+    { type: 'response.function_call_arguments.delta', output_index: 1, delta: RESPONSES_TOOL.arguments },
+    { type: 'response.function_call_arguments.done', output_index: 1, arguments: RESPONSES_TOOL.arguments },
+    { type: 'response.output_item.done', output_index: 1, item: RESPONSES_TOOL },
+    { type: 'response.completed', response: { id: 'resp_live', status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'mock answer' }] }, RESPONSES_TOOL],
+      usage: { input_tokens: 5, output_tokens: 7, total_tokens: 12 } } },
   ]),
 };
 
 /** Loopback relay used by the live request check; every call is recorded for assertions. */
-function handleMockRelay(request, response, recorded) {
+function handleMockRelay(request, response, recorded, control) {
   const chunks = [];
   request.on('data', chunk => chunks.push(chunk));
   request.on('end', () => {
@@ -217,17 +227,36 @@ function handleMockRelay(request, response, recorded) {
     const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
     let body;
     try { body = raw ? JSON.parse(raw) : undefined; } catch { body = undefined; }
-    recorded.push({ method: request.method, path: pathname, headers: request.headers, raw, body });
+    const entry = { method: request.method, path: pathname, headers: request.headers, raw, body };
+    recorded.push(entry);
     if (request.method === 'GET' && pathname.endsWith('/models')) {
       const payload = JSON.stringify(MOCK_DIRECTORY);
       response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
       response.end(payload);
       return;
     }
+    if (request.method === 'POST' && control.respond) {
+      control.respond(entry, response);
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/v1/responses/input_tokens') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ object: 'response.input_tokens', input_tokens: 7 }));
+      return;
+    }
     const stream = request.method === 'POST' ? MOCK_SSE[pathname] : undefined;
     if (stream !== undefined) {
-      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-      response.end(stream);
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache',
+        ...(pathname === '/v1/messages' ? { 'request-id': 'mock-claude-request' } : { 'x-request-id': 'mock-openai-request' }) });
+      if (pathname === '/v1/chat/completions') {
+        // Split a CRLF between network writes as well as folding JSON across
+        // several data fields. Tool argument surrogate halves cross events.
+        const split = stream.indexOf('\r\n') + 1;
+        response.write(stream.slice(0, split));
+        setImmediate(() => { if (!response.destroyed) response.end(stream.slice(split)); });
+      } else {
+        response.end(stream);
+      }
       return;
     }
     const payload = JSON.stringify({ error: { message: `Unexpected mock relay request: ${request.method} ${pathname}` } });
@@ -248,7 +277,8 @@ async function checkLiveRequestPaths(extension) {
   const configuration = vscode.workspace.getConfiguration('weavenet-copilot');
   const previousProfiles = configuration.inspect('profiles')?.globalValue ?? [];
   const recorded = [];
-  const server = http.createServer((request, response) => handleMockRelay(request, response, recorded));
+  const relayControl = { respond: undefined };
+  const server = http.createServer((request, response) => handleMockRelay(request, response, recorded, relayControl));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
@@ -263,6 +293,8 @@ async function checkLiveRequestPaths(extension) {
   const entries = profiles.map(profile => [`${RELAY_API_KEY_SECRET}.profileId.${profile.id}`, 'live-key']);
   const { context, secrets } = createHostContext(entries);
   const provider = new WeaveNetChatProvider(context);
+  const diagnostics = [];
+  provider.debug = (_config, message) => diagnostics.push(message);
   const source = new vscode.CancellationTokenSource();
   try {
     const info = await provider.provideLanguageModelChatInformation({ silent: true }, source.token);
@@ -278,7 +310,12 @@ async function checkLiveRequestPaths(extension) {
       assert.ok(modelFor(suffix).id.startsWith('weavenet::'), `Catalog ids must be qualified by vendor and connection. ${catalogReport}`);
     }
     const tool = { name: 'search', description: 'Search the documentation',
-      inputSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] } };
+      inputSchema: { type: 'object', properties: { q: { type: 'string' },
+        errorMessage: { type: 'string' }, data: { enum: [{ errorMessage: 'business value', $schema: 'literal' }] } }, required: ['q'] } };
+    const composedTool = { name: 'compose', description: 'Accept both fields', inputSchema: {
+      type: 'object', properties: { a: { type: 'string' } }, required: ['a'],
+      allOf: [{ type: 'object', properties: { b: { type: 'string' } }, required: ['b'] }],
+    } };
     const collect = async (model, messages, options = {}) => {
       const parts = [];
       await provider.provideLanguageModelChatResponse(model, messages, options, { report: part => parts.push(part) }, source.token);
@@ -295,7 +332,8 @@ async function checkLiveRequestPaths(extension) {
     const toolCall = chatParts.find(part => part instanceof vscode.LanguageModelToolCallPart);
     assert.ok(toolCall, 'The streamed Chat Completions tool call was not published.');
     assert.equal(toolCall.name, 'search');
-    assert.deepEqual(typeof toolCall.input === 'string' ? JSON.parse(toolCall.input) : toolCall.input, { q: 'docs' });
+    assert.deepEqual(typeof toolCall.input === 'string' ? JSON.parse(toolCall.input) : toolCall.input, { q: 'docs 😀汉' },
+      'Folded CRLF events and split surrogate pairs must preserve the exact tool input.');
     const [chatRequest] = requestTo('/v1/chat/completions');
     assert.ok(chatRequest, 'The Chat Completions endpoint was never reached.');
     assert.equal(chatRequest.body.model, 'mock-chat');
@@ -317,6 +355,16 @@ async function checkLiveRequestPaths(extension) {
     assert.equal(claudeRequest.headers['x-api-key'], 'live-key');
     assert.ok(claudeRequest.headers['anthropic-version'], 'The Messages request must declare an anthropic-version.');
     assert.ok(claudeRequest.body.thinking, 'Manual Claude thinking must request a thinking budget.');
+    assert.deepEqual(claudeRequest.body.cache_control, { type: 'ephemeral' });
+    assert.ok(claudeRequest.body.tools.every(entry => entry.cache_control === undefined));
+    assert.ok(claudeRequest.body.messages.every(message => message.content.every(block => block.cache_control === undefined)),
+      'Automatic caching must not add explicit block breakpoints.');
+    assert.ok(diagnostics.some(message => message.startsWith('Claude transport started:')),
+      'Claude must report request transport diagnostics.');
+    assert.ok(diagnostics.some(message => message.startsWith('Claude transport settled:')),
+      'Claude must settle transport diagnostics.');
+    assert.match(diagnostics.find(message => message.startsWith('Claude request completed:')) ?? '', /requestId=mock-claude-request/,
+      'Claude request IDs must survive the native request-id response header.');
 
     await collect(modelFor('mock-claude'), [
       vscode.LanguageModelChatMessage.User('hello'),
@@ -346,13 +394,88 @@ async function checkLiveRequestPaths(extension) {
     assert.match(String(prefixFailure.message), /Start a new conversation/);
     assert.equal(requestTo('/v1/messages').length, 2, 'An invalid signature must never be sent to the relay.');
 
-    const responsesParts = await collect(modelFor('mock-responses'), [vscode.LanguageModelChatMessage.User('hello')]);
+    const responsesParts = await collect(modelFor('mock-responses'), [vscode.LanguageModelChatMessage.User('hello')], { tools: [tool, composedTool] });
     assert.deepEqual(textParts(responsesParts), ['mock answer'], 'Responses text was not streamed to the host.');
+    const responseTools = responsesParts.filter(part => part instanceof vscode.LanguageModelToolCallPart);
+    assert.equal(responseTools.length, 1, 'Responses argument-done and item-done must publish exactly one host tool call.');
+    assert.equal(responseTools[0].callId, 'call_responses');
+    assert.equal(responseTools[0].name, 'search');
+    assert.deepEqual(typeof responseTools[0].input === 'string' ? JSON.parse(responseTools[0].input) : responseTools[0].input,
+      { q: 'response docs' });
     const [responsesRequest] = requestTo('/v1/responses');
     assert.ok(responsesRequest, 'The Responses endpoint was never reached.');
     assert.equal(responsesRequest.body.model, 'mock-responses');
     assert.equal(responsesRequest.body.stream, true);
+    assert.equal(responsesRequest.body.store, false);
+    assert.equal(responsesRequest.body.tools[0].strict, false, 'Responses must explicitly preserve the non-strict tool contract.');
+    assert.equal(responsesRequest.body.tools[1].strict, false, 'Unsupported strict composition must use the non-strict contract.');
+    assert.deepEqual(responsesRequest.body.tools[1].parameters, composedTool.inputSchema,
+      'Skipping strict conversion must preserve every original constraint.');
+    assert.match(diagnostics.find(message => message.startsWith('Responses request completed:')) ?? '', /parts=\{[^}]*tools:1[,}]/,
+      'The two completion events must count the Responses tool once in diagnostics.');
+    for (const schema of [chatRequest.body.tools[0].function.parameters,
+      claudeRequest.body.tools[0].input_schema, responsesRequest.body.tools[0].parameters]) {
+      assert.deepEqual(schema, tool.inputSchema, 'All protocols must preserve business keys and enum data in tool schemas.');
+    }
 
+    assert.equal(requestTo('/v1/responses/input_tokens').length, 0, 'Generation must not trigger remote token counting.');
+    const diagnosticModels = await provider.getTokenCountingModels(source.token);
+    assert.deepEqual(diagnosticModels.map(model => model.id), [modelFor('mock-responses').id]);
+    const beforeCount = recorded.length;
+    const counts = await provider.compareInputTokenCount(modelFor('mock-responses').id, 'sample token text', source.token);
+    assert.ok(Number.isInteger(counts.localEstimate) && counts.localEstimate > 0);
+    assert.equal(counts.serverCount, 7);
+    const diagnosticPosts = recorded.slice(beforeCount).filter(entry => entry.method === 'POST');
+    assert.equal(diagnosticPosts.length, 1, 'Manual token diagnostics must send exactly one non-generation POST.');
+    assert.equal(diagnosticPosts[0].path, '/v1/responses/input_tokens');
+    assert.deepEqual(diagnosticPosts[0].body, { model: 'mock-responses', input: [{ role: 'user', content: 'sample token text' }] });
+
+    const beforeIncomplete = recorded.length;
+    relayControl.respond = (_entry, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(sseBody([
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'partial answer' },
+        { type: 'response.output_item.added', output_index: 1, item: {
+          type: 'function_call', id: 'fc_partial', call_id: 'call_partial', name: 'search', arguments: '' } },
+        { type: 'response.function_call_arguments.delta', output_index: 1, delta: '{"q":"unfinished' },
+        { type: 'response.incomplete', response: { id: 'resp_partial', status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' } } },
+      ]));
+    };
+    try {
+      const partial = await collect(modelFor('mock-responses'), [vscode.LanguageModelChatMessage.User('truncated output')], { tools: [tool] });
+      assert.deepEqual(textParts(partial), ['partial answer'], 'A truncated tool must not hide legitimate partial text.');
+      assert.ok(partial.every(part => !(part instanceof vscode.LanguageModelToolCallPart)), 'Incomplete tools must not be published.');
+      assert.equal(recorded.slice(beforeIncomplete).filter(entry => entry.method === 'POST').length, 1);
+    } finally {
+      relayControl.respond = undefined;
+    }
+
+    await checkCancelledToolRequest(provider, modelFor('mock-chat'), tool, recorded, relayControl);
+
+    for (const [suffix, endpoint] of [
+      ['mock-chat', '/v1/chat/completions'], ['mock-claude', '/v1/messages'], ['mock-responses', '/v1/responses'],
+    ]) {
+      for (const outcome of ['error', 'empty']) {
+        const before = recorded.length;
+        relayControl.respond = (_entry, response) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.end(outcome === 'empty' ? '' : sseBody([{ type: 'error', error: { message: 'mock stream failure' } }]));
+        };
+        try {
+          await assert.rejects(collect(modelFor(suffix), [vscode.LanguageModelChatMessage.User('fail this request')]),
+            `${suffix} must reject an ${outcome} stream.`);
+          const posts = recorded.slice(before).filter(entry => entry.method === 'POST');
+          assert.equal(posts.length, 1, `${suffix} must not repeat a POST after an ${outcome} stream.`);
+          assert.equal(posts[0].path, endpoint);
+          assert.equal(posts[0].body.stream, true);
+        } finally {
+          relayControl.respond = undefined;
+        }
+      }
+    }
+
+    const chatsBeforeKeyRemoval = requestTo('/v1/chat/completions').length;
     secrets.delete(entries[0][0]);
     let failure;
     try {
@@ -362,12 +485,69 @@ async function checkLiveRequestPaths(extension) {
     }
     assert.ok(failure, 'A request without an API key must fail closed.');
     assert.match(String(failure.message), /not configured/, `Unexpected fail-closed error: ${failure.message}`);
-    assert.equal(requestTo('/v1/chat/completions').length, 1, 'A key-less request must not reach the relay.');
+    assert.equal(requestTo('/v1/chat/completions').length, chatsBeforeKeyRemoval, 'A key-less request must not reach the relay.');
+
+    secrets.set(entries[0][0], 'live-key');
+    await require('./rpc.cjs').checkRegisteredRequests({ provider, recorded, profiles });
+    assert.equal(requestTo('/v1/responses/input_tokens').length, 1,
+      'RPC generation and host countTokens must not repeat the manual remote diagnostic.');
   } finally {
     source.dispose();
     for (const disposable of context.subscriptions) disposable?.dispose?.();
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     await configuration.update('profiles', previousProfiles, vscode.ConfigurationTarget.Global);
+  }
+}
+
+async function checkCancelledToolRequest(provider, model, tool, recorded, control) {
+  const source = new vscode.CancellationTokenSource();
+  const delivered = Promise.withResolvers();
+  const closed = Promise.withResolvers();
+  const parts = [];
+  const before = recorded.length;
+  control.respond = (_entry, response) => {
+    response.once('close', closed.resolve);
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(sseBody([
+      { choices: [{ delta: { content: 'before cancellation' } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_partial', type: 'function',
+        function: { name: 'search', arguments: '{"q":"unfinished' } }] } }] },
+    ]));
+    // Keep the body open until the client aborts it.
+  };
+  const pending = provider.provideLanguageModelChatResponse(model,
+    [vscode.LanguageModelChatMessage.User('cancel this request')], { tools: [tool] }, {
+      report(part) {
+        parts.push(part);
+        if (part instanceof vscode.LanguageModelTextPart && part.value === 'before cancellation') delivered.resolve();
+      },
+    }, source.token).then(() => undefined, error => error);
+  try {
+    await within(delivered.promise, 'The host never received text before cancellation.');
+    source.cancel();
+    const failure = await within(pending, 'Cancelling the provider did not end the request.');
+    assert.ok(failure instanceof vscode.CancellationError, 'Cancellation must retain the host cancellation error type.');
+    await within(closed.promise, 'Cancellation did not close the Relay response.');
+    assert.equal(parts.filter(part => part instanceof vscode.LanguageModelToolCallPart).length, 0,
+      'An unfinished tool call must never be published on cancellation.');
+    assert.equal(recorded.slice(before).filter(entry => entry.method === 'POST').length, 1,
+      'Cancellation must not start another POST.');
+  } finally {
+    source.cancel();
+    source.dispose();
+    control.respond = undefined;
+  }
+}
+
+async function within(operation, message) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), 5_000);
+    })]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

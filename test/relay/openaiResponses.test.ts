@@ -129,6 +129,8 @@ describe('Responses SSE parsing', () => {
       cb,
       state,
     );
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    processResponsesSseLine('data: {"type":"response.completed","response":{"status":"completed"}}', tools, cb, state);
     expect(cb.onToolCall).toHaveBeenCalledWith({
       id: 'call_1',
       type: 'function',

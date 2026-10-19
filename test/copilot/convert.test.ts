@@ -197,6 +197,24 @@ describe('chat request conversion', () => {
   });
 });
 
+describe('OpenAI tool schema compatibility', () => {
+  it.each([
+    { api: 'Chat', convert: (tools: readonly vscode.LanguageModelChatTool[]) => convertTools(tools, true)?.[0].function },
+    { api: 'Responses', convert: (tools: readonly vscode.LanguageModelChatTool[]) => convertResponsesTools(tools, true)?.[0] },
+  ])('keeps optional parameters optional for $api when strict conversion is unsafe', ({ api, convert }) => {
+    const inputSchema = { type: 'object', properties: { query: { type: 'string', markdownDescription: 'editor-only' } } };
+    const result = convert([{ name: 'search', description: 'Search', inputSchema }]);
+    expect(result).toMatchObject({ name: 'search', description: 'Search', parameters: {
+      type: 'object', properties: { query: { type: 'string' } },
+    } });
+    if (api === 'Chat') expect(result).not.toHaveProperty('strict');
+    else expect(result?.strict).toBe(false);
+    expect(result?.parameters).not.toHaveProperty('required');
+    expect(result?.parameters).not.toHaveProperty('additionalProperties');
+    expect(inputSchema.properties.query.markdownDescription).toBe('editor-only');
+  });
+});
+
 describe('responses input conversion', () => {
   it('preserves assistant function calls so call_ids match tool results', () => {
     const messages = [{
@@ -458,6 +476,7 @@ describe('responses input conversion', () => {
       name: 'search',
       description: 'Search indexed docs',
       parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      strict: false,
     }]);
     expect(convertResponsesTools([{
       name: 'search',

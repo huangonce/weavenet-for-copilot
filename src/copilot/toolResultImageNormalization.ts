@@ -25,12 +25,6 @@ interface DeferredUserMessage {
  * tool-call batch has been answered. This keeps every protocol's tool chain
  * valid without serializing image bytes into tool output strings.
  */
-export function promoteNativeToolResultImages(
-  snapshot: CanonicalChatRequestSnapshot,
-): CanonicalChatRequestSnapshot {
-  return normalizeToolResultBatches(snapshot);
-}
-
 export function normalizeToolResultBatches(
   snapshot: CanonicalChatRequestSnapshot,
 ): CanonicalChatRequestSnapshot {

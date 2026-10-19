@@ -19,20 +19,6 @@ export function safeHost(baseUrl: string): string | undefined {
   }
 }
 
-export function safeEndpoint(baseUrl: string, path: string): string {
-  try {
-    const url = new URL(baseUrl);
-    url.search = '';
-    url.hash = '';
-    url.username = '';
-    url.password = '';
-    url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`;
-    return url.toString();
-  } catch {
-    return path;
-  }
-}
-
 export class ConnectionTestError extends Error {
   constructor(readonly failure: ConnectionTestFailure) {
     super(failure.message);

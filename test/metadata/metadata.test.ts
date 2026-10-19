@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as vscode from 'vscode';
+import type { RoutedModel } from '../../src/relay/types';
 import {
   _resetMetadataCacheForTests,
   getCachedData,
   getCachedFetchedAt,
   initMetadataCache,
+  onMetadataChanged,
   scheduleRefresh,
 } from '../../src/metadata/metadataCache';
-import { enrichModelsWithOpenRouter, OPENROUTER_CACHE_KEY, OPENROUTER_MAX_ENTRIES, parseOpenRouterResponse } from '../../src/metadata/openrouterFallback';
+import { enrichModelsWithOpenRouter, OPENROUTER_CACHE_KEY, OPENROUTER_MAX_ENTRIES, parseOpenRouterResponse, scheduleOpenRouterRefresh } from '../../src/metadata/openrouterFallback';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -24,6 +26,10 @@ function contextWith(initial: Record<string, unknown> = {}) {
     },
     values,
   };
+}
+
+function routedModel(id: string, overrides: Partial<RoutedModel> = {}): RoutedModel {
+  return { id, upstreamId: id, pickerId: id, apiType: 'chat-completions', catalogSource: 'discovery', ...overrides };
 }
 
 describe('metadata safety', () => {
@@ -86,6 +92,51 @@ describe('metadata safety', () => {
     })]);
   });
 
+  it.each([undefined, null, {}, { data: null }, { data: {} }, { error: { message: 'unavailable' } }])('rejects malformed OpenRouter catalog envelopes %#', payload => {
+    expect(() => parseOpenRouterResponse(payload as never)).toThrow('must contain a data array');
+  });
+
+  it('retains the last catalog on a malformed successful response but accepts a genuinely empty directory', async () => {
+    const old = { data: parseOpenRouterResponse({ data: [{ id: 'vendor/model', context_length: 100_000 }] }), fetchedAt: 0 };
+    const context = contextWith({ [OPENROUTER_CACHE_KEY]: old });
+    initMetadataCache(context as unknown as vscode.ExtensionContext);
+    const changed = vi.fn();
+    const subscription = onMetadataChanged(changed);
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('{"error":{"message":"temporarily unavailable"}}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"data":[]}', { status: 200 }));
+    try {
+      await scheduleOpenRouterRefresh(0, true);
+      expect(context.values.get(OPENROUTER_CACHE_KEY)).toBe(old);
+      expect(changed).not.toHaveBeenCalled();
+      await scheduleOpenRouterRefresh(0, true);
+      expect(getCachedData(OPENROUTER_CACHE_KEY)).toEqual([]);
+      expect(context.values.get(OPENROUTER_CACHE_KEY)).not.toBe(old);
+      expect(changed).toHaveBeenCalledOnce();
+    } finally {
+      subscription.dispose();
+    }
+  });
+
+  it.each([undefined, null, '', '   ', 'invalid', '-0.01', 'Infinity', 'NaN', '1e308', 0, false, {}, [], ['0']]
+    .map(value => ({ value })))('keeps invalid or overflowing prices unknown %#', ({ value }) => {
+    const [model] = parseOpenRouterResponse({ data: [{ id: 'vendor/model', supported_parameters: ['tools'],
+      pricing: { prompt: value, completion: value, input_cache_read: value, input_cache_write: value } as never,
+    }] });
+    expect(model.referencePricing).toBeUndefined();
+    expect(model.toolCalling).toBe(true);
+  });
+
+  it('preserves free pricing and independently retains valid rate fields', () => {
+    const models = parseOpenRouterResponse({ data: [
+      { id: 'vendor/free', pricing: { prompt: '0', completion: ' 0 ', input_cache_read: '2e-6', input_cache_write: '0.000001' } },
+      { id: 'vendor/partial', pricing: { prompt: null, completion: '0.000004' } as never },
+    ] });
+    expect(models[0].referencePricing).toEqual({ currencyCode: 'USD', inputPer1M: 0, outputPer1M: 0,
+      cacheHitPer1M: 2, cacheCreationPer1M: 1 });
+    expect(models[1].referencePricing).toMatchObject({ currencyCode: 'USD', inputPer1M: undefined, outputPer1M: 4 });
+  });
+
   it('enriches only unambiguous models and never overwrites relay metadata', async () => {
     const context = contextWith();
     initMetadataCache(context as unknown as vscode.ExtensionContext);
@@ -127,6 +178,72 @@ apiType: 'chat-completions' as const },
     expect(enriched).toMatchObject({ contextWindow: 200_000, imageInput: true, metadataSources: { contextWindow: 'openrouter' } });
     expect(preserved).toMatchObject({ maxInputTokens: 8_192, metadataSources: { maxInputTokens: 'api' } });
     expect(ambiguous.maxInputTokens).toBeUndefined();
+  });
+
+  it('matches case-insensitively, prefers full IDs and keeps the first duplicate full ID', () => {
+    const data = parseOpenRouterResponse({ data: [
+      { id: 'vendor-a/Shared', context_length: 100 },
+      { id: 'VENDOR-A/SHARED', context_length: 200 },
+      { id: 'vendor-b/shared', context_length: 300 },
+      { id: 'vendor/Unique', context_length: 400 },
+      { id: 'Same', context_length: 500 },
+      { id: 'other/same', context_length: 600 },
+      { id: 'vendor/Duplicate', context_length: 700 },
+      { id: 'vendor/Duplicate', context_length: 800 },
+    ] });
+    initMetadataCache(contextWith({ [OPENROUTER_CACHE_KEY]: { data, fetchedAt: Date.now() } }) as unknown as vscode.ExtensionContext);
+    const models = ['VeNdOr-A/sHaReD', 'SHARED', 'uNiQuE', 'same', 'vendor/Duplicate', 'duplicate', 'missing/unique'].map(id => routedModel(id));
+    const result = enrichModelsWithOpenRouter(models);
+
+    expect(result.map(model => model.contextWindow)).toEqual([100, undefined, 400, 500, 700, undefined, undefined]);
+    for (const index of [1, 5, 6]) expect(result[index]).toBe(models[index]);
+    expect(models.every(model => model.contextWindow === undefined)).toBe(true);
+  });
+
+  it('preserves declared values, false capabilities and their metadata sources', () => {
+    const data = parseOpenRouterResponse({ data: [{
+      id: 'vendor/model', context_length: 200_000, top_provider: { max_completion_tokens: 16_384 },
+      architecture: { input_modalities: ['image'] }, supported_parameters: ['tools', 'reasoning'],
+      pricing: { prompt: '0.000002', completion: '0.000004' },
+    }] });
+    initMetadataCache(contextWith({ [OPENROUTER_CACHE_KEY]: { data, fetchedAt: Date.now() } }) as unknown as vscode.ExtensionContext);
+    const declared = routedModel('model', {
+      catalogSource: 'configured', contextWindow: 64_000, maxOutputTokens: 8_192,
+      imageInput: false, toolCalling: false, thinking: false,
+      referencePricing: { currencyCode: 'USD', inputPer1M: 1 },
+      metadataSources: { contextWindow: 'api', imageInput: 'api', toolCalling: 'api', referencePricing: 'api' },
+    });
+    const partial = routedModel('model', { imageInput: false, metadataSources: { imageInput: 'api' } });
+    const result = enrichModelsWithOpenRouter([declared, partial]);
+
+    expect(result[0]).toBe(declared);
+    expect(result[1]).toMatchObject({ imageInput: false, toolCalling: true, thinking: true, contextWindow: 200_000,
+      metadataSources: { imageInput: 'api', toolCalling: 'openrouter', contextWindow: 'openrouter' } });
+  });
+
+  it.each([
+    undefined, {}, [{ id: 'model', fullId: '' }], [{ id: 'model', fullId: 'vendor/model', contextWindow: 0 }],
+    [{ id: 'model', fullId: 'vendor/model', vision: 'true' }],
+    Array.from({ length: OPENROUTER_MAX_ENTRIES + 1 }, () => ({ id: 'model', fullId: 'vendor/model' })),
+  ].map(data => ({ data })))('ignores an invalid cached catalog without changing the model list %#', ({ data }) => {
+    initMetadataCache(contextWith({ [OPENROUTER_CACHE_KEY]: { data, fetchedAt: Date.now() } }) as unknown as vscode.ExtensionContext);
+    const models = [routedModel('model')];
+    expect(enrichModelsWithOpenRouter(models)).toBe(models);
+  });
+
+  it('rebuilds matching for every batch after cached entries change', () => {
+    const data = parseOpenRouterResponse({ data: [{ id: 'vendor/model', context_length: 100 }] });
+    const context = contextWith({ [OPENROUTER_CACHE_KEY]: { data, fetchedAt: Date.now() } });
+    initMetadataCache(context as unknown as vscode.ExtensionContext);
+    const model = routedModel('model');
+    expect(enrichModelsWithOpenRouter([model])[0].contextWindow).toBe(100);
+
+    data.push(...parseOpenRouterResponse({ data: [{ id: 'other/model', context_length: 200 }] }));
+    expect(enrichModelsWithOpenRouter([model])[0]).toBe(model);
+    context.values.set(OPENROUTER_CACHE_KEY, { data: parseOpenRouterResponse({ data: [
+      { id: 'new/model', context_length: 300 },
+    ] }), fetchedAt: Date.now() });
+    expect(enrichModelsWithOpenRouter([model])[0].contextWindow).toBe(300);
   });
 
   it('uses validators for TTL refreshes but bypasses them for forced refreshes', async () => {

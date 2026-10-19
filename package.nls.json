@@ -3,7 +3,6 @@
   "extension.description": "Use models from your OpenAI-compatible AI relay directly in the Copilot Chat model picker.",
   "command.setRelayKey": "WeaveNet: Set Relay API Key",
   "command.clearRelayKey": "WeaveNet: Clear Relay API Key",
-  "command.createProfile": "WeaveNet: Create Connection Profile",
   "command.addConnection": "WeaveNet: Add Relay Connection",
   "command.editConnection": "WeaveNet: Edit Relay Connection",
   "command.copyConnection": "WeaveNet: Copy Relay Connection",
@@ -20,11 +19,11 @@
   "configuration.profiles.description": "All named global Relay connections are enabled simultaneously and their model catalogs are aggregated. Remote relays must use HTTPS; HTTP is allowed only for localhost and IP loopback addresses. Each profile has an extension-managed UUID and one API key stored only in VS Code SecretStorage. Extra header values are regular VS Code settings and must not contain secrets.",
   "configuration.modelOpenAICapabilities.description": "Per-model OpenAI request capabilities. Declare verified support only; reasoning summaries are omitted by default and standard images preserve selected parameters.",
   "configuration.anthropicVersion.description": "Anthropic protocol version header sent when calling /messages for Claude models.",
-  "configuration.openaiPromptCaching.description": "Send a stable prompt_cache_key for GPT models to improve OpenAI-compatible prompt cache routing.",
-  "configuration.openaiPromptCacheKey.description": "Optional override for the GPT prompt_cache_key. Leave empty to use a stable key derived from the current workspace.",
-  "configuration.claudePromptCaching.automatic": "Enable Anthropic prompt caching on system, tools, and the latest two user-message cache breakpoints.",
+  "configuration.openaiPromptCaching.description": "Send prompt_cache_key when model support or a custom cache key is explicitly configured. Model names do not determine support.",
+  "configuration.openaiPromptCacheKey.description": "Optional prompt_cache_key and an explicit declaration of Relay support. An explicit model promptCacheKey: false overrides it. Leave empty to generate a workspace key only for models declaring support.",
+  "configuration.claudePromptCaching.automatic": "Use top-level automatic caching when the model declares support; otherwise mark system, tools, and the latest two user messages.",
   "configuration.claudePromptCaching.disabled": "Do not send cache_control for Claude requests.",
-  "configuration.claudePromptCaching.description": "Claude prompt caching mode. Automatic adds safe cache breakpoints to stable prefixes and recent user turns.",
+  "configuration.claudePromptCaching.description": "Claude prompt caching mode. The model automaticCaching capability selects top-level automatic caching without adding block breakpoints.",
   "configuration.claudePromptCachingTTL.description": "Anthropic prompt cache lifetime. 1h may improve long-running agent sessions but can cost more than 5m.",
   "configuration.temperature.description": "Optional sampling temperature. For OpenAI-compatible requests, temperature takes precedence when top_p is also set.",
   "configuration.topP.description": "Optional nucleus-sampling top_p. OpenAI-compatible requests send it only when temperature is not configured.",
@@ -56,5 +55,8 @@
   "configuration.modelOpenAI.samplingEfforts.description": "Only send sampling parameters for these documented reasoning effort levels.",
   "configuration.modelOpenAI.imageCompatibility.description": "Standard preserves supported parameters and image schema. Legacy relay opts into private media_type and image routing hint omissions.",
   "configuration.modelMetadataEnabled.description": "Supplement missing model capabilities and reference pricing from the public OpenRouter catalog. Disable to use only relay metadata and model declarations.",
-  "configuration.legacyCapabilities.deprecation": "Retained for existing installations. Configure toolCalling or imageInput on individual models in the connection; explicit model declarations take precedence."
+  "configuration.legacyCapabilities.deprecation": "Retained for existing installations. Configure toolCalling or imageInput on individual models in the connection; explicit model declarations take precedence.",
+  "command.compareInputTokens": "WeaveNet: Compare Input Token Counts",
+  "configuration.modelOpenAI.tokenCounting.description": "Supports the Responses input token count endpoint. Used only by the manual token comparison command.",
+  "configuration.modelClaude.automaticCaching.description": "Supports top-level cache_control. When caching is enabled, use it instead of explicit block breakpoints."
 }

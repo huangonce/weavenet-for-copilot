@@ -117,6 +117,7 @@ apiType: 'messages' as const });
       capabilities: {
         openai: {
           tokenLimitField: 'max_completion_tokens',
+          tokenCounting: true,
           contextWindow: true,
           reasoningEfforts: ['minimal', 'high', 'invalid'],
           defaultReasoningEffort: 'minimal',
@@ -125,10 +126,22 @@ apiType: 'messages' as const });
     }, 'chat-completions')).toMatchObject({
       openai: {
         tokenLimitField: 'max_completion_tokens',
+        tokenCounting: true,
         reasoningEfforts: ['minimal', 'high'],
         defaultReasoningEffort: 'minimal',
       },
     });
+  });
+
+  it('preserves explicit automatic caching capabilities from the directory', () => {
+    for (const automaticCaching of [true, false]) {
+      expect(toRoutedModel({ id: 'relay-claude', capabilities: { claude: { automaticCaching } } }, 'messages').claude?.automaticCaching)
+        .toBe(automaticCaching);
+    }
+    expect(toRoutedModel({ id: 'relay-claude', capabilities: { claude: { automaticCaching: 'true' } } }, 'messages').claude?.automaticCaching)
+      .toBeUndefined();
+    expect(toRoutedModel({ id: 'relay-responses', capabilities: { openai: { tokenCounting: 'true' } } }, 'responses').openai?.tokenCounting)
+      .toBeUndefined();
   });
 
   it('filters, sorts, and formats models for the picker', () => {

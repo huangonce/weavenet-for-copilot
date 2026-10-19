@@ -136,6 +136,8 @@ export interface OpenAIRequestCapabilities {
   /** Defaults to max_tokens for compatibility when sendMaxTokens is enabled. */
   tokenLimitField?: 'max_tokens' | 'max_completion_tokens' | 'omit';
   promptCacheKey?: boolean;
+  /** Enables user-initiated diagnostics through POST /responses/input_tokens. */
+  tokenCounting?: boolean;
   store?: boolean;
   strictTools?: boolean;
   parallelToolCalls?: boolean;
@@ -172,6 +174,7 @@ export interface OpenAIUsage {
   total_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
+    cache_write_tokens?: number;
   };
   completion_tokens_details?: {
     reasoning_tokens?: number;
@@ -254,7 +257,7 @@ export interface ResponsesToolDefinition {
   name: string;
   description?: string;
   parameters?: Record<string, unknown>;
-  strict?: true;
+  strict?: boolean;
 }
 
 export interface ResponsesRequest {
@@ -280,7 +283,7 @@ export interface ResponsesRequest {
 
 export interface ResponsesUsage {
   input_tokens?: number;
-  input_tokens_details?: { cached_tokens?: number };
+  input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   output_tokens?: number;
   output_tokens_details?: { reasoning_tokens?: number };
   total_tokens?: number;
@@ -402,6 +405,8 @@ export interface ClaudeContentBlockRedactedThinking {
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface ClaudeRequestCapabilities {
+  /** Supports request-level cache_control instead of explicit content breakpoints. */
+  automaticCaching?: boolean;
   thinkingMode?: 'manual' | 'adaptive';
   reasoningEfforts?: ClaudeEffort[];
   defaultReasoningEffort?: ClaudeEffort;
@@ -441,6 +446,7 @@ export interface ClaudeRequest {
   top_p?: number;
   thinking?: ClaudeThinking;
   output_config?: { effort: ClaudeEffort };
+  cache_control?: ClaudeCacheControl;
 }
 
 export interface ClaudeCacheControl {
@@ -455,6 +461,10 @@ export interface ClaudeUsage {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
 }
 
 export interface ClaudeStreamEvent {

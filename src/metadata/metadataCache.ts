@@ -59,19 +59,6 @@ export function getCachedData<T>(key: string, ttlMs = Number.POSITIVE_INFINITY):
   return entry.data;
 }
 
-/**
- * Finds a cached routed model by picker route, falling back to its model ID.
- */
-export function findRoutedModel<T extends { readonly id: string; readonly pickerId?: string }>(
-  key: string,
-  pickerId: string,
-  ttlMs = Number.POSITIVE_INFINITY,
-): T | undefined {
-  return getCachedData<readonly T[]>(key, ttlMs)?.find(
-    (model) => model.pickerId === pickerId || model.id === pickerId,
-  );
-}
-
 /** Returns the cache timestamp for diagnostic logging. */
 export function getCachedFetchedAt(key: string): number | undefined {
   return validCacheEntry(extensionContext?.globalState.get<unknown>(key))?.fetchedAt;

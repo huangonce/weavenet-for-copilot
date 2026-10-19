@@ -5,8 +5,7 @@ import {
   supportsImageInputForRoutedModel,
   supportsToolCallingForModel,
 } from '../relay/models';
-import type { ChatRequest, OpenAIUsage, ReasoningEffort, ResponsesRequest, RoutedModel } from '../relay/types';
-import { toLanguageModelError } from './connection';
+import type { ChatRequest, ReasoningEffort, ResponsesRequest, RoutedModel } from '../relay/types';
 import {
   convertMessages,
   convertResponsesInput,
@@ -17,13 +16,12 @@ import {
   getConfiguredReasoningEffort,
   parseToolArguments,
 } from './helpers';
-import { createRequestDiagnostics } from './requestDiagnostics';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
 import { cloneReplayState, ReplayBudget } from '../relay/replayState';
 import { hasProtocolReplayCarrier, prepareProtocolTools, reconcileProtocolText, reportProtocolReplay, warnProtocolReplayUnavailable } from './protocolState';
 import type { ResponsesOutputItem, ToolCall } from '../relay/types';
-import { ResponsePartEmitter } from './responsePartEmitter';
+import { runResponseLifecycle } from './responseLifecycle';
 
 export interface OpenAIResponseContext {
   readonly config: ExtensionConfig;
@@ -39,7 +37,7 @@ export interface OpenAIResponseContext {
 }
 
 export async function provideOpenAIResponse(context: OpenAIResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, token, apiKey, debug } = context;
   const tools = supportsToolCallingForModel(routedModel, config)
     ? convertTools(options.tools, routedModel.openai?.strictTools === true)
     : undefined;
@@ -50,7 +48,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     requestTimeoutMs: config.requestTimeoutMs,
     streamIdleTimeoutMs: config.streamIdleTimeoutMs,
   });
-  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
+  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel, config)
     ? getOpenAIPromptCacheKey(config)
     : undefined;
   const replayReasoningContent = routedModel.openai?.replayReasoningContent === true;
@@ -93,15 +91,12 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
     stream_options: { include_usage: true },
   };
   logOpenAIRequest(debug, config, request);
-  const diagnostics = createRequestDiagnostics(debug, config, 'OpenAI', model.id, request.messages.length, request.tools?.length ?? 0);
-  const output = new ResponsePartEmitter(progress);
-
   const replayBudget = new ReplayBudget();
   let replyText = '';
   let replyReasoning = '';
   const pendingTools: ToolCall[] = [];
 
-  try {
+  await runResponseLifecycle(context, 'OpenAI', request.messages.length, request.tools?.length ?? 0, async (output, diagnostics) => {
     await client.streamChatCompletion(request, {
       onContent: (text) => {
         diagnostics.onContent();
@@ -115,7 +110,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
       },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
-      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-chat'),
+      onOpenAIUsage: diagnostics.onOpenAIUsage,
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
       onOpenAIFinishReason: diagnostics.onOpenAIFinishReason,
@@ -139,18 +134,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
           ...(pendingTools.length ? { tool_calls: pendingTools } : {}) } });
       for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
     }
-    output.flush();
-    diagnostics.complete();
-  } catch (error) {
-    if (token.isCancellationRequested) {
-      output.discard();
-      diagnostics.cancelled();
-      throw new vscode.CancellationError();
-    }
-    flushPartialOutput(output);
-    diagnostics.failed(error);
-    throw toLanguageModelError(error);
-  }
+  });
 }
 
 /**
@@ -162,7 +146,7 @@ export async function provideOpenAIResponse(context: OpenAIResponseContext): Pro
  * reasoning survives without server-side storage.
  */
 export async function provideResponsesResponse(context: OpenAIResponseContext): Promise<void> {
-  const { config, routedModel, model, messages, options, progress, token, apiKey, debug } = context;
+  const { config, routedModel, model, messages, options, token, apiKey, debug } = context;
   const supportsImageInput = supportsImageInputForRoutedModel(routedModel, config);
   const tools = supportsToolCallingForModel(routedModel, config)
     ? convertResponsesTools(options.tools, routedModel.openai?.strictTools === true)
@@ -177,7 +161,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   const replayAvailable = hasProtocolReplayCarrier();
   if (!replayAvailable) warnProtocolReplayUnavailable('Responses');
   const encryptedReasoning = routedModel.openai?.encryptedReasoning === true;
-  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel)
+  const promptCacheKey = config.openaiPromptCaching && supportsPromptCacheKey(routedModel, config)
     ? getOpenAIPromptCacheKey(config)
     : undefined;
   const { input, instructions } = convertResponsesInput(
@@ -217,8 +201,6 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     ...(tools?.length && routedModel.openai?.parallelToolCalls === true ? { parallel_tool_calls: true } : {}),
   };
   logResponsesRequest(debug, config, request);
-  const diagnostics = createRequestDiagnostics(debug, config, 'Responses', model.id, input.length, request.tools?.length ?? 0);
-  const output = new ResponsePartEmitter(progress);
   const replayBudget = new ReplayBudget();
   let replyText = '';
   let terminal: string | undefined;
@@ -226,7 +208,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   const pendingTools: ToolCall[] = [];
   const reasoningItems: ResponsesOutputItem[] = [];
 
-  try {
+  await runResponseLifecycle(context, 'Responses', input.length, request.tools?.length ?? 0, async (output, diagnostics) => {
     await client.streamResponses(request, {
       onContent: (text) => {
         diagnostics.onContent();
@@ -243,7 +225,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
       onResponsesOutputItems: (items) => { outputItems = cloneReplayState(items); },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
-      onOpenAIUsage: (usage) => logOpenAIUsage(debug, config, usage, 'openai-responses'),
+      onOpenAIUsage: diagnostics.onOpenAIUsage,
       onResponse: diagnostics.onResponse,
       onStreamEnd: (protocol, event) => { terminal = event; diagnostics.onStreamEnd(protocol, event); },
       onRefusal: (text) => {
@@ -274,27 +256,7 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
     const parts = prepareProtocolTools(calls);
     if (replayAvailable) reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'responses', displayText: replyText, responses: savedItems });
     for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
-    output.flush();
-    diagnostics.complete();
-  } catch (error) {
-    if (token.isCancellationRequested) {
-      output.discard();
-      diagnostics.cancelled();
-      throw new vscode.CancellationError();
-    }
-    flushPartialOutput(output);
-    diagnostics.failed(error);
-    throw toLanguageModelError(error);
-  }
-}
-
-function flushPartialOutput(output: ResponsePartEmitter): void {
-  try {
-    output.flush();
-  } catch {
-    // Preserve the request/transport failure that ended the stream. A progress
-    // failure is already the primary error when it originated from flush().
-  }
+  });
 }
 
 function allowsSampling(model: RoutedModel, effort: ReasoningEffort | undefined): boolean {
@@ -313,20 +275,18 @@ function getOpenAIPromptCacheKey(config: ExtensionConfig): string {
 
 function logOpenAIRequest(debug: DebugLogger, config: ExtensionConfig, request: ChatRequest): void {
   if (!config.debug) return;
-  const bodyBytes = Buffer.byteLength(JSON.stringify(request));
   const imageParts = countOpenAIImages(request);
   debug(
     config,
     `OpenAI Chat Completions request: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}, `
       + `imageParts=${imageParts}, promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `streamUsage=${Boolean(request.stream_options?.include_usage)}, `
-      + `customEndpointImageCompatibility=${imageParts > 0}, bodyBytes=${bodyBytes}`,
+      + `customEndpointImageCompatibility=${imageParts > 0}`,
   );
 }
 
 function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, request: ResponsesRequest): void {
   if (!config.debug) return;
-  const bodyBytes = Buffer.byteLength(JSON.stringify(request));
   const imageParts = countResponsesImages(request);
   debug(
     config,
@@ -335,32 +295,13 @@ function logResponsesRequest(debug: DebugLogger, config: ExtensionConfig, reques
       + `promptCacheKey=${Boolean(request.prompt_cache_key)}, `
       + `encryptedReasoning=${request.include?.includes('reasoning.encrypted_content') ?? false}, `
       + `reasoningSummary=${request.reasoning?.summary ?? 'off'}, `
-      + `replayedReasoningItems=${countReplayedReasoningItems(request)}, `
-      + `bodyBytes=${bodyBytes}`,
+      + `replayedReasoningItems=${countReplayedReasoningItems(request)}`,
   );
 }
 
 function countReplayedReasoningItems(request: ResponsesRequest): number {
   if (typeof request.input === 'string') return 0;
   return request.input.filter((item) => 'type' in item && item.type === 'reasoning' && Boolean(item.encrypted_content)).length;
-}
-
-function logOpenAIUsage(
-  debug: DebugLogger,
-  config: ExtensionConfig,
-  usage: OpenAIUsage,
-  protocol: 'openai-chat' | 'openai-responses',
-): void {
-  const apiName = protocol === 'openai-chat' ? 'OpenAI Chat Completions' : 'OpenAI Responses';
-  debug(
-    config,
-    `${apiName} usage: prompt=${usage.prompt_tokens ?? 'n/a'}, `
-      + `cached=${usage.prompt_tokens_details?.cached_tokens ?? 'n/a'}, `
-      + `completion=${usage.completion_tokens ?? 'n/a'}, total=${usage.total_tokens ?? 'n/a'}, `
-      + `reasoning=${usage.completion_tokens_details?.reasoning_tokens ?? 'n/a'}, `
-      + `predictionAccepted=${usage.completion_tokens_details?.accepted_prediction_tokens ?? 'n/a'}, `
-      + `predictionRejected=${usage.completion_tokens_details?.rejected_prediction_tokens ?? 'n/a'}`,
-  );
 }
 
 function countOpenAIImages(request: ChatRequest): number {
@@ -376,10 +317,9 @@ function countResponsesImages(request: ResponsesRequest): number {
       : 0), 0);
 }
 
-function supportsPromptCacheKey(model: RoutedModel): boolean {
-  if (model.openai?.promptCacheKey !== undefined) return model.openai.promptCacheKey;
-  // Preserve 0.4.0 behavior for existing GPT Relay configurations.
-  return model.upstreamId.toLowerCase().startsWith('gpt-');
+function supportsPromptCacheKey(model: RoutedModel, config: ExtensionConfig): boolean {
+  if (model.openai?.promptCacheKey === false) return false;
+  return model.openai?.promptCacheKey === true || Boolean(config.openaiPromptCacheKey);
 }
 
 function createTokenLimit(model: RoutedModel, value: number): Pick<ChatRequest, 'max_tokens' | 'max_completion_tokens'> {

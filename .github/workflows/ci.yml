@@ -32,17 +32,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint source
-        run: npm run lint
+      - name: Run quality checks
+        run: npm run check
 
-      - name: Type-check source and tests
-        run: npm run typecheck
-
-      - name: Compile extension
-        run: npm run compile
-
-      - name: Run tests with coverage
-        run: npm run test:coverage
+      - name: Package extension
+        run: npm run package -- --out weavenet-for-copilot.vsix
 
       - name: Inspect extension package contents
         run: npm run package:list
@@ -54,17 +48,24 @@ jobs:
           path: coverage/coverage-summary.json
           if-no-files-found: ignore
 
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weavenet-for-copilot-${{ github.sha }}
+          path: weavenet-for-copilot.vsix
+          if-no-files-found: error
+
   host:
     name: Extension host smoke (${{ matrix.label }})
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The declared engines.vscode floor must be exercised, not just the
-          # newest stable host, because the code relies on proposed-API
-          # surfaces that older hosts may or may not expose.
+          # Exercise provider registration, requests and protocol replay on
+          # both the declared engines.vscode floor and the latest stable host.
           - label: minimum-supported
             vscodeVersion: '1.116.0'
           - label: latest-stable
@@ -83,10 +84,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Compile extension
-        run: npm run compile
+      - name: Download tested VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: weavenet-for-copilot-${{ github.sha }}
 
-      - name: Run VS Code extension host smoke test
+      - name: Run installed VSIX regression
         env:
           VSCODE_VERSION: ${{ matrix.vscodeVersion }}
-        run: xvfb-run -a npm run test:integration
+          VSCODE_TEST_VSIX: ${{ github.workspace }}/weavenet-for-copilot.vsix
+        run: xvfb-run -a node test/integration/run.cjs

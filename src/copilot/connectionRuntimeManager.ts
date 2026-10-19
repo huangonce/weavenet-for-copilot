@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { createHmac } from 'node:crypto';
 import type { AuthManager } from '../auth/auth';
 import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ConnectionProfile, ExtensionConfig } from '../config/config';
@@ -21,6 +22,8 @@ import { formatLogError } from './requestDiagnostics';
 export { catalogRevision } from './catalogIdentity';
 
 export type ModelRefreshIntent = 'passive' | 'invalidate';
+
+const MAX_CONCURRENT_MODEL_REFRESHES = 3;
 
 export interface ConnectionStatus {
   phase: 'unconfigured' | 'keyMissing' | 'refreshing' | 'ready' | 'degraded' | 'error';
@@ -48,6 +51,8 @@ export interface ConnectionRuntime {
   revision: string;
   /** Credential-bound identity for persisted snapshots and probe verdicts. */
   artifactRevision?: string;
+  /** Process-local credential identity, independent of display/catalog settings. */
+  credentialRevision?: string;
   models: RoutedModel[];
   directory: RoutedModel[];
   generation: number;
@@ -57,6 +62,7 @@ export interface ConnectionRuntime {
   message?: string;
   lastDiagnostics?: ConnectionDiagnosticsSnapshot;
   refreshTask?: Promise<void>;
+  refreshToken?: vscode.CancellationToken;
 }
 
 export interface ConnectionRuntimeManagerOptions {
@@ -80,6 +86,8 @@ export interface ConnectionRuntimeManagerOptions {
  */
 export class ConnectionRuntimeManager {
   private readonly runtimes = new Map<string, ConnectionRuntime>();
+  private activeRefreshes = 0;
+  private readonly queuedRefreshes: Array<() => void> = [];
   private connectionStatus: ConnectionStatus = {
     phase: 'unconfigured', connectionCount: 0, modelCount: 0, warningCount: 0, refreshingCount: 0, connections: [],
   };
@@ -127,6 +135,7 @@ export class ConnectionRuntimeManager {
         existing.profile = profile;
         existing.revision = revision;
         existing.artifactRevision = undefined;
+        existing.credentialRevision = undefined;
         existing.models = [];
         existing.directory = [];
         existing.resolved = false;
@@ -149,13 +158,42 @@ export class ConnectionRuntimeManager {
 
   async reconcileConfiguration(): Promise<void> {
     const runtimes = this.syncProfiles().filter((runtime) => !runtime.resolved);
-    if (runtimes.length) await mapWithConcurrency(runtimes, 3, (runtime) => this.requestConnectionRefresh(runtime, false));
+    if (runtimes.length) await this.refreshRuntimes(runtimes, false);
     else this.options.onCatalogChanged();
   }
 
   async refreshAll(force: boolean, token?: vscode.CancellationToken): Promise<void> {
-    const runtimes = this.syncProfiles();
-    await mapWithConcurrency(runtimes, 3, (runtime) => this.requestConnectionRefresh(runtime, force, token));
+    await this.refreshRuntimes(this.syncProfiles(), force, token);
+  }
+
+  /** Applies public metadata without rediscovering models or changing connection health. */
+  refreshModelMetadata(): void {
+    let updated = false;
+    for (const runtime of this.runtimes.values()) {
+      // Only credential-validated directories may supply selectable models.
+      if (!runtime.artifactRevision) continue;
+      const config = getConfig(runtime.profile);
+      if (!config.modelMetadataEnabled) continue;
+      runtime.models = this.options.catalog.assemble(config, runtime.directory);
+      updated = true;
+    }
+    if (updated) {
+      this.options.rebuildBindings();
+      this.options.onCatalogChanged();
+    }
+  }
+
+  async prepareCatalog(silent: boolean, token: vscode.CancellationToken): Promise<void> {
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    if (!silent) return this.refreshAll(false, token);
+
+    // VS Code's silent flag suppresses interaction. Serving local catalogs is
+    // our latency policy: only connections without a catalog need to be awaited.
+    const pending = new Set(await this.restoreLocalCatalogs());
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    await this.refreshRuntimes(this.syncProfiles().filter((runtime) => pending.has(runtime.profile.id)), false, token);
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    this.startBackgroundRefresh();
   }
 
   async refreshConnection(profileId: string, force = true): Promise<void> {
@@ -176,6 +214,8 @@ export class ConnectionRuntimeManager {
     for (const runtime of this.syncProfiles()) {
       if (runtime.resolved) continue;
       const profile = runtime.profile;
+      const generation = runtime.generation;
+      const revision = runtime.revision;
       let apiKey: string | undefined;
       let artifactPepper: string | undefined;
       try {
@@ -186,9 +226,11 @@ export class ConnectionRuntimeManager {
         this.options.debug(getConfig(profile), `[models] connection=${profile.name}, API key read failed: ${formatLogError(error)}`);
         continue;
       }
+      if (runtime.resolved || !this.isCurrentRuntime(runtime, generation, revision)) continue;
       if (!apiKey || !artifactPepper) continue;
       const config = getConfig(profile);
       const artifactRevision = catalogArtifactRevision(config, apiKey, artifactPepper);
+      runtime.credentialRevision = credentialRevision(apiKey, artifactPepper);
       changed = this.restoreSnapshot(runtime, config, artifactRevision) || changed;
       if (!runtime.directory.length) pending.push(profile.id);
     }
@@ -201,10 +243,8 @@ export class ConnectionRuntimeManager {
    * for it. The catalog-change callback re-enumerates the picker once it lands.
    */
   startBackgroundRefresh(): void {
-    for (const runtime of this.syncProfiles()) {
-      if (runtime.resolved || runtime.refreshTask) continue;
-      void this.requestConnectionRefresh(runtime, false).catch(() => undefined);
-    }
+    const runtimes = this.syncProfiles().filter((runtime) => !runtime.resolved && !runtime.refreshTask);
+    void this.refreshRuntimes(runtimes, false).catch(() => undefined);
   }
 
   async handleSecretChange(secretKey: string): Promise<void> {
@@ -216,6 +256,7 @@ export class ConnectionRuntimeManager {
         runtime.generation++;
         runtime.resolved = false;
         runtime.artifactRevision = undefined;
+        runtime.credentialRevision = undefined;
         runtime.models = [];
         runtime.directory = [];
         runtime.phase = 'refreshing';
@@ -233,6 +274,7 @@ export class ConnectionRuntimeManager {
       runtime.generation++;
       runtime.resolved = false;
       runtime.artifactRevision = undefined;
+      runtime.credentialRevision = undefined;
       runtime.models = [];
       runtime.directory = [];
       runtime.phase = 'refreshing';
@@ -260,6 +302,14 @@ export class ConnectionRuntimeManager {
   }
 
   private requestConnectionRefresh(runtime: ConnectionRuntime, force: boolean, token?: vscode.CancellationToken): Promise<void> {
+    if (token?.isCancellationRequested) return Promise.reject(new vscode.CancellationError());
+    if (runtime.refreshTask && runtime.refreshToken?.isCancellationRequested) {
+      // A retry must not inherit a cancelled owner's queued or active task.
+      // Its generation guard still prevents that old task from publishing.
+      runtime.generation++;
+      runtime.refreshTask = undefined;
+      runtime.refreshToken = undefined;
+    }
     if (force) {
       if (runtime.resolved || runtime.refreshTask) runtime.generation++;
       runtime.resolved = false;
@@ -268,18 +318,45 @@ export class ConnectionRuntimeManager {
     if (runtime.refreshTask) {
       // A cancelled picker call stops waiting immediately; the shared refresh
       // continues for whoever started it.
-      return token ? Promise.race([runtime.refreshTask, cancelledPromise(token)]) : runtime.refreshTask;
+      return waitForRefresh(runtime.refreshTask, token);
     }
-    const task = Promise.resolve().then(() => this.refreshRuntimeUntilCurrent(runtime, token));
+    const task = Promise.resolve().then(() => this.runRefresh(async () => {
+      if (token?.isCancellationRequested) throw new vscode.CancellationError();
+      await this.refreshRuntimeUntilCurrent(runtime, token);
+    }));
     const sharedTask = task.finally(() => {
-      if (runtime.refreshTask === sharedTask) runtime.refreshTask = undefined;
+      if (runtime.refreshTask === sharedTask) {
+        runtime.refreshTask = undefined;
+        runtime.refreshToken = undefined;
+      }
     });
     runtime.refreshTask = sharedTask;
-    return sharedTask;
+    runtime.refreshToken = token;
+    return waitForRefresh(sharedTask, token);
+  }
+
+  private async refreshRuntimes(runtimes: readonly ConnectionRuntime[], force: boolean, token?: vscode.CancellationToken): Promise<void> {
+    await Promise.all(runtimes.map((runtime) => this.requestConnectionRefresh(runtime, force, token)));
+  }
+
+  private async runRefresh(operation: () => Promise<void>): Promise<void> {
+    if (this.activeRefreshes >= MAX_CONCURRENT_MODEL_REFRESHES) {
+      await new Promise<void>((resolve) => this.queuedRefreshes.push(resolve));
+    } else {
+      this.activeRefreshes++;
+    }
+    try {
+      await operation();
+    } finally {
+      // Transfer this slot to the next task before allowing another caller in.
+      const next = this.queuedRefreshes.shift();
+      if (next) next();
+      else this.activeRefreshes--;
+    }
   }
 
   private async refreshRuntimeUntilCurrent(runtime: ConnectionRuntime, token?: vscode.CancellationToken): Promise<void> {
-    while (this.runtimes.get(runtime.profile.id) === runtime) {
+    while (this.runtimes.get(runtime.profile.id) === runtime && !token?.isCancellationRequested) {
       const generation = runtime.generation;
       await this.refreshRuntimeOnce(runtime, generation, token);
       if (runtime.generation === generation) return;
@@ -307,6 +384,7 @@ export class ConnectionRuntimeManager {
     if (!this.isCurrentRuntime(runtime, generation, revision)) return;
     if (!apiKey) {
       runtime.artifactRevision = undefined;
+      runtime.credentialRevision = undefined;
       runtime.models = [];
       runtime.directory = [];
       await this.options.catalog.clearSnapshot(profile);
@@ -327,6 +405,7 @@ export class ConnectionRuntimeManager {
     }
     const config = getConfig(profile);
     const artifactRevision = catalogArtifactRevision(config, apiKey, artifactPepper);
+    runtime.credentialRevision = credentialRevision(apiKey, artifactPepper);
     const artifactChanged = this.restoreSnapshot(runtime, config, artifactRevision);
     runtime.phase = 'refreshing';
     runtime.message = undefined;
@@ -414,37 +493,25 @@ export class ConnectionRuntimeManager {
   }
 }
 
-async function mapWithConcurrency<T>(
-  values: readonly T[],
-  concurrency: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (next < values.length) {
-      const value = values[next++];
-      await operation(value);
-    }
-  });
-  await Promise.all(workers);
-}
-
 export function isCancellationError(error: unknown): boolean {
   return error instanceof vscode.CancellationError
     || (error instanceof Error && (error.name === 'CancellationError' || error.name === 'AbortError'));
 }
 
-function cancelledPromise(token: vscode.CancellationToken): Promise<never> {
-  return new Promise((_, reject) => {
-    if (token.isCancellationRequested) {
-      reject(new vscode.CancellationError());
-      return;
-    }
-    const onCancel = token.onCancellationRequested as unknown;
-    if (typeof onCancel === 'function') {
-      (onCancel as (listener: () => void) => void)(() => reject(new vscode.CancellationError()));
+function credentialRevision(apiKey: string, pepper: string): string {
+  return createHmac('sha256', pepper).update('runtime-credential\0').update(apiKey).digest('hex');
+}
+
+export function waitForRefresh(task: Promise<void>, token?: vscode.CancellationToken): Promise<void> {
+  if (!token) return task;
+  let subscription: vscode.Disposable | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    if (token.isCancellationRequested) reject(new vscode.CancellationError());
+    else if (typeof token.onCancellationRequested === 'function') {
+      subscription = token.onCancellationRequested(() => reject(new vscode.CancellationError()));
     }
   });
+  return Promise.race([task, cancelled]).finally(() => subscription?.dispose());
 }
 
 function profileIdFromSecretKey(key: string): string | undefined {
