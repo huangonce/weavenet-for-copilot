@@ -107,7 +107,6 @@ describe('modelCatalogService', () => {
     const memento = new InMemoryMemento(); memento.failUpdates = true;
     const service = new ModelCatalogService(new ModelSnapshotStore(memento), debug);
     await expect(service.persistSnapshot(WORK_ID, CATALOG_REVISION, [])).resolves.toBeUndefined();
-    await expect(service.clearSnapshot(WORK_PROFILE)).resolves.toBeUndefined();
     await expect(service.deleteProfile(WORK_ID)).resolves.toBeUndefined();
     await expect(service.clearAll()).resolves.toBeUndefined();
     expect(debug).toHaveBeenCalled();

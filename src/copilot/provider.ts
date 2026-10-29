@@ -34,6 +34,7 @@ import type { ProtocolReplayState } from '../relay/replayState';
 import type { RoutedModel } from '../relay/types';
 import { formatLogError } from './requestDiagnostics';
 import { snapshotChatRequest, snapshotChatResponseOptions } from './canonicalRequest';
+import type { CanonicalChatMessage } from './canonicalRequest';
 import { convertResponsesInput } from './convert';
 import { IMAGE_ONLY_TOOL_RESULT_TEXT, normalizeToolResultBatches } from './toolResultImageNormalization';
 import {
@@ -43,6 +44,8 @@ import {
   VisionDescriptionCache,
 } from './visionProxy';
 import type { VisionDescriptionCacheWrite } from './visionProxy';
+import { estimateCanonicalTextTokens, reservedVisionDescriptionTokens } from './visionBudget';
+import { collectVisionReplayEntries, createVisionReplayPart } from './visionReplay';
 
 export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
@@ -86,6 +89,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       onCatalogChanged: () => {
         this.publishModelCatalog();
       },
+      onConnectionInvalidated: profileId => this.connectionTest.invalidate(profileId),
     });
     this.connectionTest = new ConnectionTestService({
       auth: this.auth,
@@ -222,36 +226,42 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       this.debug(getConfig(), `[models] model picker refresh failed: ${formatLogError(error)}`);
     }
     const entries = this.bindingRegistry.all();
-    const keyStates = new Map<string, boolean>();
-    await Promise.all([...new Set(entries.map(({ profileId }) => profileId))].map(async (profileId) => {
+    const keyStates = new Map<string, { hasApiKey: boolean; revision: string; credentialRevision?: string }>();
+    await waitForRefresh(Promise.all([...new Set(entries.map(({ profileId }) => profileId))].map(async (profileId) => {
       const runtime = this.runtimeManager.getRuntime(profileId);
       if (!runtime) return;
+      const { revision, credentialRevision } = runtime;
       try {
-        keyStates.set(profileId, await this.auth.hasApiKey(runtime.profile));
+        keyStates.set(profileId, { hasApiKey: await this.auth.hasApiKey(runtime.profile), revision, credentialRevision });
       } catch (error) {
-        keyStates.set(profileId, false);
+        keyStates.set(profileId, { hasApiKey: false, revision, credentialRevision });
         this.debug(getConfig(runtime.profile), `[models] connection=${runtime.profile.name}, API key status read failed: ${formatLogError(error)}`);
       }
-    }));
+    })).then(() => undefined), token);
+    if (token.isCancellationRequested) throw new vscode.CancellationError();
+    const profiles = new Map(getProfileConfiguration().profiles.map(profile => [profile.id, profile]));
     const contexts = new Map<string, {
       config: ReturnType<typeof getConfig>;
       source: { name: string; host: string | undefined };
       hasApiKey: boolean;
     }>();
-    for (const [profileId, hasApiKey] of keyStates) {
+    for (const [profileId, { hasApiKey, revision, credentialRevision }] of keyStates) {
       const runtime = this.runtimeManager.getRuntime(profileId);
-      if (!runtime) continue;
+      const profile = profiles.get(profileId);
+      if (!runtime || !profile || runtime.revision !== revision || catalogRevision(profile) !== revision
+        || runtime.credentialRevision !== credentialRevision) continue;
       contexts.set(profileId, {
-        config: getConfig(runtime.profile),
-        source: { name: runtime.profile.name, host: safeHost(runtime.profile.baseUrl) },
+        config: getConfig(profile),
+        source: { name: profile.name, host: safeHost(profile.baseUrl) },
         hasApiKey,
       });
     }
-    return entries.flatMap(({ profileId, model }) => {
+    return entries.flatMap(({ profileId, revision, model }) => {
       const context = contexts.get(profileId);
-      if (!context) return [];
+      const binding = this.bindingRegistry.get(model.pickerId);
+      if (!context || !binding || binding.revision !== revision) return [];
       const { config, source, hasApiKey } = context;
-      const info = toChatInformation(model, config, hasApiKey, source);
+      const info = toChatInformation(binding.model, config, hasApiKey, source);
       return [hasApiKey ? info : { ...info, statusIcon: new vscode.ThemeIcon('warning') }];
     });
   }
@@ -300,6 +310,10 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (!apiKey) {
       throw vscode.LanguageModelError.NoPermissions(t('The API key for “{0}” is not configured.', currentProfile.name));
     }
+    const artifactIdentity = catalogArtifactRevision(config, apiKey, await this.auth.getCatalogArtifactPepper());
+    const protocolIdentity = createHash('sha256').update(JSON.stringify({ artifactIdentity,
+      model: routedModel.upstreamId, apiType: routedModel.apiType })).digest('hex');
+    this.assertModelConnectionCurrent(binding, credential, token);
     this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
     const nativeImageInput = supportsImageInputForRoutedModel(routedModel, config);
     if (messageSnapshot.hasImages && !nativeImageInput) {
@@ -308,6 +322,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     }
     let resolvedMessages = messageSnapshot;
     let pendingVisionCacheWrites: readonly VisionDescriptionCacheWrite[] = [];
+    let visionReplayPart: vscode.LanguageModelResponsePart | undefined;
     try {
       if (nativeImageInput && messageSnapshot.hasImages) {
         validateVisionImageRequest(messageSnapshot);
@@ -336,9 +351,17 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
             this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
             return selected;
           },
+          {
+            maxInputTokens: model.maxInputTokens,
+            baseInputTokens: estimateCanonicalTextTokens(normalizeToolResultBatches(messageSnapshot).messages)
+              + estimateReplayedReasoningTokens(messageSnapshot.messages, routedModel)
+              + (optionsSnapshot.tools?.length ? estimateTextTokens(JSON.stringify(optionsSnapshot.tools)) : 0),
+            replayEntries: collectVisionReplayEntries(messageSnapshot, protocolIdentity),
+          },
         );
         resolvedMessages = vision.messages;
         pendingVisionCacheWrites = vision.pendingCacheWrites;
+        visionReplayPart = createVisionReplayPart(protocolIdentity, vision.replayEntries);
         await this.waitForExternalVisionRefresh(token);
         this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
         this.debug(
@@ -348,9 +371,6 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         );
       }
       resolvedMessages = normalizeToolResultBatches(resolvedMessages);
-      const artifactIdentity = catalogArtifactRevision(config, apiKey, await this.auth.getCatalogArtifactPepper());
-      const protocolIdentity = createHash('sha256').update(JSON.stringify({ artifactIdentity,
-        model: routedModel.upstreamId, apiType: routedModel.apiType })).digest('hex');
       const context = {
         config,
         routedModel,
@@ -369,6 +389,7 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
       else if (routedModel.apiType === 'responses') await provideResponsesResponse(context);
       else await provideOpenAIResponse(context);
       if (!token.isCancellationRequested && visionCacheGeneration === this.visionCacheGeneration) {
+        if (visionReplayPart) progress.report(visionReplayPart);
         this.visionDescriptionCache.commitAll(pendingVisionCacheWrites);
       } else {
         this.visionDescriptionCache.releasePending(pendingVisionCacheWrites);
@@ -506,35 +527,31 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
     if (_token.isCancellationRequested) throw new vscode.CancellationError();
     if (typeof text === 'string') return estimateTextTokens(text);
     const canonical = snapshotChatRequest([text]).messages[0];
-    const countImage = (bytes: number) => Math.max(256, Math.ceil(bytes / 768));
-    let tokens = 4;
+    const binding = this.bindingRegistry.get(model.id);
+    const runtime = binding ? this.runtimeManager.getRuntime(binding.profileId) : undefined;
+    const config = runtime ? getConfig(runtime.profile) : undefined;
+    const useVisionProxy = !!binding && !!config && config.visionProxyEnabled
+      && !supportsImageInputForRoutedModel(binding.model, config);
+    let imageCount = 0;
+    const countImage = (bytes: number) => {
+      if (!useVisionProxy) return Math.max(256, Math.ceil(bytes / 768));
+      imageCount++;
+      return 0;
+    };
+    let tokens = estimateCanonicalTextTokens([canonical]);
     for (const part of canonical.content) {
       if (_token.isCancellationRequested) throw new vscode.CancellationError();
-      if (part.kind === 'text') tokens += estimateTextTokens(part.value);
-      else if (part.kind === 'toolCall') tokens += estimateTextTokens(part.name) + estimateTextTokens(part.inputJson);
-      else if (part.kind === 'toolResult') {
+      if (part.kind === 'toolResult') {
         let hasText = false;
         let hasImage = false;
         for (const nested of part.content) {
-          if (nested.kind === 'text') { tokens += estimateTextTokens(nested.value); hasText ||= !!nested.value.trim(); }
+          if (nested.kind === 'text') hasText ||= !!nested.value.trim();
           else { tokens += countImage(nested.byteLength); hasImage = true; }
         }
-        if (hasImage && !hasText) tokens += estimateTextTokens(IMAGE_ONLY_TOOL_RESULT_TEXT);
+        if (hasImage && !hasText && !useVisionProxy) tokens += estimateTextTokens(IMAGE_ONLY_TOOL_RESULT_TEXT);
       } else if (part.kind === 'data') tokens += countImage(part.byteLength);
     }
-    const boundModel = this.bindingRegistry.get(model.id)?.model;
-    // Replayed reasoning is resent on the next turn, so it must be counted for
-    // every protocol that actually replays it: Messages always, and Chat
-    // Completions / Responses only with an explicit replay capability.
-    const reasoningReplay = replayProtocolFor(boundModel);
-    if (reasoningReplay) {
-      const states = canonical.content.flatMap(part => part.kind === 'thinking' && part.protocolReplay?.apiType === reasoningReplay ? [part.protocolReplay] : []);
-      const reasoning = states.length
-        ? states.flatMap(replayedReasoningText)
-        : canonical.content.flatMap(part => part.kind === 'thinking' ? [part.value] : []);
-      for (const value of reasoning) if (value) tokens += estimateTextTokens(value);
-    }
-    return tokens;
+    return tokens + estimateReplayedReasoningTokens([canonical], binding?.model) + reservedVisionDescriptionTokens(imageCount);
   }
 
   private showRefreshSummary(): void {
@@ -554,6 +571,21 @@ function externalVisionSignature(model: vscode.LanguageModelChat): string | unde
   }).capabilities;
   if (!model.version || !Number.isFinite(model.maxInputTokens) || capabilities?.supportsImageToText !== true) return undefined;
   return JSON.stringify([model.vendor, model.id, model.version, model.family, model.maxInputTokens, capabilities.supportsImageToText]);
+}
+
+/** Count reasoning only for protocols that resend it, without counting visible and replay copies twice. */
+function estimateReplayedReasoningTokens(messages: readonly CanonicalChatMessage[], boundModel?: RoutedModel): number {
+  const reasoningReplay = replayProtocolFor(boundModel);
+  if (!reasoningReplay) return 0;
+  let tokens = 0;
+  for (const message of messages) {
+    const states = message.content.flatMap(part => part.kind === 'thinking' && part.protocolReplay?.apiType === reasoningReplay ? [part.protocolReplay] : []);
+    const reasoning = states.length
+      ? states.flatMap(replayedReasoningText)
+      : message.content.flatMap(part => part.kind === 'thinking' ? [part.value] : []);
+    for (const value of reasoning) if (value) tokens += estimateTextTokens(value);
+  }
+  return tokens;
 }
 
 /** Protocol whose replayed reasoning is resent for this model, if any. */

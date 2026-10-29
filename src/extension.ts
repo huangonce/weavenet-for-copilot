@@ -24,8 +24,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   initMetadataCache(context, (message) => provider.logMetadata(message));
 
+  createStatusBarItem(context, provider);
   context.subscriptions.push(
-    createStatusBarItem(context, provider),
     registerConnectionCommands(context, provider),
     vscode.lm.registerLanguageModelChatProvider(VENDOR, provider),
     onMetadataChanged(() => provider.refreshModelMetadata()),

@@ -33,7 +33,7 @@ const mocks = vi.hoisted(() => {
     onMetadataChanged: vi.fn((_listener: () => void) => ({ dispose: () => undefined })),
     registerConnectionCommands: vi.fn(() => ({ dispose: () => undefined })),
     showInitialConnectionPrompt: vi.fn(),
-    createStatusBarItem: vi.fn(() => ({ dispose: () => undefined })),
+    createStatusBarItem: vi.fn((_context: vscode.ExtensionContext) => ({ dispose: () => undefined })),
     registerProvider: vi.fn(() => ({ dispose: () => undefined })),
     order: [] as string[],
   };
@@ -70,7 +70,12 @@ beforeEach(() => {
   mocks.provider.migrateRelayKeys.mockImplementation(async () => { mocks.order.push('keys'); });
   mocks.provider.refreshModels.mockImplementation(async () => { mocks.order.push('refresh'); });
   mocks.registerConnectionCommands.mockImplementation(() => { mocks.order.push('commands'); return { dispose: () => undefined }; });
-  mocks.createStatusBarItem.mockImplementation(() => { mocks.order.push('statusBar'); return { dispose: () => undefined }; });
+  mocks.createStatusBarItem.mockImplementation((context) => {
+    mocks.order.push('statusBar');
+    const item = { dispose: () => undefined };
+    context.subscriptions.push(item, { dispose: () => undefined });
+    return item;
+  });
   mocks.registerProvider.mockImplementation(() => { mocks.order.push('registerProvider'); return { dispose: () => undefined }; });
 });
 
@@ -88,7 +93,7 @@ describe('extension activation', () => {
     expect(mocks.order).toEqual(['profilePool', 'provider', 'keys', 'statusBar', 'commands', 'registerProvider', 'refresh']);
     expect(mocks.provider.migrateRelayKeys).toHaveBeenCalledWith([WORK_PROFILE]);
     expect(register).toHaveBeenCalledWith('weavenet', mocks.provider);
-    expect(context.subscriptions).toHaveLength(4);
+    expect(context.subscriptions).toHaveLength(5);
     expect(mocks.initMetadataCache).toHaveBeenCalledWith(context, expect.any(Function));
     expect(mocks.showInitialConnectionPrompt).toHaveBeenCalledWith(context);
     expect(mocks.provider.refreshModels).toHaveBeenCalledOnce();
@@ -115,7 +120,7 @@ describe('extension activation', () => {
     await activate(context);
 
     expect(error).toHaveBeenCalledWith(expect.stringContaining('could not migrate Relay API keys'));
-    expect(context.subscriptions).toHaveLength(4);
+    expect(context.subscriptions).toHaveLength(5);
   });
 
   it('stops before creating a provider when configuration migration fails', async () => {

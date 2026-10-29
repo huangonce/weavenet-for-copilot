@@ -18,7 +18,8 @@ import {
 } from './helpers';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
-import { cloneReplayState, ReplayBudget } from '../relay/replayState';
+import { cloneReplayState, ReplayBudget, replayDisplayText } from '../relay/replayState';
+import type { ProtocolReplayState } from '../relay/replayState';
 import { hasProtocolReplayCarrier, prepareProtocolTools, reconcileProtocolText, reportProtocolReplay, warnProtocolReplayUnavailable } from './protocolState';
 import type { ResponsesOutputItem, ToolCall } from '../relay/types';
 import { runResponseLifecycle } from './responseLifecycle';
@@ -205,8 +206,6 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
   let replyText = '';
   let terminal: string | undefined;
   let outputItems: readonly ResponsesOutputItem[] | undefined;
-  const pendingTools: ToolCall[] = [];
-  const reasoningItems: ResponsesOutputItem[] = [];
 
   await runResponseLifecycle(context, 'Responses', input.length, request.tools?.length ?? 0, async (output, diagnostics) => {
     await client.streamResponses(request, {
@@ -219,9 +218,6 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
         diagnostics.onReasoning();
         output.thinking(text);
       },
-      onResponsesReasoningItem: (item) => {
-        replayBudget.reserveJson(item); reasoningItems.push(cloneReplayState(item));
-      },
       onResponsesOutputItems: (items) => { outputItems = cloneReplayState(items); },
       onRequest: diagnostics.onRequest,
       onRequestSettled: diagnostics.onRequestSettled,
@@ -233,28 +229,19 @@ export async function provideResponsesResponse(context: OpenAIResponseContext): 
         replayBudget.reserve(text); replyText += text;
         output.text(text);
       },
-      onToolCall: (toolCall) => {
-        const argumentsValue = parseToolArguments(toolCall.function.arguments);
-        diagnostics.onToolCall();
-        void argumentsValue;
-        replayBudget.reserveJson(toolCall); pendingTools.push(cloneReplayState(toolCall));
-      },
+      onToolCall: diagnostics.onToolCall,
     }, token, routedModel.openai?.clientRequestId === true);
     if (token.isCancellationRequested) throw new vscode.CancellationError();
-    const items: readonly ResponsesOutputItem[] = outputItems ?? [
-      ...reasoningItems,
-      ...(replyText ? [{ type: 'message' as const, role: 'assistant' as const, content: [{ type: 'output_text' as const, text: replyText }] }] : []),
-      ...pendingTools.map((call) => ({ type: 'function_call' as const, call_id: call.id, name: call.function.name, arguments: call.function.arguments })),
-    ];
+    if (!outputItems) throw new Error('Responses completed without its protocol replay payload.');
     const complete = terminal !== 'incomplete';
-    const savedItems = complete ? items : items.filter((item) => item.type === 'message');
-    replyText = reconcileProtocolText(output, replyText, savedItems.flatMap(item => item.type === 'message'
-      ? (item.content ?? []).map(part => part.type === 'refusal' ? part.refusal ?? '' : part.text ?? '') : []).join(''));
-    const calls = complete ? items.flatMap((item): ToolCall[] => item.type === 'function_call' ? [{
+    const savedItems = complete ? outputItems : outputItems.filter((item) => item.type === 'message');
+    const replay: ProtocolReplayState = { version: 1, identity: context.protocolIdentity, apiType: 'responses', displayText: replyText, responses: savedItems };
+    replyText = reconcileProtocolText(output, replyText, replayDisplayText(replay));
+    const calls = complete ? outputItems.flatMap((item): ToolCall[] => item.type === 'function_call' ? [{
       id: item.call_id ?? '', type: 'function', function: { name: item.name, arguments: item.arguments },
     }] : []) : [];
     const parts = prepareProtocolTools(calls);
-    if (replayAvailable) reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'responses', displayText: replyText, responses: savedItems });
+    if (replayAvailable) reportProtocolReplay(output, { ...replay, displayText: replyText });
     for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
   });
 }

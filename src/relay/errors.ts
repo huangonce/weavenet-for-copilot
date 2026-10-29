@@ -14,6 +14,37 @@ export class RelayRequestError extends Error {
   }
 }
 
+/** A successful HTTP response that cannot be decoded; never retains response text or URL credentials. */
+export class RelayResponseParseError extends Error {
+  constructor(
+    readonly status: number,
+    readonly responseKind: RelayRequestError['responseKind'],
+    readonly endpointPath?: string,
+    readonly requestId?: string,
+  ) {
+    super('The Relay response could not be parsed as JSON.');
+    this.name = 'RelayResponseParseError';
+  }
+}
+
+export function createRelayResponseParseError(
+  status: number,
+  contentType: string,
+  body: string,
+  url: string,
+  requestId?: string,
+): RelayResponseParseError {
+  let endpointPath: string | undefined;
+  try {
+    const path = new URL(url).pathname;
+    // Only expose standard endpoint paths. Custom API prefixes can contain
+    // tenant identifiers or credentials and are irrelevant to JSON decoding.
+    if (path === '/models' || path === '/v1/models') endpointPath = path;
+    else if (path.endsWith('/models')) endpointPath = '/…/models';
+  } catch { /* The request may have used a URL shape with no safe endpoint. */ }
+  return new RelayResponseParseError(status, classifyResponse(contentType, body), endpointPath, requestId);
+}
+
 export class RelayStreamError extends Error {
   constructor(
     message: string,
@@ -38,7 +69,7 @@ export function createRelayRequestError(
   const responseKind = classifyResponse(contentType, body);
   const upstreamMessage = extractUpstreamMessage(body, responseKind);
   const detail = extractUpstreamDetail(body, responseKind);
-  const requestId = detail.requestId ?? normalizeRequestId(responseRequestId);
+  const requestId = detail.requestId ?? stringField(responseRequestId);
 
   if (upstreamMessage && isContextWindowError(upstreamMessage)) {
     return new RelayRequestError(
@@ -169,15 +200,7 @@ function extractUpstreamDetail(
     : body;
   if (!value) return {};
   try {
-    const payload = JSON.parse(value) as Record<string, unknown>;
-    const error = payload.error && typeof payload.error === 'object'
-      ? payload.error as Record<string, unknown>
-      : payload;
-    return {
-      code: stringField(error.code),
-      type: stringField(error.type),
-      requestId: stringField(error.request_id) ?? stringField(payload.request_id),
-    };
+    return detailFromValue(JSON.parse(value));
   } catch {
     return {};
   }
@@ -200,10 +223,6 @@ function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? truncate(value.trim(), 100) : undefined;
 }
 
-function normalizeRequestId(value: string | undefined): string | undefined {
-  return value ? stringField(value) : undefined;
-}
-
 function findMessage(value: unknown, depth = 0): string | undefined {
   if (depth > 4 || !value || typeof value !== 'object') return undefined;
   const record = value as Record<string, unknown>;
@@ -221,9 +240,9 @@ function isContextWindowError(message: string): boolean {
   return /context window|context length|maximum context|input exceeds.*context|too many tokens/i.test(message);
 }
 
-function isRateLimited(code?: string, type?: string, message?: string): boolean {
+export function isRateLimited(...values: Array<string | undefined>): boolean {
   return /rate.?limit|quota|insufficient.?credit|billing|payment.?required/i.test(
-    [code, type, message].filter(Boolean).join(' '),
+    values.filter(Boolean).join(' '),
   );
 }
 

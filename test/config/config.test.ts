@@ -90,6 +90,28 @@ apiType: 'chat-completions' as const },
     expect(normalizeConnectionProfiles([])).toEqual([]);
   });
 
+  it('keeps valid models when a neighboring declaration cannot be migrated safely', () => {
+    const unknown = { id: 'keep-original', route: 'unknown-future-protocol' };
+    const raw = { id: WORK_ID, name: 'Mixed', baseUrl: 'https://relay.example.test/v1', apiType: 'responses',
+      models: [{ id: 'good' }, unknown, { id: 'typo', apiType: 'response' }] };
+    const [profile] = normalizeConnectionProfiles([raw]);
+    expect(profile.models?.map(model => model.id)).toEqual(['good']);
+    expect(raw.models).toHaveLength(3);
+    expect(raw.models[1]).toBe(unknown);
+  });
+
+  it('uses defaults for invalid budgets without rewriting the user model declaration', () => {
+    vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ get: (key: string) =>
+      key === 'maxInputTokens' ? Infinity : key === 'maxOutputTokens' ? 0.5 : undefined } as never);
+    const raw = { id: WORK_ID, name: 'Bad budget', baseUrl: 'https://relay.example.test/v1', models: [
+      { id: 'keep-model', contextWindow: 1, maxInputTokens: 1.5, maxOutputTokens: 0.5 },
+    ] };
+    const [profile] = normalizeConnectionProfiles([raw]);
+    expect(profile.models).toMatchObject([{ id: 'keep-model', contextWindow: undefined, maxInputTokens: undefined, maxOutputTokens: undefined }]);
+    expect(getConfig(profile)).toMatchObject({ maxInputTokens: 128000, maxOutputTokens: 16384 });
+    expect(raw.models[0]).toEqual({ id: 'keep-model', contextWindow: 1, maxInputTokens: 1.5, maxOutputTokens: 0.5 });
+  });
+
   it('retains explicit diagnostic and caching support in fixed models', () => {
     vi.spyOn(vscode.workspace, 'getConfiguration').mockReturnValue({ get: () => undefined } as never);
     const [profile] = normalizeConnectionProfiles([{ id: WORK_ID, name: 'Capabilities', baseUrl: 'https://relay.example.com/v1', models: [

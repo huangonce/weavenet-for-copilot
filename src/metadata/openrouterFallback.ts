@@ -5,6 +5,7 @@ import type {
   RoutedModel,
 } from '../relay/types.js';
 import { getCachedData, scheduleRefresh } from './metadataCache.js';
+import { tokenLimit } from '../relay/tokenLimits';
 
 /**
  * Runtime metadata layer backed by OpenRouter's public model catalog.
@@ -113,8 +114,8 @@ function toEntry(model: OpenRouterModel): OpenRouterCatalogEntry | undefined {
     ? model.architecture.input_modalities.filter(isString)
     : []);
   const contextWindow =
-    positiveFinite(model.context_length) ?? positiveFinite(model.top_provider?.context_length);
-  const maxOutputTokens = positiveFinite(model.top_provider?.max_completion_tokens);
+    tokenLimit(model.context_length, 2) ?? tokenLimit(model.top_provider?.context_length, 2);
+  const maxOutputTokens = tokenLimit(model.top_provider?.max_completion_tokens);
   return {
     id,
     fullId: fullId!,

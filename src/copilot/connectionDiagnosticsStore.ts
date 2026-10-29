@@ -68,6 +68,8 @@ export function fingerprintConnection(
 }
 
 export class ConnectionDiagnosticsStore {
+  private pendingWrite: Promise<void> = Promise.resolve();
+
   constructor(private readonly state: vscode.Memento) {}
 
   get(profile: ConnectionProfile, options: ConnectionFingerprintOptions = {}): ConnectionDiagnosticsSnapshot | undefined {
@@ -78,10 +80,17 @@ export class ConnectionDiagnosticsStore {
     return parseConnectionDiagnosticsSnapshot(this.state.get<unknown>(diagnosticsKey(fingerprint)), fingerprint);
   }
 
-  async update(snapshot: ConnectionDiagnosticsSnapshot): Promise<void> {
+  async update(snapshot: ConnectionDiagnosticsSnapshot, isCurrent?: () => boolean): Promise<void> {
     const parsed = parseConnectionDiagnosticsSnapshot(snapshot, snapshot.fingerprint);
     if (!parsed) throw new Error('Refusing to persist invalid connection diagnostics.');
-    await this.state.update(diagnosticsKey(snapshot.fingerprint), parsed);
+    await this.enqueueWrite(async () => {
+      if (isCurrent && !isCurrent()) return;
+      const key = diagnosticsKey(snapshot.fingerprint);
+      await this.state.update(key, parsed);
+      // Keep invalidated-write cleanup in the same operation so it cannot
+      // remove a newer test result that was queued while this write awaited.
+      if (isCurrent && !isCurrent()) await this.state.update(key, undefined);
+    });
   }
 
   async delete(profile: ConnectionProfile, options: ConnectionFingerprintOptions = {}): Promise<void> {
@@ -89,24 +98,32 @@ export class ConnectionDiagnosticsStore {
   }
 
   async deleteFingerprint(fingerprint: string): Promise<void> {
-    await this.state.update(diagnosticsKey(fingerprint), undefined);
+    await this.enqueueWrite(() => this.state.update(diagnosticsKey(fingerprint), undefined));
   }
 
   async deleteProfile(profileId: string): Promise<void> {
-    const updates: Thenable<void>[] = [];
-    for (const key of this.state.keys()) {
-      if (!key.startsWith(CONNECTION_DIAGNOSTICS_KEY_PREFIX)) continue;
-      const fingerprint = key.slice(CONNECTION_DIAGNOSTICS_KEY_PREFIX.length);
-      const snapshot = this.getByFingerprint(fingerprint);
-      if (snapshot?.profileId === profileId) updates.push(this.state.update(key, undefined));
-    }
-    await Promise.all(updates);
+    await this.enqueueWrite(async () => {
+      for (const key of this.state.keys()) {
+        if (!key.startsWith(CONNECTION_DIAGNOSTICS_KEY_PREFIX)) continue;
+        const fingerprint = key.slice(CONNECTION_DIAGNOSTICS_KEY_PREFIX.length);
+        const snapshot = this.getByFingerprint(fingerprint);
+        if (snapshot?.profileId === profileId) await this.state.update(key, undefined);
+      }
+    });
   }
 
   async clear(): Promise<void> {
-    await Promise.all(this.state.keys()
-      .filter((key) => key.startsWith(CONNECTION_DIAGNOSTICS_KEY_PREFIX))
-      .map((key) => this.state.update(key, undefined)));
+    await this.enqueueWrite(async () => {
+      for (const key of this.state.keys()) {
+        if (key.startsWith(CONNECTION_DIAGNOSTICS_KEY_PREFIX)) await this.state.update(key, undefined);
+      }
+    });
+  }
+
+  private enqueueWrite(operation: () => PromiseLike<void>): Promise<void> {
+    const write = this.pendingWrite.then(operation);
+    this.pendingWrite = write.catch(() => undefined);
+    return write;
   }
 }
 

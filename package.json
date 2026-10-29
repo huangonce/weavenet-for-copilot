@@ -174,11 +174,11 @@
                       "type": "string"
                     },
                     "maxInputTokens": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1
                     },
                     "maxOutputTokens": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1
                     },
                     "toolCalling": {
@@ -459,13 +459,13 @@
           "description": "%configuration.modelNamePrefix.description%"
         },
         "weavenet-copilot.maxInputTokens": {
-          "type": "number",
+          "type": "integer",
           "default": 128000,
           "minimum": 1,
           "description": "%configuration.maxInputTokens.description%"
         },
         "weavenet-copilot.maxOutputTokens": {
-          "type": "number",
+          "type": "integer",
           "default": 16384,
           "minimum": 1,
           "description": "%configuration.maxOutputTokens.description%"

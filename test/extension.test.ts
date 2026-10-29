@@ -19,6 +19,7 @@ import { errorMessage, queueConnectionMutation, runConnectionMutation, saveProfi
 import { createStatusBarItem, renderStatus } from '../src/ui/statusBarPresenter';
 import type { ConnectionProfile } from '../src/config/config';
 import type { WeaveNetChatProvider } from '../src/copilot/provider';
+import { ConnectionTestError } from '../src/copilot/connection';
 import type { ConnectionStatus } from '../src/copilot/connectionRuntimeManager';
 import * as openrouterFallback from '../src/metadata/openrouterFallback';
 
@@ -427,23 +428,65 @@ describe('connection mutation queue', () => {
     const provider = providerFixture();
     const pick = vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(async (items) => (await items)[0] as never);
     const info = vi.spyOn(vscode.window, 'showInformationMessage');
+    const progress = vi.spyOn(vscode.window, 'withProgress');
 
     await testConnection(provider);
 
     expect(pick).toHaveBeenCalledOnce();
     expect(provider.testConnection).toHaveBeenCalledWith(WORK_PROFILE);
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Testing connection “Work” (may use a small amount of provider quota)',
+    }), expect.any(Function));
     expect(info).toHaveBeenCalledWith(
-      expect.stringContaining('connection test success'),
+      'Connection “Work” test success: relay.example.test, 10 ms.',
       expect.objectContaining({ detail: expect.stringContaining('models: supported') }),
     );
+    expect(info.mock.calls[0][1]).toMatchObject({ detail: expect.stringContaining('Host: relay.example.test') });
+    expect(info.mock.calls[0][1]).toMatchObject({ detail: expect.stringContaining('Endpoint: /models') });
 
     provider.testConnection.mockRejectedValueOnce(new Error('offline'));
     const error = vi.spyOn(vscode.window, 'showErrorMessage');
     await testConnection(provider);
     expect(error).toHaveBeenCalledWith(
-      expect.stringContaining('Connection failed.'),
-      expect.objectContaining({ detail: 'Category: unknown' }),
+      'Connection “Work” test failed: Connection failed.',
+      expect.objectContaining({ detail: 'Host: work.example.test\nCategory: unknown' }),
     );
+  });
+
+  it('names the selected connection in failures and shows only its safe host', async () => {
+    const profile = { ...WORK_PROFILE, name: 'NewApi', baseUrl: 'https://user:secret@newapi.example.test:8443/v1?key=hidden#private' };
+    configurationFixture();
+    pickProfile(profile);
+    const failure = new ConnectionTestError({ category: 'invalidResponse', message: 'The Relay returned HTML.',
+      status: 200, responseType: 'html', requestId: 'req-newapi', endpointPath: '/v1/models' });
+    const provider = providerFixture({ testConnection: vi.fn().mockRejectedValue(failure) });
+    const error = vi.spyOn(vscode.window, 'showErrorMessage');
+
+    await testConnection(provider);
+
+    expect(error).toHaveBeenCalledWith('Connection “NewApi” test failed: The Relay returned HTML.', {
+      modal: false,
+      detail: 'Host: newapi.example.test:8443\nCategory: invalidResponse\nEndpoint: /v1/models\nHTTP status: 200\nResponse type: html\nRequest ID: req-newapi',
+    });
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/secret|hidden|private|user:/);
+  });
+
+  it('includes the failed probe endpoint in the selected connection diagnostic', async () => {
+    const profile = { ...WORK_PROFILE, name: 'NewApi' };
+    configurationFixture([profile]);
+    const provider = providerFixture();
+    const result = await provider.testConnection(profile);
+    provider.testConnection.mockResolvedValue({ ...result, overall: 'degraded', probes: [{
+      probe: 'openai.streaming', verdict: 'indeterminate', endpointPath: '/chat/completions', startedAt: 1, elapsedMs: 5,
+      failure: { category: 'protocol', message: 'The Relay stream did not complete.', endpointPath: '/v1/chat/completions' },
+    }] });
+    const info = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await testConnection(provider);
+
+    expect(info).toHaveBeenCalledWith('Connection “NewApi” test degraded: relay.example.test, 10 ms.',
+      expect.objectContaining({ detail: expect.stringContaining('Endpoint: /v1/chat/completions') }));
+    expect(info.mock.calls[0][1]).toMatchObject({ detail: expect.stringContaining('The Relay stream did not complete.') });
   });
 
   it('creates a connection when setting a key with an empty pool', async () => {

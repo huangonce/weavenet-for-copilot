@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { WeaveNetChatProvider } from '../copilot/provider';
 import type { ConnectionTestFailure } from '../copilot/connection';
-import { ConnectionTestError, connectionErrorMessage } from '../copilot/connection';
+import { ConnectionTestError, connectionErrorMessage, safeHost } from '../copilot/connection';
 import { isCancellationError } from '../copilot/connectionRuntimeManager';
 import type { ConnectionProbeResult } from '../copilot/connectionDiagnostics';
 import type { ApiType, ConnectionProfile } from '../config/config';
 import { getConfig, getProfileConfiguration, isValidProfileName, normalizeConnectionProfiles } from '../config/config';
-import { configurationSection, errorMessage, restoreProfiles, runConnectionMutation, saveProfiles } from '../config/connectionMutations';
-import { VENDOR } from '../constants';
+import { errorMessage, restoreProfiles, runConnectionMutation, saveProfiles } from '../config/connectionMutations';
+import { CONFIG_SECTION, VENDOR } from '../constants';
 import { t } from '../l10n';
 import { scheduleOpenRouterRefresh } from '../metadata/openrouterFallback';
 import { normalizeRelayBaseUrl } from '../relay/url';
@@ -33,7 +33,7 @@ export function registerConnectionCommands(
     vscode.commands.registerCommand('weavenet-copilot.refreshModelMetadata', () => refreshModelMetadata()),
     vscode.commands.registerCommand('weavenet-copilot.pickVisionProxyModel', () => pickVisionProxyModel(provider)),
     vscode.commands.registerCommand('weavenet-copilot.showDebugLog', () => provider.showDebugLog()),
-    vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', configurationSection)),
+    vscode.commands.registerCommand('weavenet-copilot.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', CONFIG_SECTION)),
   );
 }
 
@@ -307,25 +307,28 @@ export async function testConnection(provider: WeaveNetChatProvider): Promise<vo
   try {
     const result = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: t('Testing WeaveNet connection “{0}” (may use a small amount of provider quota)', profile.name),
+      title: t('Testing connection “{0}” (may use a small amount of provider quota)', profile.name),
       cancellable: false,
     }, () => provider.testConnection(profile));
     const detail = [
+      t('Host: {0}', result.host),
       t('Overall: {0}', result.overall),
       t('Models discovered: {0}', result.modelCount),
       ...result.probes.map(formatProbeResult),
     ].filter(Boolean).join('\n');
     void vscode.window.showInformationMessage(
-      t('WeaveNet connection test {0}: {1}, {2} ms.', result.overall, result.host, result.elapsedMs),
+      t('Connection “{0}” test {1}: {2}, {3} ms.', profile.name, result.overall, result.host, result.elapsedMs),
       { modal: false, detail },
     );
   } catch (error) {
     const failure = error instanceof ConnectionTestError
       ? error.failure
       : { category: 'unknown' as const, message: t('Connection failed.') };
+    const host = safeHost(profile.baseUrl);
+    const detail = [host ? t('Host: {0}', host) : undefined, formatConnectionFailure(failure)].filter(Boolean).join('\n');
     void vscode.window.showErrorMessage(
-      t('WeaveNet connection test failed: {0}', failure.message),
-      { modal: false, detail: formatConnectionFailure(failure) },
+      t('Connection “{0}” test failed: {1}', profile.name, failure.message),
+      { modal: false, detail },
     );
   }
 }
@@ -400,7 +403,7 @@ export async function pickVisionProxyModel(provider: WeaveNetChatProvider): Prom
     ignoreFocusOut: true,
   });
   if (!selection) return;
-  await vscode.workspace.getConfiguration(configurationSection).update('visionProxyModel', selection.modelKey, vscode.ConfigurationTarget.Global);
+  await vscode.workspace.getConfiguration(CONFIG_SECTION).update('visionProxyModel', selection.modelKey, vscode.ConfigurationTarget.Global);
   void vscode.window.showInformationMessage(t('WeaveNet vision proxy model set to “{0}”. Enable the vision proxy setting to start using it.', selection.modelKey));
 }
 
@@ -435,10 +438,11 @@ async function promptApiType(current: ApiType = 'chat-completions'): Promise<Api
   return selection?.apiType;
 }
 
-async function promptBaseUrl(): Promise<string | undefined> {
+async function promptBaseUrl(current?: string): Promise<string | undefined> {
   const value = await vscode.window.showInputBox({
     prompt: t('Relay API base URL'),
-    placeHolder: 'https://relay.example.com/v1',
+    value: current,
+    placeHolder: current === undefined ? 'https://relay.example.com/v1' : undefined,
     ignoreFocusOut: true,
     validateInput: (input) => normalizeRelayBaseUrl(input) ? undefined : t('Use HTTPS, or HTTP for localhost, without credentials, query parameters, or fragments.'),
   });
@@ -451,10 +455,7 @@ async function promptConnectionDraft(oldProfile: ConnectionProfile): Promise<Con
     validateInput: (value) => validateEditedProfileName(value, oldProfile.name),
   });
   if (!name) return undefined;
-  const baseUrlValue = await vscode.window.showInputBox({
-    prompt: t('Relay API base URL'), value: oldProfile.baseUrl, ignoreFocusOut: true,
-    validateInput: (value) => normalizeRelayBaseUrl(value) ? undefined : t('Use HTTPS, or HTTP for localhost, without credentials, query parameters, or fragments.'),
-  });
+  const baseUrlValue = await promptBaseUrl(oldProfile.baseUrl);
   if (!baseUrlValue) return undefined;
   // The extra request headers step was removed from the wizard: prompting for a
   // JSON object here was confusing (it looked like the API key step) and
@@ -558,6 +559,7 @@ async function clearAllDiagnosticsBestEffort(provider: WeaveNetChatProvider): Pr
 export function formatConnectionFailure(failure: ConnectionTestFailure): string {
   return [
     t('Category: {0}', failure.category),
+    failure.endpointPath ? t('Endpoint: {0}', failure.endpointPath) : undefined,
     failure.status ? t('HTTP status: {0}', failure.status) : undefined,
     failure.responseType ? t('Response type: {0}', failure.responseType) : undefined,
     failure.requestId ? t('Request ID: {0}', failure.requestId) : undefined,
@@ -577,6 +579,7 @@ async function showConnectionPrompt(context: vscode.ExtensionContext, promptKey:
 
 function formatProbeResult(probe: ConnectionProbeResult): string {
   const metadata = [
+    t('Endpoint: {0}', probe.failure?.endpointPath ?? probe.endpointPath),
     probe.status ? t('HTTP {0}', probe.status) : undefined,
     probe.responseType,
     probe.requestId ? t('request {0}', probe.requestId) : undefined,

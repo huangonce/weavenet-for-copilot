@@ -32,51 +32,59 @@ export async function migrateProfilePoolConfiguration(context?: vscode.Extension
   const previousStrategy = configuration.inspect<string>('openaiApiStrategy')?.globalValue;
   const previousIdentity = JSON.stringify(previousProfiles);
   const seenIds = new Set<string>();
-  const upgraded: unknown[] = [];
+  let upgraded: unknown[] = [];
   const catalogs = new Map<string, LegacyCatalog>();
   let migratedProtocols = false;
   let unresolvedAuto = false;
   for (const value of previousProfiles) {
     if (!record(value)) { upgraded.push(value); continue; }
     const entry = { ...value };
+    // Unknown protocols and malformed profiles belong to the user. Migration
+    // must not discard them or prevent other connections from activating.
+    if (entry.apiType !== undefined && !isApiType(entry.apiType)) { upgraded.push(value); continue; }
     const oldId = typeof entry.id === 'string' ? entry.id.trim().toLowerCase() : '';
-    entry.id = isValidProfileId(oldId) && !seenIds.has(oldId) ? oldId : randomUUID();
-    seenIds.add(entry.id as string);
+    const id = isValidProfileId(oldId) && !seenIds.has(oldId) ? oldId : randomUUID();
+    if (!normalizeConnectionProfiles([{ ...entry, id, models: [] }]).length) { upgraded.push(value); continue; }
+    if (id !== oldId) entry.id = id;
+    seenIds.add(id);
     if (typeof entry.name === 'string' && entry.name.trim() === previousActiveProfile.trim()) {
       for (const key of ['includeModels', 'excludeModels', 'requestHeaders', 'models']) {
-        if (entry[key] === undefined) entry[key] = configuration.inspect<unknown>(key)?.globalValue;
+        const legacyValue = configuration.inspect<unknown>(key)?.globalValue;
+        if (entry[key] === undefined && legacyValue !== undefined) entry[key] = legacyValue;
       }
     }
-    if (entry.apiType !== undefined && !isApiType(entry.apiType)) throw new Error(t('A Relay API type is invalid.'));
-    const models = Array.isArray(entry.models) ? entry.models.filter(record).map((model): Record<string, unknown> => ({
-      ...model, id: typeof model.id === 'string' ? model.id.trim() : model.id,
-    })) : [];
+    const models: unknown[] = Array.isArray(entry.models) ? entry.models : [];
     if (!isApiType(entry.apiType)) {
       const strategy = previousStrategy === 'auto' || previousStrategy === 'responses' ? previousStrategy : 'chat';
-      const catalog = context ? await legacyCatalog(context, entry, strategy) : { models: [], directory: [] };
-      catalogs.set(entry.id as string, catalog);
+      const catalog = context ? await legacyCatalog(context, { ...entry, id }, strategy) : { models: [], directory: [] };
+      catalogs.set(id, catalog);
       entry.apiType = strategy === 'responses' ? 'responses' : 'chat-completions';
-      entry.models = models.map(model => upgradeModel(model, entry.apiType as ApiType, strategy,
-        catalog.models.find(item => item.upstreamId === model.id && (model.route === 'claude') === (item.apiType === 'messages'))));
-      const declaredIds = new Set(models.map(model => model.id));
-      for (const model of catalog.models) {
-        if (!declaredIds.has(model.upstreamId) && model.apiType !== entry.apiType) {
-          (entry.models as unknown[]).push({ id: model.upstreamId, apiType: model.apiType });
+      if (entry.models === undefined || Array.isArray(entry.models)) {
+        entry.models = models.map(model => !record(model) ? model : upgradeModel(model, entry.apiType as ApiType, strategy,
+          catalog.models.find(item => item.upstreamId === (typeof model.id === 'string' ? model.id.trim() : model.id)
+            && (model.route === 'claude') === (item.apiType === 'messages'))));
+        const declaredIds = new Set(models.filter(record).map(model => typeof model.id === 'string' ? model.id.trim() : model.id));
+        for (const model of catalog.models) {
+          if (!declaredIds.has(model.upstreamId) && model.apiType !== entry.apiType) {
+            (entry.models as unknown[]).push({ id: model.upstreamId, apiType: model.apiType });
+          }
         }
       }
       unresolvedAuto ||= strategy === 'auto' && catalog.models.length === 0;
       migratedProtocols = true;
     } else {
       // Profiles may already have a modern default while individual declarations still use the old format.
-      entry.models = Array.isArray(entry.models) ? models.map(model => upgradeModel(model, entry.apiType as ApiType)) : undefined;
+      if (Array.isArray(entry.models)) entry.models = models.map(model => record(model) ? upgradeModel(model, entry.apiType as ApiType) : model);
     }
     upgraded.push(entry);
   }
-  let profiles = normalizeConnectionProfiles(upgraded);
-  if (profiles.length !== previousProfiles.length) throw new Error(t('Some Relay connections are invalid. Correct them before migration.'));
-  const active = profiles.findIndex(profile => profile.name === previousActiveProfile.trim());
-  if (active > 0) profiles = [profiles[active], ...profiles.slice(0, active), ...profiles.slice(active + 1)];
-  const migrated = previousActiveProfile !== '' || previousStrategy !== undefined || previousIdentity !== JSON.stringify(profiles);
+  const active = previousActiveProfile.trim() ? upgraded.findIndex(profile => record(profile)
+    && typeof profile.name === 'string' && profile.name.trim() === previousActiveProfile.trim()) : -1;
+  if (active > 0) upgraded = [upgraded[active], ...upgraded.slice(0, active), ...upgraded.slice(active + 1)];
+  const profiles = normalizeConnectionProfiles(upgraded);
+  // Runtime normalization may omit invalid declarations and unknown fields. It
+  // is not a migration and must never become the persisted source of truth.
+  const migrated = previousActiveProfile !== '' || previousStrategy !== undefined || previousIdentity !== JSON.stringify(upgraded);
   if (!migrated) return { migrated: false, profiles };
   for (const catalog of catalogs.values()) await catalog.verifyCurrent?.();
   if (JSON.stringify(configuration.inspect<unknown[]>('profiles')?.globalValue ?? []) !== previousIdentity
@@ -85,7 +93,7 @@ export async function migrateProfilePoolConfiguration(context?: vscode.Extension
     throw new Error(t('Connections changed while migration was preparing. Reload to retry.'));
   }
   try {
-    await configuration.update('profiles', profiles, vscode.ConfigurationTarget.Global);
+    await configuration.update('profiles', upgraded, vscode.ConfigurationTarget.Global);
     await configuration.update('activeProfile', undefined, vscode.ConfigurationTarget.Global);
     await configuration.update('openaiApiStrategy', undefined, vscode.ConfigurationTarget.Global);
     for (const profile of profiles) await catalogs.get(profile.id)?.preserve?.(profile);
@@ -103,6 +111,10 @@ export async function migrateProfilePoolConfiguration(context?: vscode.Extension
 }
 
 function upgradeModel(model: Record<string, unknown>, defaultApi: ApiType, strategy?: string, cached?: RoutedModel): Record<string, unknown> {
+  if (typeof model.id !== 'string' || !model.id.trim()
+    || model.apiType !== undefined && !isApiType(model.apiType)
+    || model.route !== undefined && !['openai', 'chatgpt', 'claude'].includes(model.route as string)
+    || model.openaiApi !== undefined && !['chat', 'responses'].includes(model.openaiApi as string)) return model;
   if (strategy === undefined && model.route === undefined && model.openaiApi === undefined) {
     const current = { ...model }; delete current.contextWindows; return current;
   }

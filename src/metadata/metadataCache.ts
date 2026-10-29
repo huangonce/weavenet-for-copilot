@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { readResponseTextWithSignal } from '../relay/http';
 
 /**
  * Shared singleton cache for remote metadata snapshots such as OpenRouter.
@@ -57,11 +58,6 @@ export function getCachedData<T>(key: string, ttlMs = Number.POSITIVE_INFINITY):
   const entry = validCacheEntry<T>(extensionContext?.globalState.get<unknown>(key));
   if (!entry || Date.now() - entry.fetchedAt > ttlMs) return undefined;
   return entry.data;
-}
-
-/** Returns the cache timestamp for diagnostic logging. */
-export function getCachedFetchedAt(key: string): number | undefined {
-  return validCacheEntry(extensionContext?.globalState.get<unknown>(key))?.fetchedAt;
 }
 
 /**
@@ -125,7 +121,7 @@ async function runRefresh<T>(spec: RefreshSpec<T>, stored: CacheEntry<T> | undef
       return;
     }
 
-    const body = await readLimitedText(response, spec.maxBodyBytes ?? 10 * 1024 * 1024);
+    const body = await readResponseTextWithSignal(response, controller.signal, spec.maxBodyBytes ?? 10 * 1024 * 1024);
     let parsed: T;
     try {
       parsed = spec.parse(body);
@@ -156,27 +152,6 @@ function validCacheEntry<T>(value: unknown): CacheEntry<T> | undefined {
     || entry.fetchedAt! < 0
     || entry.fetchedAt! > Date.now() + 5 * 60_000) return undefined;
   return entry as CacheEntry<T>;
-}
-
-async function readLimitedText(response: Response, maxBytes: number): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let body = '';
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > maxBytes) throw new Error(`response body exceeds ${maxBytes} bytes`);
-      body += decoder.decode(value, { stream: true });
-    }
-    return body + decoder.decode();
-  } catch (error) {
-    void reader.cancel().catch(() => undefined);
-    throw error;
-  }
 }
 
 /** Test-only reset hook. Do not call from production code. */

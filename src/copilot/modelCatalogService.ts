@@ -1,6 +1,6 @@
 import type * as vscode from 'vscode';
 import { getConfig } from '../config/config';
-import type { ConnectionProfile, ExtensionConfig } from '../config/config';
+import type { ExtensionConfig } from '../config/config';
 import type { RoutedModel } from '../relay/types';
 import { assembleModelCatalog, loadAllModels } from './modelRegistry';
 import type { ModelLoadResult } from './modelRegistry';
@@ -23,9 +23,6 @@ export class ModelCatalogService {
   async persistSnapshot(profileId: string, revision: string, directory: readonly RoutedModel[]): Promise<void> {
     try { await this.snapshotStore.update(profileId, revision, directory); }
     catch (error) { this.debug(getConfig(), `[models] connection=${profileId}, snapshot persist failed: ${formatLogError(error)}`); }
-  }
-  async clearSnapshot(profile: ConnectionProfile): Promise<void> {
-    await this.deleteProfile(profile.id);
   }
   async deleteProfile(profileId: string): Promise<void> {
     try { await this.snapshotStore.deleteProfile(profileId); }

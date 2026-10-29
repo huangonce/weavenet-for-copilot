@@ -60,7 +60,8 @@ export function convertMessages(
   const result: ChatMessage[] = [];
 
   for (const message of messages) {
-    const role = mapRole(message.role, supportsDeveloperRole);
+    const canonicalRole = mapRole(message.role);
+    const role = canonicalRole === 'system' && supportsDeveloperRole ? 'developer' : canonicalRole;
     assertRolePartCompatibility(message.role, message.content, 'OpenAI Chat Completions');
     if ((role === 'system' || role === 'developer') && message.content.some(isCanonicalImagePart)) {
       if (!supportsImageInput) throw unsupportedImageCapabilityError('OpenAI Chat Completions');
@@ -194,7 +195,7 @@ export function convertResponsesInput(
   const instructionParts: string[] = [];
 
   for (const message of messages) {
-    const role = mapResponsesRole(message.role);
+    const role = mapRole(message.role);
     assertRolePartCompatibility(message.role, message.content, 'OpenAI Responses');
     if (role === 'system') {
       for (const part of message.content) {
@@ -353,7 +354,7 @@ export function convertResponsesTools(
   });
 }
 
-function mapResponsesRole(role: CanonicalMessageRole): 'system' | 'user' | 'assistant' {
+function mapRole(role: CanonicalMessageRole): 'system' | 'user' | 'assistant' {
   if (role === 'assistant') {
     return 'assistant';
   }
@@ -444,17 +445,6 @@ function assertNever(value: never): never {
   throw new vscode.LanguageModelError(`Unsupported canonical message part: ${String(value)}`);
 }
 
-function mapRole(role: CanonicalMessageRole, supportsDeveloperRole: boolean): 'system' | 'developer' | 'user' | 'assistant' {
-  if (role === 'assistant') {
-    return 'assistant';
-  }
-  if (role === 'system') {
-    return supportsDeveloperRole ? 'developer' : 'system';
-  }
-  if (role === 'user') return 'user';
-  throw unsupportedMessageRoleError();
-}
-
 // ---------------------------------------------------------------------------
 // Claude Messages conversion
 // ---------------------------------------------------------------------------
@@ -495,7 +485,7 @@ export function convertClaudeMessages(
   };
 
   for (const message of messages) {
-    const role = mapClaudeRole(message.role);
+    const role = mapRole(message.role);
     assertRolePartCompatibility(message.role, message.content, 'Claude Messages');
     const blocks: ClaudeContentBlock[] = [];
     let textContent = '';
@@ -605,13 +595,6 @@ export function applyLastTwoUserCacheControl(messages: ClaudeMessage[], ttl: '5m
     } as ClaudeContentBlock;
     count++;
   }
-}
-
-function mapClaudeRole(role: CanonicalMessageRole): 'system' | 'user' | 'assistant' {
-  if (role === 'assistant') return 'assistant';
-  if (role === 'system') return 'system';
-  if (role === 'user') return 'user';
-  throw unsupportedMessageRoleError();
 }
 
 function mergeAdjacentClaudeMessages(messages: ClaudeMessage[]): ClaudeMessage[] {

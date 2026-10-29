@@ -224,6 +224,8 @@ describe('explicit protocol upgrade safety', () => {
     const fetch = vi.spyOn(globalThis, 'fetch');
     const first = await migrateProfilePoolConfiguration(f.context);
     expect(first.profiles[0].apiType).toBe('messages');
+    expect(first.migrated).toBe(false);
+    expect(f.update).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

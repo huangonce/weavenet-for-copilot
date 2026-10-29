@@ -130,8 +130,64 @@ describe('profile pool migration', () => {
     expect(fixture.updates).not.toHaveBeenCalled();
   });
 
+  it('does not rewrite modern settings when runtime normalization omits invalid models or unknown fields', async () => {
+    const profiles = [{ id: WORK_ID, name: ' Work ', baseUrl: 'https://work.example.test/v1/', apiType: 'responses',
+      customConnectionOption: { keep: true }, models: [
+        { id: ' good ', apiType: 'responses', customModelOption: 'keep' },
+        { id: 'valuable-private-model', name: 'Keep my overrides', apiType: 'response', maxInputTokens: 100_000 },
+        { id: '', name: 'Unfinished declaration' }, null, 'unfinished',
+      ] }, { name: '', customOption: 'unfinished connection' }];
+    const before = JSON.stringify(profiles);
+    const fixture = configurationFixture({ profiles });
+
+    const result = await migrateProfilePoolConfiguration();
+
+    expect(result.migrated).toBe(false);
+    expect(result.profiles[0].models).toEqual([expect.objectContaining({ id: 'good', apiType: 'responses' })]);
+    expect(fixture.updates).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.settings.get('profiles'))).toBe(before);
+  });
+
+  it('preserves unknown and invalid entries while upgrading known legacy model fields', async () => {
+    const invalidModels = [
+      { id: 'typo', apiType: 'response', route: 'openai', maxInputTokens: 100_000 },
+      { id: 'future', route: 'future-protocol', customOption: true },
+      { name: 'Unfinished', route: 'claude' }, null, 42,
+    ];
+    const invalidProfiles = [null, { name: 'Unfinished connection', customOption: true },
+      { id: PERSONAL_ID, name: 'Future', baseUrl: 'https://future.example.test/v1', apiType: 'future-api' }];
+    const fixture = configurationFixture({ profiles: [
+      { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1', customOption: 'keep', models: [
+        { id: ' native ', route: 'claude', contextWindows: [100_000], customOption: 'keep' }, ...invalidModels,
+      ] }, ...invalidProfiles,
+    ] });
+
+    const result = await migrateProfilePoolConfiguration();
+
+    expect(result.migrated).toBe(true);
+    expect(result.profiles).toHaveLength(1);
+    expect(result.profiles[0].models).toEqual([expect.objectContaining({ id: 'native', apiType: 'messages' })]);
+    expect(fixture.settings.get('profiles')).toEqual([
+      { id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1', apiType: 'chat-completions', customOption: 'keep', models: [
+        { id: ' native ', apiType: 'messages', customOption: 'keep' }, ...invalidModels,
+      ] }, ...invalidProfiles,
+    ]);
+    fixture.updates.mockClear();
+    expect((await migrateProfilePoolConfiguration()).migrated).toBe(false);
+    expect(fixture.updates).not.toHaveBeenCalled();
+  });
+
+  it('retains malformed models fields when another legacy setting requires a write', async () => {
+    const profiles = [{ id: WORK_ID, name: 'Work', baseUrl: 'https://work.example.test/v1', apiType: 'responses',
+      models: { unfinished: true } }];
+    const fixture = configurationFixture({ profiles, activeProfile: 'Work' });
+    expect((await migrateProfilePoolConfiguration()).profiles).toHaveLength(1);
+    expect(fixture.settings.get('profiles')).toEqual(profiles);
+  });
+
   it('rolls profiles and active selection back when persisting the migration fails', async () => {
-    const previousProfiles = [{ name: 'Work', baseUrl: 'https://work.example.test/v1' }];
+    const previousProfiles = [{ name: 'Work', baseUrl: 'https://work.example.test/v1', customOption: true,
+      models: [{ id: 'native', route: 'claude' }, { id: 'typo', apiType: 'response' }, null] }];
     const fixture = configurationFixture({ profiles: previousProfiles, activeProfile: 'Work' });
     fixture.failUpdate('activeProfile', undefined);
 

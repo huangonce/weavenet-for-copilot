@@ -20,6 +20,17 @@ describe('tool schema parameter-name preservation', () => {
   });
 
   it.each([
+    { api: 'Chat', convert: (tools: vscode.LanguageModelChatTool[]) => convertTools(tools, true)?.[0].function.parameters },
+    { api: 'Responses', convert: (tools: vscode.LanguageModelChatTool[]) => convertResponsesTools(tools, true)?.[0].parameters },
+    { api: 'Messages', convert: (tools: vscode.LanguageModelChatTool[]) => convertClaudeTools(tools)?.[0].input_schema },
+  ])('preserves relative reference resource IDs in $api tool parameters', ({ convert }) => {
+    const inputSchema = { $id: 'https://schema.example.test/root', type: 'object',
+      properties: { address: { $ref: 'address' } }, required: ['address'],
+      $defs: { address: { $id: 'address', type: 'string' } } };
+    expect(convert([{ name: 'lookup', description: 'Look up an address', inputSchema }])).toEqual(inputSchema);
+  });
+
+  it.each([
     { api: 'Chat', convert: (tools: vscode.LanguageModelChatTool[]) => convertTools(tools, true)?.[0].function },
     { api: 'Responses', convert: (tools: vscode.LanguageModelChatTool[]) => convertResponsesTools(tools, true)?.[0] },
   ])('preserves unsupported constraints in the $api non-strict fallback', ({ api, convert }) => {
@@ -30,5 +41,23 @@ describe('tool schema parameter-name preservation', () => {
     if (api === 'Responses') expect(tool?.strict).toBe(false);
     else expect(tool).not.toHaveProperty('strict');
     expect(tool?.parameters).not.toHaveProperty('additionalProperties');
+  });
+
+  it.each([
+    { api: 'Chat', convert: (tools: vscode.LanguageModelChatTool[]) => convertTools(tools, true)?.[0].function },
+    { api: 'Responses', convert: (tools: vscode.LanguageModelChatTool[]) => convertResponsesTools(tools, true)?.[0] },
+  ])('keeps formats, uniqueness and over-limit enums intact in the $api non-strict fallback', ({ api, convert }) => {
+    for (const value of [
+      { type: 'string', format: 'uri' },
+      { type: 'array', items: { type: 'string' }, uniqueItems: true },
+      { type: 'string', enum: Array.from({ length: 1_001 }, (_, index) => `value-${index}`) },
+    ]) {
+      const inputSchema = { type: 'object', properties: { value }, required: ['value'] };
+      const tool = convert([{ name: 'constrained', description: 'Use a constrained value', inputSchema }]);
+      expect(tool?.parameters).toEqual(inputSchema);
+      if (api === 'Responses') expect(tool?.strict).toBe(false);
+      else expect(tool).not.toHaveProperty('strict');
+      expect(tool?.parameters).not.toHaveProperty('additionalProperties');
+    }
   });
 });

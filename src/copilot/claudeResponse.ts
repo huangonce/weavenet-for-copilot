@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ExtensionConfig } from '../config/config';
 import { RelayClient } from '../relay/client';
+import { isClaudeTruncated } from '../relay/claude';
 import { supportsImageInputForRoutedModel, supportsToolCallingForModel } from '../relay/models';
 import type { ClaudeRequest, RoutedModel } from '../relay/types';
 import { convertClaudeMessages, convertClaudeTools } from './convert';
@@ -8,12 +9,12 @@ import { claudePrefix, validateClaudePrefixes } from './claudePrefix';
 import {
   clampClaudeTemperature,
   getConfiguredReasoningEffort,
-  parseToolArguments,
   toClaudeThinking,
 } from './helpers';
 import type { DebugLogger } from './requestDiagnostics';
 import type { CanonicalChatRequestSnapshot, CanonicalChatResponseOptions } from './canonicalRequest';
-import { cloneReplayState, ReplayBudget } from '../relay/replayState';
+import { cloneReplayState, ReplayBudget, replayDisplayText } from '../relay/replayState';
+import type { ProtocolReplayState } from '../relay/replayState';
 import { hasProtocolReplayCarrier, prepareProtocolTools, reconcileProtocolText, reportProtocolReplay, warnProtocolReplayUnavailable } from './protocolState';
 import type { ClaudeContentBlock, ToolCall } from '../relay/types';
 import { runResponseLifecycle } from './responseLifecycle';
@@ -91,10 +92,8 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   logClaudeRequest(debug, config, request);
   const replayBudget = new ReplayBudget();
   let replyText = '';
-  let hasThinking = false;
   let stopReason: string | undefined;
   let replyContent: readonly ClaudeContentBlock[] | undefined;
-  const pendingTools: ToolCall[] = [];
   const client = new RelayClient({
     baseUrl: config.baseUrl,
     apiKey,
@@ -114,7 +113,7 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
       },
       onReasoning: (text) => {
         diagnostics.onReasoning();
-        hasThinking = true; replayBudget.reserve(text);
+        replayBudget.reserve(text);
         output.thinking(text);
       },
       onClaudeStopReason: (reason) => { stopReason = reason; },
@@ -124,26 +123,19 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
       onRequestSettled: diagnostics.onRequestSettled,
       onResponse: diagnostics.onResponse,
       onStreamEnd: diagnostics.onStreamEnd,
-      onToolCall: (toolCall) => {
-        diagnostics.onToolCall();
-        parseToolArguments(toolCall.function.arguments);
-        replayBudget.reserveJson(toolCall); pendingTools.push(cloneReplayState(toolCall));
-      },
+      onToolCall: diagnostics.onToolCall,
     }, token);
     if (token.isCancellationRequested) throw new vscode.CancellationError();
-    if (hasThinking && !replyContent) throw new vscode.LanguageModelError('The Relay did not return complete signed thinking blocks. Native thinking cannot be replayed safely.');
-    const blocks: readonly ClaudeContentBlock[] = replyContent ?? [
-      ...(replyText ? [{ type: 'text' as const, text: replyText }] : []),
-      ...pendingTools.map((call) => ({ type: 'tool_use' as const, id: call.id, name: call.function.name, input: parseToolArguments(call.function.arguments) })),
-    ];
-    const complete = stopReason !== 'max_tokens' && stopReason !== 'pause_turn' && stopReason !== 'model_context_window_exceeded';
-    const savedBlocks = complete ? blocks : blocks.filter((block) => block.type === 'text');
-    replyText = reconcileProtocolText(output, replyText, savedBlocks.flatMap(block => block.type === 'text' ? [block.text] : []).join(''));
-    const calls: ToolCall[] = (complete ? blocks : []).flatMap((block) => block.type === 'tool_use' ? [{
+    if (!replyContent) throw new Error('Claude completed without its protocol replay payload.');
+    const complete = !isClaudeTruncated(stopReason);
+    const savedBlocks = complete ? replyContent : replyContent.filter((block) => block.type === 'text');
+    const replay: ProtocolReplayState = { version: 1, identity: context.protocolIdentity, apiType: 'messages', displayText: replyText, claude: savedBlocks, claudePrefix: signedPrefix };
+    replyText = reconcileProtocolText(output, replyText, replayDisplayText(replay));
+    const calls: ToolCall[] = (stopReason === 'tool_use' ? replyContent : []).flatMap((block) => block.type === 'tool_use' ? [{
       id: block.id, type: 'function' as const, function: { name: block.name, arguments: JSON.stringify(block.input) },
     }] : []);
     const parts = prepareProtocolTools(calls);
-    if (replayAvailable) reportProtocolReplay(output, { version: 1, identity: context.protocolIdentity, apiType: 'messages', displayText: replyText, claude: savedBlocks, claudePrefix: signedPrefix });
+    if (replayAvailable) reportProtocolReplay(output, { ...replay, displayText: replyText });
     for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
   });
 }

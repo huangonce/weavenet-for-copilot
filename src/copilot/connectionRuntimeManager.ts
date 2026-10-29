@@ -76,6 +76,8 @@ export interface ConnectionRuntimeManagerOptions {
   readonly onStatusChanged: (status: ConnectionStatus) => void;
   /** Notify the model picker after bindings and status are both current. */
   readonly onCatalogChanged: () => void;
+  /** Invalidate work using connection settings or credentials before async cleanup. */
+  readonly onConnectionInvalidated?: (profileId?: string) => void;
 }
 
 /**
@@ -108,6 +110,7 @@ export class ConnectionRuntimeManager {
     let changed = false;
     for (const [id, runtime] of this.runtimes) {
       if (ids.has(id)) continue;
+      this.options.onConnectionInvalidated?.(id);
       void this.options.catalog.deleteProfile(id);
       runtime.generation++;
       this.runtimes.delete(id);
@@ -130,17 +133,11 @@ export class ConnectionRuntimeManager {
       } else if (existing.revision !== revision) {
         // baseUrl, headers or fixed models changed: prior probe verdicts and
         // model snapshots no longer apply to this profile.
+        this.options.onConnectionInvalidated?.(profile.id);
         void this.options.catalog.deleteProfile(profile.id);
-        existing.generation++;
+        this.resetRuntime(existing);
         existing.profile = profile;
         existing.revision = revision;
-        existing.artifactRevision = undefined;
-        existing.credentialRevision = undefined;
-        existing.models = [];
-        existing.directory = [];
-        existing.resolved = false;
-        existing.phase = 'refreshing';
-        existing.message = undefined;
         existing.lastDiagnostics = this.options.diagnosticsStore.get(profile, diagnosticsOptions());
         changed = true;
       } else if (existing.profile.name !== profile.name) {
@@ -148,6 +145,7 @@ export class ConnectionRuntimeManager {
         // excludeModels and models; name is the only remaining user-visible
         // field, so compare it explicitly instead of deep-serializing the
         // whole profile (which is order-sensitive and slower).
+        this.options.onConnectionInvalidated?.(profile.id);
         existing.profile = profile;
         changed = true;
       }
@@ -250,17 +248,11 @@ export class ConnectionRuntimeManager {
   async handleSecretChange(secretKey: string): Promise<void> {
     this.syncProfiles();
     const profileId = profileIdFromSecretKey(secretKey) ?? profileIdFromLegacySecretKey(secretKey);
+    this.options.onConnectionInvalidated?.(profileId);
     if (!profileId) {
       for (const runtime of this.runtimes.values()) {
         runtime.lastDiagnostics = undefined;
-        runtime.generation++;
-        runtime.resolved = false;
-        runtime.artifactRevision = undefined;
-        runtime.credentialRevision = undefined;
-        runtime.models = [];
-        runtime.directory = [];
-        runtime.phase = 'refreshing';
-        runtime.message = undefined;
+        this.resetRuntime(runtime);
       }
       this.rebuildAggregates();
       await this.options.diagnosticsStore.clear();
@@ -271,20 +263,24 @@ export class ConnectionRuntimeManager {
     const runtime = this.runtimes.get(profileId);
     if (runtime) {
       runtime.lastDiagnostics = undefined;
-      runtime.generation++;
-      runtime.resolved = false;
-      runtime.artifactRevision = undefined;
-      runtime.credentialRevision = undefined;
-      runtime.models = [];
-      runtime.directory = [];
-      runtime.phase = 'refreshing';
-      runtime.message = undefined;
+      this.resetRuntime(runtime);
       this.rebuildAggregates();
     }
     await this.options.diagnosticsStore.deleteProfile(profileId);
     await this.options.catalog.deleteProfile(profileId);
     if (!runtime) return;
     await this.requestConnectionRefresh(runtime, false);
+  }
+
+  private resetRuntime(runtime: ConnectionRuntime): void {
+    runtime.generation++;
+    runtime.resolved = false;
+    runtime.artifactRevision = undefined;
+    runtime.credentialRevision = undefined;
+    runtime.models = [];
+    runtime.directory = [];
+    runtime.phase = 'refreshing';
+    runtime.message = undefined;
   }
 
   setTestConnectionStatus(
@@ -387,7 +383,7 @@ export class ConnectionRuntimeManager {
       runtime.credentialRevision = undefined;
       runtime.models = [];
       runtime.directory = [];
-      await this.options.catalog.clearSnapshot(profile);
+      await this.options.catalog.deleteProfile(profile.id);
       runtime.resolved = true;
       runtime.phase = 'keyMissing';
       runtime.message = 'API key required.';

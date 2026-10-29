@@ -8,6 +8,7 @@ import { InMemoryMemento } from '../support/memento';
 import { RelayClient } from '../../src/relay/client';
 import { toRoutedModel } from '../../src/relay/models';
 import * as metadata from '../../src/metadata/openrouterFallback';
+import { RelayResponseParseError } from '../../src/relay/errors';
 
 const PROFILE = { id: '11111111-1111-4111-8111-111111111111', name: 'Work', baseUrl: 'https://relay.example.test/v1' };
 
@@ -88,6 +89,16 @@ apiType: 'chat-completions' as const });
     const second = await loadAllModels(config, 'key', () => {}, first.directory);
     expect(second.directoryError).toBeInstanceOf(Error);
     expect(second.models.map((model) => model.id)).toEqual(['available', 'fixed']);
+  });
+
+  it('preserves the original directory failure when no models can be recovered', async () => {
+    const failure = new RelayResponseParseError(200, 'html', '/models', 'req_directory');
+    vi.spyOn(RelayClient.prototype, 'listModels').mockRejectedValue(failure);
+    const debug = vi.fn();
+
+    await expect(loadAllModels(getConfig(PROFILE), 'key', debug)).rejects.toBe(failure);
+
+    expect(debug).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('RelayResponseParseError(status=200, responseKind=html, endpoint=/models, requestId=req_directory)'));
   });
 
   it('uses fixed models even without a directory or API key', async () => {

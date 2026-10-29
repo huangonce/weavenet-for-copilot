@@ -2,6 +2,8 @@ import { types as utilTypes } from 'node:util';
 import * as vscode from 'vscode';
 import type { ProtocolReplayState } from '../relay/replayState';
 import { MAX_PROTOCOL_REPLAY_BYTES, MAX_PROTOCOL_REPLAY_ITEMS, PROTOCOL_REPLAY_METADATA_KEY } from '../relay/replayState';
+import { isVisionReplayState, MAX_VISION_REPLAY_BYTES, VISION_REPLAY_METADATA_KEY } from '../relay/visionReplay';
+import type { VisionReplayState } from '../relay/visionReplay';
 
 const SYSTEM_ROLE = 3;
 // Long agent sessions need far more than 512 messages; the total text, tool JSON
@@ -65,6 +67,7 @@ export interface CanonicalThinkingPart {
   readonly id?: string;
   readonly encryptedContent?: string;
   readonly protocolReplay?: ProtocolReplayState;
+  readonly visionReplay?: VisionReplayState;
   readonly summary: readonly CanonicalReasoningSummary[];
 }
 
@@ -222,11 +225,11 @@ function snapshotPart(raw: unknown, state: SnapshotState, subject: string): Cano
   return snapshotStructuralImagePart(raw, state, subject);
 }
 
-function snapshotTextPart(raw: vscode.LanguageModelTextPart, subject: string, state?: SnapshotState): CanonicalTextPart {
+function snapshotTextPart(raw: vscode.LanguageModelTextPart, subject: string, state: SnapshotState): CanonicalTextPart {
   const value = readHostProperty(raw, 'value', subject);
   // Empty text parts are API-legal: tool-call-only assistant turns and tools returning '' produce them.
   assertBoundedString(value, `${subject} text`, MAX_TEXT_BYTES, true);
-  if (state) consumeTextBudget(state, value);
+  consumeTextBudget(state, value);
   return Object.freeze({ kind: 'text' as const, value });
 }
 
@@ -240,7 +243,7 @@ function snapshotDataPart(raw: vscode.LanguageModelDataPart, state: SnapshotStat
 }
 
 function snapshotStructuralImagePart(raw: unknown, state: SnapshotState, subject: string): CanonicalDataPart {
-  assertPlainRecord(raw, subject);
+  assertRecordPrototype(raw, subject);
   const allowed = new Set(['mimeType', 'mime_type', 'mediaType', 'data', 'value', 'bytes']);
   const keys = readOwnEnumerableKeys(raw, subject);
   if (keys.some((key) => !allowed.has(key))) throw unsupportedPartError(subject);
@@ -341,11 +344,16 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
   if (id !== undefined && id !== '') assertBoundedString(id, `${subject} thinking ID`, MAX_CALL_ID_BYTES, false);
   let encryptedContent: string | undefined;
   let protocolReplay: ProtocolReplayState | undefined;
+  let visionReplay: VisionReplayState | undefined;
   const summary: CanonicalReasoningSummary[] = [];
   if (metadata !== undefined && metadata !== null) {
     assertHostRecord(metadata, `${subject} metadata`);
     const replay = readHostProperty(metadata, PROTOCOL_REPLAY_METADATA_KEY, `${subject} metadata`);
     if (replay !== undefined && replay !== null) protocolReplay = snapshotProtocolReplay(replay, state, subject);
+    if (Object.hasOwn(metadata, VISION_REPLAY_METADATA_KEY)) {
+      const vision = readOwnData(metadata, VISION_REPLAY_METADATA_KEY, `${subject} metadata`);
+      if (vision !== undefined && vision !== null) visionReplay = snapshotVisionReplay(vision, state, subject);
+    }
     const carried = readHostProperty(metadata, RESPONSES_REASONING_METADATA_KEY, `${subject} metadata`);
     if (carried !== undefined && carried !== null) {
       assertHostRecord(carried, `${subject} reasoning metadata`);
@@ -378,13 +386,21 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
     ...(id === undefined || id === '' ? {} : { id }),
     ...(encryptedContent === undefined ? {} : { encryptedContent }),
     ...(protocolReplay === undefined ? {} : { protocolReplay }),
+    ...(visionReplay === undefined ? {} : { visionReplay }),
     summary: Object.freeze(summary),
   });
 }
 
+function snapshotVisionReplay(raw: unknown, state: SnapshotState, subject: string): VisionReplayState {
+  const snapshot = snapshotStrictJson(raw, state, subject, 'Vision replay state cannot be cyclic.');
+  if (snapshot.jsonBytes > MAX_VISION_REPLAY_BYTES) throw snapshotLimitError();
+  if (!isVisionReplayState(snapshot.value)) throw new vscode.LanguageModelError('Invalid vision replay metadata cannot be sent safely.');
+  return snapshot.value;
+}
+
 function snapshotProtocolReplay(raw: unknown, state: SnapshotState, subject: string): ProtocolReplayState {
   const snapshot = snapshotStrictJson(raw, state, subject, 'Protocol replay state cannot be cyclic.');
-  if (Buffer.byteLength(snapshot.json, 'utf8') > MAX_PROTOCOL_REPLAY_BYTES) throw snapshotLimitError();
+  if (snapshot.jsonBytes > MAX_PROTOCOL_REPLAY_BYTES) throw snapshotLimitError();
   const value = snapshot.value as Record<string, unknown>;
   const record = (entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry);
   const string = (entry: unknown) => typeof entry === 'string';
@@ -471,7 +487,7 @@ function snapshotStrictJson(
   state: Pick<SnapshotState, 'jsonNodes' | 'jsonProperties' | 'toolJsonBytes'>,
   subject: string,
   cycleMessage: string,
-): { readonly value: unknown; readonly json: string } {
+): { readonly value: unknown; readonly json: string; readonly jsonBytes: number } {
   const active = new WeakSet<object>();
   let estimatedJsonBytes = 0;
   const consumeJsonBytes = (bytes: number): void => {
@@ -506,13 +522,13 @@ function snapshotStrictJson(
     active.add(candidate);
     try {
       if (Array.isArray(candidate)) {
-        const items = readDenseArray(candidate, path, MAX_JSON_NODES - state.jsonNodes);
+        const items = readDenseArray(candidate, path, MAX_JSON_NODES - state.jsonNodes, false);
         state.jsonProperties += items.length;
         if (state.jsonProperties > MAX_JSON_PROPERTIES) throw snapshotLimitError();
         consumeJsonBytes(2 + Math.max(0, items.length - 1));
         return Object.freeze(items.map((item, index) => visit(item, depth + 1, `${path}[${index}]`)));
       }
-      assertPlainRecord(candidate, path);
+      assertRecordPrototype(candidate, path);
       const keys = readOwnEnumerableKeys(candidate, path);
       state.jsonProperties += keys.length;
       if (state.jsonProperties > MAX_JSON_PROPERTIES) throw snapshotLimitError();
@@ -539,7 +555,7 @@ function snapshotStrictJson(
   if (jsonBytes > MAX_TOOL_JSON_BYTES) throw snapshotLimitError();
   state.toolJsonBytes += jsonBytes;
   if (state.toolJsonBytes > MAX_TOTAL_TOOL_JSON_BYTES) throw snapshotLimitError();
-  return { value: snapshot, json };
+  return { value: snapshot, json, jsonBytes };
 }
 
 function snapshotTools(value: unknown): readonly vscode.LanguageModelChatTool[] {
@@ -558,16 +574,16 @@ function snapshotTools(value: unknown): readonly vscode.LanguageModelChatTool[] 
     definitionBytes += jsonStringBytes(name) + jsonStringBytes(description) + 64;
     let canonicalSchema: object | undefined;
     if (inputSchema !== undefined && inputSchema !== null) {
-      const result = snapshotStrictJson(
+      const { value: result, jsonBytes } = snapshotStrictJson(
         inputSchema,
         state,
         `${subject} input schema`,
         'A cyclic tool input schema cannot be sent safely.',
-      ).value;
+      );
       if (!result || typeof result !== 'object' || Array.isArray(result)) {
         throw new vscode.LanguageModelError(`${subject} input schema must be a strict JSON object.`);
       }
-      definitionBytes += Buffer.byteLength(JSON.stringify(result), 'utf8');
+      definitionBytes += jsonBytes;
       canonicalSchema = result;
     }
     if (definitionBytes > MAX_TOTAL_TOOL_DEFINITION_BYTES) throw snapshotLimitError();
@@ -633,7 +649,7 @@ function readSingleAlias(record: object, names: readonly string[], subject: stri
   return readOwnData(record, present[0], subject);
 }
 
-function readDenseArray(value: unknown, subject: string, maxLength: number): unknown[] {
+function readDenseArray(value: unknown, subject: string, maxLength: number, allowHostAccessors = true): unknown[] {
   if (!Array.isArray(value)) throw new vscode.LanguageModelError(`${subject} must be an array and cannot be sent safely.`);
   assertNotProxy(value, subject);
   const length = (value as unknown[]).length;
@@ -643,7 +659,7 @@ function readDenseArray(value: unknown, subject: string, maxLength: number): unk
     if (!Object.prototype.hasOwnProperty.call(value, index)) {
       throw new vscode.LanguageModelError(`${subject} contains a sparse entry and cannot be sent safely.`);
     }
-    result.push(readHostProperty(value, String(index), subject));
+    result.push(allowHostAccessors ? readHostProperty(value, String(index), subject) : readOwnData(value, String(index), subject));
   }
   return result;
 }
@@ -737,14 +753,10 @@ function assertRecordPrototype(value: unknown, subject: string): asserts value i
 
 // Host-supplied top-level containers (the request message array, response options) may legitimately
 // be class instances from the extension host's own RPC revival, so only Proxies are rejected here;
-// every property is still read via own-descriptor lookups, never through the prototype chain.
+// every property is read once through readHostProperty and immediately snapshotted.
 function assertHostRecord(value: unknown, subject: string): asserts value is object {
   if (!value || typeof value !== 'object') throw new vscode.LanguageModelError(`${subject} is invalid and cannot be sent safely.`);
   assertNotProxy(value, subject);
-}
-
-function assertPlainRecord(value: unknown, subject: string): asserts value is object {
-  assertRecordPrototype(value, subject);
 }
 
 function assertNotProxy(value: unknown, subject: string): void {

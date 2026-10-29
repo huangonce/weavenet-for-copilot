@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const carrier = vi.hoisted(() => ({ value: undefined as unknown, throws: false }));
+
 /**
  * The host carrier for protocol state (the thinking part class) is a proposed API
  * surface, so a host may not expose it. These tests run against a host mock
@@ -10,7 +12,10 @@ vi.mock('vscode', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../test/support/vscode.mock');
   const { LanguageModelThinkingPart: omitted, ...rest } = actual;
   void omitted;
-  return rest;
+  return { ...rest, get LanguageModelThinkingPart() {
+    if (carrier.throws) throw new Error('Host does not expose proposed API properties.');
+    return carrier.value;
+  } };
 });
 
 import * as vscode from 'vscode';
@@ -18,6 +23,8 @@ import { getConfig } from '../../src/config/config';
 import { provideClaudeResponse } from '../../src/copilot/claudeResponse';
 import { provideOpenAIResponse, provideResponsesResponse } from '../../src/copilot/openaiResponse';
 import { hasProtocolReplayCarrier, warnProtocolReplayUnavailable } from '../../src/copilot/protocolState';
+import { createThinkingPart } from '../../src/copilot/helpers';
+import { createVisionReplayPart } from '../../src/copilot/visionReplay';
 import { snapshotChatRequest, snapshotChatResponseOptions } from '../../src/copilot/canonicalRequest';
 import { RelayClient } from '../../src/relay/client';
 import { PROTOCOL_REPLAY_METADATA_KEY } from '../../src/relay/replayState';
@@ -73,9 +80,22 @@ function carriesReplayState(part: unknown): boolean {
   return metadata?.[PROTOCOL_REPLAY_METADATA_KEY] !== undefined;
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  carrier.value = undefined;
+  carrier.throws = false;
+  vi.restoreAllMocks();
+});
 
 describe('hosts without a protocol replay carrier', () => {
+  it.each(['missing', 'invalid', 'throws'] as const)('uses the same %s carrier check when probing and creating parts', mode => {
+    carrier.value = mode === 'invalid' ? {} : undefined;
+    carrier.throws = mode === 'throws';
+    expect(hasProtocolReplayCarrier()).toBe(false);
+    expect(createThinkingPart('visible thought')).toEqual(new vscode.LanguageModelTextPart('visible thought'));
+    expect(createThinkingPart('', undefined, { replay: true })).toBeUndefined();
+    expect(createVisionReplayPart('a'.repeat(64), [{ key: 'b'.repeat(64), text: 'visual description' }])).toBeUndefined();
+  });
+
   it('reports a missing carrier at most once instead of treating it as a failure', () => {
     expect(hasProtocolReplayCarrier()).toBe(false);
     const warn = vi.spyOn(vscode.window, 'showWarningMessage');

@@ -22,7 +22,7 @@ function assistant(...content: unknown[]) { return { role: vscode.LanguageModelC
 function text(value: string) { return new vscode.LanguageModelTextPart(value); }
 function toolResult(id = 'call_1') { return new vscode.LanguageModelToolResultPart(id, [text('tool result')]); }
 function json(value: unknown) { return new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } }); }
-function sse(events: unknown[]) { return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }); }
+function sse(events: unknown[]) { return new Response(events.map(event => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }); }
 function context(apiType: ApiType, model: Partial<ConfiguredModel> = {}, identity = A) {
   const config = getConfig({ ...profile, apiType });
   const routedModel = fromConfiguredModel({ id: 'model', apiType, toolCalling: true, thinking: true, ...model });
@@ -118,6 +118,62 @@ describe('Claude signed thinking round trips', () => {
     await provideClaudeResponse(current);
     expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
     expect(state(current.parts).claude).toEqual([{ type: 'text', text: 'Checking.' }]);
+  });
+
+  it.each(['message_stop', '[DONE]'])('never publishes tools or replay metadata when %s lacks a stop reason', async terminal => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([
+      { type: 'content_block_start', index: 0, content_block: blocks[2] },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: blocks[3] },
+      { type: 'content_block_stop', index: 1 },
+      terminal === '[DONE]' ? '[DONE]' : { type: terminal },
+    ]));
+    const current = context('messages');
+    await expect(provideClaudeResponse(current)).rejects.toThrow();
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('Checking.');
+    expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each(['max_tokens', 'model_context_window_exceeded', 'pause_turn'])('preserves text while discarding fine-grained partial JSON on %s', async stop_reason => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([
+      { type: 'content_block_start', index: 0, content_block: blocks[2] },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: 'unfinished thought' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'content_block_start', index: 2, content_block: { ...blocks[3], input: {} } },
+      { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"q":"unfinished' } },
+      { type: 'content_block_stop', index: 2 },
+      { type: 'message_delta', delta: { stop_reason } },
+      { type: 'message_stop' },
+    ]));
+    const current = context('messages');
+    await provideClaudeResponse(current);
+    expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
+    expect(state(current.parts).claude).toEqual([blocks[2]]);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an empty thinking block with its signature through DONE compatibility', async () => {
+    const emptyThinking = { type: 'thinking', thinking: '', signature: 'OPAQUE_EMPTY_THOUGHT' };
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sse([
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: emptyThinking.signature } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: blocks[3] },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      '[DONE]',
+    ])).mockResolvedValueOnce(json({ content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' }));
+    const first = context('messages');
+    await provideClaudeResponse(first);
+    expect(state(first.parts).claude).toEqual([emptyThinking, blocks[3]]);
+    expect(first.parts.filter(part => part instanceof vscode.LanguageModelToolCallPart)).toHaveLength(1);
+    const next = context('messages');
+    next.messages = snapshotChatRequest([user(text('first question')), assistant(...first.parts), user(toolResult())] as never);
+    await provideClaudeResponse(next);
+    expect(request(fetch, 1).messages[1].content).toEqual([emptyThinking, blocks[3]]);
   });
 
   it('rejects signed tool history from a different model or credential identity', async () => {

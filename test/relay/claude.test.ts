@@ -75,6 +75,7 @@ describe('Claude response parsing', () => {
         { type: 'tool_use', id: 'tool_1', name: 'search', input: { q: 'docs' } },
       ],
       usage: { input_tokens: 1, output_tokens: 2 },
+      stop_reason: 'tool_use',
     })), cb);
     expect(cb.onContent).toHaveBeenCalledWith('complete');
     expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
@@ -147,6 +148,9 @@ describe('Claude response parsing', () => {
     processClaudeSseLine('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"search","input":{"stale":true}}}', tools, cb, state);
     processClaudeSseLine('data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"q\\":\\"docs\\"}"}}', tools, cb, state);
     processClaudeSseLine('data: {"type":"content_block_stop","index":0}', tools, cb, state);
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    processClaudeSseLine('data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}', tools, cb, state);
+    processClaudeSseLine('data: {"type":"message_stop"}', tools, cb, state);
     expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
       function: { name: 'search', arguments: '{"q":"docs"}' },
     }));
@@ -158,13 +162,122 @@ describe('Claude response parsing', () => {
     const tools = new Map<number, ToolCall>();
     processClaudeSseLine('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"search","input":{"q":"docs"}}}', tools, cb, state);
     processClaudeSseLine('data: {"type":"content_block_stop","index":0}', tools, cb, state);
+    processClaudeSseLine('data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}', tools, cb, state);
+    processClaudeSseLine('data: [DONE]', tools, cb, state);
     expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
       function: { name: 'search', arguments: '{"q":"docs"}' },
     }));
   });
 });
 
+describe('Claude tool completion integrity', () => {
+  const start = { type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id: 'call_1', name: 'search', input: {} } };
+  const delta = (partial_json: string) => ({ type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', partial_json } });
+  const stop = { type: 'content_block_stop', index: 0 };
+  const reason = (stop_reason: string) => ({ type: 'message_delta', delta: { stop_reason } });
+  const response = (events: unknown[]) => new Response(events.map(event =>
+    `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''));
+
+  it.each(['message_stop', '[DONE]'])('requires an explicit tool_use stop reason before %s publishes tools', async terminal => {
+    const cb = callbacks();
+    await expect(processClaudeStream(response([start, delta('{}'), stop,
+      ...(terminal === '[DONE]' ? ['[DONE]'] : [{ type: terminal }])]), cb, 1_000))
+      .rejects.toThrow('without stop_reason=tool_use');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it.each(['end_turn', 'future_stop'])('does not publish tools for stop reason %s', async stopReason => {
+    const cb = callbacks();
+    await expect(processClaudeStream(response([start, delta('{}'), stop, reason(stopReason), { type: 'message_stop' }]), cb, 1_000))
+      .rejects.toThrow('without stop_reason=tool_use');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('requires content_block_stop even with valid input and tool_use termination', async () => {
+    const cb = callbacks();
+    await expect(processClaudeStream(response([start, delta('{}'), reason('tool_use'), { type: 'message_stop' }]), cb, 1_000))
+      .rejects.toThrow('incomplete content block');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('does not release a complete tool while an earlier thinking block remains open', async () => {
+    const cb = { ...callbacks(), onClaudeAssistantContent: vi.fn() };
+    await expect(processClaudeStream(response([
+      { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '', signature: 'SIG' } },
+      start, delta('{}'), stop, reason('tool_use'), { type: 'message_stop' },
+    ]), cb, 1_000)).rejects.toThrow('incomplete content block');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    expect(cb.onClaudeAssistantContent).not.toHaveBeenCalled();
+  });
+
+  it.each(['max_tokens', 'model_context_window_exceeded', 'pause_turn'])('discards partial tool JSON and unsigned thinking on %s', async stopReason => {
+    const cb = { ...callbacks(), onClaudeAssistantContent: vi.fn() };
+    await expect(processClaudeStream(response([
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: 'partial answer' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'content_block_start', index: 2, content_block: { type: 'thinking', thinking: 'partial thinking' } },
+      start, delta('{"q":"unfinished'), stop, reason(stopReason), { type: 'message_stop' },
+    ]), cb, 1_000)).resolves.toMatchObject({ terminal: true });
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    expect(cb.onClaudeAssistantContent).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: 'partial answer' }]);
+  });
+
+  it.each(['{"secret":"unfinished', '[]', 'null', '1', ''])('rejects invalid completed input without publishing or exposing it: %j', async input => {
+    const cb = { ...callbacks(), onClaudeAssistantContent: vi.fn() };
+    await expect(processClaudeStream(response([start, delta(input), stop, reason('tool_use'), { type: 'message_stop' }]), cb, 1_000))
+      .rejects.toMatchObject({ name: 'RelayStreamError', message: 'Relay Claude stream failed - received invalid tool call arguments' });
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    expect(cb.onClaudeAssistantContent).not.toHaveBeenCalled();
+  });
+
+  it('validates every call before publishing a batch', async () => {
+    const cb = callbacks();
+    await expect(processClaudeStream(response([start, delta('{}'), stop,
+      { ...start, index: 1, content_block: { ...start.content_block, id: 'call_2', input: [] } },
+      { type: 'content_block_stop', index: 1 }, reason('tool_use'), { type: 'message_stop' },
+    ]), cb, 1_000)).rejects.toThrow('invalid tool call arguments');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'future_stop', 'end_turn'])('applies the stop reason gate to full JSON: %s', async stop_reason => {
+    const cb = callbacks();
+    await expect(processClaudeFullResponse(new Response(JSON.stringify({
+      content: [{ type: 'text', text: 'partial answer' }, start.content_block], stop_reason,
+    })), cb)).rejects.toThrow('without stop_reason=tool_use');
+    expect(cb.onContent).toHaveBeenCalledWith('partial answer');
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it.each(['max_tokens', 'model_context_window_exceeded', 'pause_turn'])('discards incomplete full JSON tool input on %s', async stop_reason => {
+    const cb = { ...callbacks(), onClaudeAssistantContent: vi.fn() };
+    await processClaudeFullResponse(new Response(JSON.stringify({ stop_reason,
+      content: [{ type: 'text', text: 'partial answer' }, { ...start.content_block, input: '{"q":"unfinished' }],
+    })), cb);
+    expect(cb.onToolCall).not.toHaveBeenCalled();
+    expect(cb.onClaudeAssistantContent).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: 'partial answer' }]);
+  });
+});
+
 describe('Claude request completion', () => {
+  it.each([undefined, '2023-06-01', '2026-10-21'])('serializes sampling parameters for API version %s', async anthropicVersion => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn"}', {
+      headers: { 'content-type': 'application/json' },
+    }));
+    const request = { model: 'claude-test', max_tokens: 16, messages: [], stream: true, temperature: 0.4, top_p: 0.6 };
+    await streamClaudeMessages({ baseUrl: 'https://relay.example.test/v1', headers: {}, anthropicVersion,
+      requestTimeoutMs: 100, streamIdleTimeoutMs: 100 }, request, callbacks());
+    const body = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    if (anthropicVersion === '2026-10-21') {
+      expect(body).not.toHaveProperty('temperature');
+      expect(body).not.toHaveProperty('top_p');
+    } else expect(body).toMatchObject({ temperature: 0.4, top_p: 0.6 });
+    expect(new Headers(fetch.mock.calls[0][1]?.headers).get('anthropic-version')).toBe(anthropicVersion ?? '2023-06-01');
+    expect(request).toMatchObject({ temperature: 0.4, top_p: 0.6 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('reports one serialized request with a local ID and the native response request-id', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"content":[{"type":"text","text":"answer"}]}', {
       headers: { 'content-type': 'application/json', 'request-id': 'req_native', 'x-request-id': 'req_proxy', 'retry-after': '3' },

@@ -61,6 +61,7 @@ describe.each(variants)('$apiType response lifecycle', ({ apiType, protocol, met
       }
       if (outcome === 'cancelled') current.source.cancel();
       if (outcome === 'failed') throw new Error('private transport detail');
+      emitNativeText(callbacks, 'private answer');
     });
     if (outcome === 'completed') await provide(current);
     else await expect(provide(current)).rejects.toBeInstanceOf(Error);
@@ -138,6 +139,7 @@ describe.each(variants)('$apiType response lifecycle', ({ apiType, protocol, met
     current.progress.report = () => { throw progressError; };
     vi.spyOn(RelayClient.prototype, method).mockImplementation(async (_request: unknown, callbacks: StreamCallbacks) => {
       callbacks.onContent('answer');
+      emitNativeText(callbacks, 'answer');
     });
 
     await expect(provide(current)).rejects.toBe(progressError);
@@ -147,10 +149,41 @@ describe.each(variants)('$apiType response lifecycle', ({ apiType, protocol, met
   });
 });
 
+describe.each(variants.filter(variant => variant.apiType !== 'chat-completions'))('$apiType replay completion contract', ({ apiType, protocol, method, provide }) => {
+  it('does not reconstruct or publish tools when a successful transport omits its replay payload', async () => {
+    const current = context(apiType);
+    const stream = vi.spyOn(RelayClient.prototype, method).mockImplementation(async (_request: unknown, callbacks: StreamCallbacks) => {
+      callbacks.onContent('partial answer');
+      callbacks.onClaudeStopReason?.('tool_use');
+      callbacks.onToolCall({ id: 'call-1', type: 'function', function: { name: 'search', arguments: '{}' } });
+    });
+
+    await expect(provide(current)).rejects.toThrow('without its protocol replay payload');
+
+    expect(current.parts).toEqual([new vscode.LanguageModelTextPart('partial answer')]);
+    expect(settlements(current)).toEqual([expect.stringContaining(`${protocol} request failed:`)]);
+    expect(stream).toHaveBeenCalledOnce();
+  });
+});
+
 function emitPendingResponse(callbacks: StreamCallbacks): void {
+  callbacks.onClaudeStopReason?.('tool_use');
   callbacks.onContent('partial ');
   callbacks.onContent('answer');
+  callbacks.onResponsesOutputItems?.([
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial answer' }] },
+    { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"q":"docs"}' },
+  ]);
+  callbacks.onClaudeAssistantContent?.([
+    { type: 'text', text: 'partial answer' }, { type: 'tool_use', id: 'call-1', name: 'search', input: { q: 'docs' } },
+  ]);
   callbacks.onToolCall({ id: 'call-1', type: 'function', function: { name: 'search', arguments: '{"q":"docs"}' } });
+}
+
+function emitNativeText(callbacks: StreamCallbacks, text: string): void {
+  callbacks.onResponsesOutputItems?.([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }]);
+  callbacks.onClaudeStopReason?.('end_turn');
+  callbacks.onClaudeAssistantContent?.([{ type: 'text', text }]);
 }
 
 function context(apiType: ApiType) {

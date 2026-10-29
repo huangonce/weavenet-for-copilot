@@ -4,7 +4,6 @@ import type { RoutedModel } from '../../src/relay/types';
 import {
   _resetMetadataCacheForTests,
   getCachedData,
-  getCachedFetchedAt,
   initMetadataCache,
   onMetadataChanged,
   scheduleRefresh,
@@ -12,6 +11,7 @@ import {
 import { enrichModelsWithOpenRouter, OPENROUTER_CACHE_KEY, OPENROUTER_MAX_ENTRIES, parseOpenRouterResponse, scheduleOpenRouterRefresh } from '../../src/metadata/openrouterFallback';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   _resetMetadataCacheForTests();
 });
@@ -58,6 +58,45 @@ describe('metadata safety', () => {
       parse: JSON.parse,
     }, { force: true });
     expect(context.values.get('catalog')).toBe(old);
+  });
+
+  it('decodes split UTF-8 metadata at the exact byte limit', async () => {
+    const context = contextWith();
+    initMetadataCache(context as unknown as vscode.ExtensionContext);
+    const bytes = new TextEncoder().encode('["汉😀"]');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    })));
+
+    await scheduleRefresh({ key: 'catalog', url: 'https://example.test/catalog', ttlMs: 0,
+      maxBodyBytes: bytes.byteLength, parse: JSON.parse });
+
+    expect(getCachedData('catalog')).toEqual(['汉😀']);
+  });
+
+  it('keeps the previous metadata when the response body stalls past the total timeout', async () => {
+    vi.useFakeTimers();
+    const old = { data: ['old'], fetchedAt: 0 };
+    const context = contextWith({ catalog: old });
+    initMetadataCache(context as unknown as vscode.ExtensionContext);
+    const cancel = vi.fn();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('["partial')); }, cancel,
+    })));
+    const parse = vi.fn(JSON.parse);
+    const pending = scheduleRefresh({ key: 'catalog', url: 'https://example.test/catalog', ttlMs: 0, parse }, { force: true });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await pending;
+
+    expect(context.values.get('catalog')).toBe(old);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(parse).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
   });
 
   it('prefers root context length and rejects oversized catalogs', () => {
@@ -271,7 +310,7 @@ apiType: 'chat-completions' as const },
     const context = contextWith({ catalog: { data: ['fresh'], fetchedAt } });
     initMetadataCache(context as unknown as vscode.ExtensionContext);
     expect(scheduleRefresh(spec)).toBeUndefined();
-    expect(getCachedFetchedAt('catalog')).toBe(fetchedAt);
+    expect(context.values.get('catalog')).toEqual({ data: ['fresh'], fetchedAt });
   });
 
   it('keeps cached values and records useful diagnostics for HTTP and parse failures', async () => {

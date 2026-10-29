@@ -245,6 +245,38 @@ describe('documented input and output token budgets', () => {
     expect(model.maxOutputTokens).toBeUndefined();
     expect(modelTokenBudget(model, extensionConfig())).toEqual({ maxInputTokens: 100_000, maxOutputTokens: 8000 });
   });
+
+  it.each([0.5, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('ignores invalid token budgets %s without poisoning the picker', invalid => {
+    const config = extensionConfig();
+    const model = toRoutedModel({ id: 'bad', context_length: invalid, max_completion_tokens: invalid,
+      max_input_tokens: invalid }, 'chat-completions');
+    expect(model.contextWindow).toBeUndefined();
+    expect(model.maxInputTokens).toBeUndefined();
+    expect(model.maxOutputTokens).toBeUndefined();
+    expect(toChatInformation(model, config, true)).toMatchObject({ maxInputTokens: 100_000, maxOutputTokens: 8000 });
+    // Persisted snapshots can predate input normalization; presentation must
+    // still tolerate the same invalid metadata without rejecting other models.
+    expect(modelTokenBudget({ ...model, contextWindow: invalid, maxInputTokens: invalid, maxOutputTokens: invalid },
+      { ...config, maxInputTokens: invalid, maxOutputTokens: invalid }))
+      .toEqual({ maxInputTokens: 128_000, maxOutputTokens: 16_384 });
+  });
+
+  it('continues enumerating valid models alongside an unusable context size', () => {
+    const models = [toRoutedModel({ id: 'good', context_length: 8192, max_completion_tokens: 4096 }, 'chat-completions'),
+      toRoutedModel({ id: 'bad', context_length: 1, max_completion_tokens: 0.5 }, 'chat-completions')];
+    const info = models.map(model => toChatInformation(model, extensionConfig(), true));
+    expect(info.map(model => model.id)).toEqual(['good', 'bad']);
+    expect(info[0]).toMatchObject({ maxInputTokens: 4096, maxOutputTokens: 4096 });
+    expect(info[1]).toMatchObject({ maxInputTokens: 100_000, maxOutputTokens: 8000 });
+  });
+
+  it('uses a valid alternate context field and reserves both token budgets at the minimum window', () => {
+    expect(modelTokenBudget(toRoutedModel({ id: 'fallback', context_length: 1, context_window: 8192,
+      max_completion_tokens: 0.5, max_output_tokens: 4096 }, 'chat-completions'), extensionConfig()))
+      .toEqual({ maxInputTokens: 4096, maxOutputTokens: 4096 });
+    expect(modelTokenBudget(fromConfiguredModel({ id: 'tiny', contextWindow: 2 }), extensionConfig()))
+      .toEqual({ maxInputTokens: 1, maxOutputTokens: 1 });
+  });
 });
 
 

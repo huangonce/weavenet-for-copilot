@@ -76,31 +76,15 @@ export class RelayClient {
   }
 
   async testOpenAIChatCompletion(model: string, stream = false, token?: CancellationToken, tokenLimitField: 'max_tokens' | 'max_completion_tokens' = 'max_tokens'): Promise<RelayProtocolProbeResult> {
-    return probeOpenAIChatCompletion({
-      baseUrl: this.options.baseUrl,
-      headers: this.headersFor('bearer'),
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-    }, model, stream, token, tokenLimitField);
+    return probeOpenAIChatCompletion(this.requestOptions('bearer'), model, stream, token, tokenLimitField);
   }
 
   async testOpenAIResponses(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
-    return probeOpenAIResponses({
-      baseUrl: this.options.baseUrl,
-      headers: this.headersFor('bearer'),
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-    }, model, stream, token);
+    return probeOpenAIResponses(this.requestOptions('bearer'), model, stream, token);
   }
 
   async testClaudeMessages(model: string, stream = false, token?: CancellationToken): Promise<RelayProtocolProbeResult> {
-    return probeClaudeMessages({
-      baseUrl: this.options.baseUrl,
-      headers: this.headersFor('x-api-key'),
-      anthropicVersion: this.options.anthropicVersion,
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-    }, model, stream, token);
+    return probeClaudeMessages(this.requestOptions('x-api-key'), model, stream, token);
   }
 
   async streamChatCompletion(
@@ -109,13 +93,7 @@ export class RelayClient {
     token?: CancellationToken,
     sendClientRequestId = false,
   ): Promise<void> {
-    await streamOpenAIChatCompletion({
-      baseUrl: this.options.baseUrl,
-      headers: this.headers(),
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-      sendClientRequestId,
-    }, request, callbacks, token);
+    await streamOpenAIChatCompletion({ ...this.requestOptions(), sendClientRequestId }, request, callbacks, token);
   }
 
   async streamResponses(
@@ -124,13 +102,7 @@ export class RelayClient {
     token?: CancellationToken,
     sendClientRequestId = false,
   ): Promise<void> {
-    await streamOpenAIResponses({
-      baseUrl: this.options.baseUrl,
-      headers: this.headers(),
-      requestTimeoutMs: this.options.requestTimeoutMs,
-      streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-      sendClientRequestId,
-    }, request, callbacks, token);
+    await streamOpenAIResponses({ ...this.requestOptions(), sendClientRequestId }, request, callbacks, token);
   }
 
   async streamClaudeMessages(
@@ -138,13 +110,17 @@ export class RelayClient {
     callbacks: StreamCallbacks,
     token?: CancellationToken,
   ): Promise<void> {
-    await streamClaudeMessages({
+    await streamClaudeMessages(this.requestOptions(), request, callbacks, token);
+  }
+
+  private requestOptions(authScheme = this.options.authScheme ?? 'bearer') {
+    return {
       baseUrl: this.options.baseUrl,
-      headers: this.headers(),
+      headers: this.headersFor(authScheme),
       anthropicVersion: this.options.anthropicVersion,
       requestTimeoutMs: this.options.requestTimeoutMs,
       streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
-    }, request, callbacks, token);
+    };
   }
 
   private headers(): Record<string, string> {

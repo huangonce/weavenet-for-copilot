@@ -109,31 +109,22 @@ describe('OpenAI response parsing', () => {
     ]);
   });
 
-  it('uses repeated or progressively complete tool argument snapshots without duplicating JSON', () => {
-    const cb = callbacks();
-    const state = { responseParts: 0, started: false, sawFinishReason: false };
-    const tools = new Map<number, ToolCall>();
-    processOpenAISseLine(
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}',
-      tools,
-      cb,
-      state,
-    );
-    processOpenAISseLine(
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}',
-      tools,
-      cb,
-      state,
-    );
-    processOpenAISseLine(
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}]}',
-      tools,
-      cb,
-      state,
-    );
-    expect(cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
-      function: { name: 'read', arguments: '{"path":"README.md"}' },
-    }));
+  it.each([
+    ['{"a":', '{"a":1}', '}'],
+    ['{"a":', '{"a":', '{"a":1}', '}}'],
+    ['{"items":[', '{"x":1}', ',', '{"x":1}', ']}'],
+  ])('appends nested and repeated object fragments without guessing snapshots: %j', (...fragments) => {
+    const harness = toolBudgetHarness();
+    fragments.forEach((fragment, index) => {
+      harness.delta({ index: 0, ...(index === 0 ? { id: 'call_nested' } : {}),
+        function: { ...(index === 0 ? { name: 'nested' } : {}), arguments: fragment } });
+      harness.expectExactBytes();
+    });
+    harness.finish();
+    expect(harness.cb.onToolCall).toHaveBeenCalledOnce();
+    const call = harness.cb.onToolCall.mock.calls[0][0];
+    expect(call.function.arguments).toBe(fragments.join(''));
+    expect(JSON.parse(call.function.arguments)).toEqual(JSON.parse(fragments.join('')));
   });
 
   it('does not discard identical fragments before tool arguments form complete JSON', () => {
@@ -179,7 +170,7 @@ describe('OpenAI response parsing', () => {
       { index: 7, function: { arguments: '\udc00' } },
       { index: 7, function: { arguments: { path: 'done' } } },
       { index: 11, id: 'snapshot', function: { name: 'echo', arguments: '{"emoji":"\ud83d' } },
-      { index: 11, function: { arguments: '{"emoji":"😀"}' } },
+      { index: 11, function: { arguments: '\ude00"}' } },
     ];
     for (const event of events) {
       harness.delta(event);
@@ -243,20 +234,26 @@ describe('OpenAI response parsing', () => {
     expect(harness.state.pendingArgumentEnds?.size).toBe(0);
   });
 
-  it('replaces a long sequence of small argument deltas with its complete snapshot only once', () => {
+  it('keeps UTF-8 accounting bounded across a long append-only argument sequence', () => {
     const harness = toolBudgetHarness();
     harness.delta({ index: 0, id: 'call', function: { name: 'echo', arguments: '{"value":"' } });
     for (let index = 0; index < 256; index++) harness.delta({ index: 0, function: { arguments: '字😀' } });
-    const snapshot = JSON.stringify({ value: '字😀'.repeat(256) });
-    harness.delta({ index: 0, function: { arguments: snapshot } });
+    harness.delta({ index: 0, function: { arguments: '"}' } });
     harness.expectExactBytes();
-    const completeBytes = harness.state.pendingToolBytes;
-    harness.delta({ index: 0, function: { arguments: snapshot } });
-    harness.delta({ index: 0, function: { arguments: '{"value":' } });
-    harness.expectExactBytes();
-    expect(harness.state.pendingToolBytes).toBe(completeBytes);
     harness.finish();
-    expect(harness.cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({ function: { name: 'echo', arguments: snapshot } }));
+    expect(harness.cb.onToolCall).toHaveBeenCalledOnce();
+    expect(harness.cb.onToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      function: { name: 'echo', arguments: JSON.stringify({ value: '字😀'.repeat(256) }) },
+    }));
+  });
+
+  it('does not silently accept repeated non-additive complete JSON snapshots', () => {
+    const harness = toolBudgetHarness();
+    harness.delta({ index: 0, id: 'call', function: { name: 'echo', arguments: '{"value":1}' } });
+    harness.delta({ index: 0, function: { arguments: '{"value":1}' } });
+    harness.expectExactBytes();
+    expect(() => harness.finish()).toThrow('invalid tool call arguments');
+    expect(harness.cb.onToolCall).not.toHaveBeenCalled();
   });
 
   it('combines truly fragmented tool names without duplicating full snapshots', () => {

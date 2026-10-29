@@ -315,20 +315,8 @@ function toolCallBytes(call: ToolCall): number {
 function mergeToolArgumentDelta(current: string, incoming: string, previousEnd: number): {
   value: string; bytesChange: number; end: number;
 } {
-  // Most events are small append-only deltas. Inspect the incoming fragment
-  // first so ordinary appends never scan or flatten the accumulated string.
-  if (current && incoming.trimStart().startsWith('{')) {
-    if (current.trimStart().startsWith('{') && incoming.length > current.length && incoming.startsWith(current)) {
-      return {
-        value: incoming,
-        bytesChange: Buffer.byteLength(incoming, 'utf8') - Buffer.byteLength(current, 'utf8'),
-        end: incoming.charCodeAt(incoming.length - 1),
-      };
-    }
-    if ((incoming === current || current.startsWith(incoming)) && isCompleteJsonObject(current)) {
-      return { value: current, bytesChange: 0, end: previousEnd };
-    }
-  }
+  // Chat arguments are append-only deltas. A nested object can repeat the
+  // current prefix, so its contents cannot distinguish a delta from a snapshot.
   // A JSON string can encode the two halves of a surrogate pair in separate
   // events. Joined UTF-8 then uses four bytes rather than two replacements (6).
   const first = incoming.charCodeAt(0);
@@ -338,15 +326,6 @@ function mergeToolArgumentDelta(current: string, incoming: string, previousEnd: 
     bytesChange: Buffer.byteLength(incoming, 'utf8') - (joinedSurrogate ? 2 : 0),
     end: incoming.length ? incoming.charCodeAt(incoming.length - 1) : previousEnd,
   };
-}
-
-function isCompleteJsonObject(value: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed);
-  } catch {
-    return false;
-  }
 }
 
 function flushToolCalls(pending: Map<number, ToolCall>, callbacks: StreamCallbacks): number {

@@ -519,8 +519,7 @@ export interface StreamCallbacks {
   onContent(text: string): void;
   onReasoning(text: string): void;
   onToolCall(toolCall: ToolCall): void;
-  /** Full reasoning output item captured from the stream (id, summary, encrypted_content). */
-  onResponsesReasoningItem?(item: ResponsesOutputItemReasoning): void;
+  /** Complete native output for replay, including reasoning and encrypted content. */
   onResponsesOutputItems?(items: readonly ResponsesOutputItem[]): void;
   onClaudeAssistantContent?(blocks: readonly ClaudeContentBlock[]): void;
   onClaudeStopReason?(reason: string): void;

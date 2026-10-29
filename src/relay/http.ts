@@ -1,6 +1,6 @@
 import type { CancellationToken } from 'vscode';
 import type { RelayProtocol, ResponseDiagnosticsMetadata } from './types';
-import { createRelayRequestError, createRelayStreamError, RelayRequestError } from './errors';
+import { createRelayRequestError, createRelayResponseParseError, createRelayStreamError, RelayRequestError, RelayResponseParseError } from './errors';
 
 export const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 export const MAX_COMPLETE_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -339,8 +339,14 @@ async function fetchJsonOnce<T>(
       );
     }
     const metadata = safeResponseMetadata(response);
+    let value: T;
+    try {
+      value = JSON.parse(body) as T;
+    } catch {
+      throw createRelayResponseParseError(response.status, metadata.responseType, body, url, metadata.requestId);
+    }
     return {
-      value: JSON.parse(body) as T,
+      value,
       status: response.status,
       contentType: metadata.responseType,
       requestId: metadata.requestId,
@@ -353,7 +359,21 @@ async function fetchJsonOnce<T>(
   }
 }
 
-async function readResponseTextWithSignal(response: Response, signal: AbortSignal, maxBodyBytes: number): Promise<string> {
+export function readResponseTextWithSignal(response: Response, signal: AbortSignal, maxBodyBytes: number): Promise<string> {
+  return readBodyText(response, maxBodyBytes, reader => readWithAbortSignal(reader, signal));
+}
+
+function byteLength(value: unknown): number {
+  if (value instanceof Uint8Array) return value.byteLength;
+  return Buffer.byteLength(String(value));
+}
+
+/** Shared bounded decoding; callers retain their total or per-read timeout policy. */
+async function readBodyText(
+  response: Response,
+  maxBodyBytes: number,
+  read: (reader: ReadableStreamDefaultReader<Uint8Array>) => Promise<ReadableStreamReadResult<Uint8Array>>,
+): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -361,7 +381,7 @@ async function readResponseTextWithSignal(response: Response, signal: AbortSigna
   let bytes = 0;
   try {
     while (true) {
-      const { value, done } = await readWithAbortSignal(reader, signal);
+      const { value, done } = await read(reader);
       if (done) break;
       bytes += byteLength(value);
       if (bytes > maxBodyBytes) throw new Error(`Relay response body exceeds ${maxBodyBytes} bytes.`);
@@ -371,11 +391,6 @@ async function readResponseTextWithSignal(response: Response, signal: AbortSigna
   } finally {
     await reader.cancel().catch(() => undefined);
   }
-}
-
-function byteLength(value: unknown): number {
-  if (value instanceof Uint8Array) return value.byteLength;
-  return Buffer.byteLength(String(value));
 }
 
 async function readWithAbortSignal<T>(
@@ -436,29 +451,13 @@ function cancellationError(): Error {
   return error;
 }
 
-export async function readResponseText(
+export function readResponseText(
   response: Response,
   idleTimeoutMs: number,
   token?: CancellationToken,
   maxBodyBytes = MAX_COMPLETE_RESPONSE_BYTES,
 ): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let result = '';
-  let bytes = 0;
-  try {
-    while (true) {
-      const { value, done } = await readWithIdleTimeout(reader, idleTimeoutMs, token);
-      if (done) break;
-      bytes += byteLength(value);
-      if (bytes > maxBodyBytes) throw new Error(`Relay response body exceeds ${maxBodyBytes} bytes.`);
-      result += decoder.decode(value, { stream: true });
-    }
-    return result + decoder.decode();
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
+  return readBodyText(response, maxBodyBytes, reader => readWithIdleTimeout(reader, idleTimeoutMs, token));
 }
 
 async function readResponseTextUpTo(
@@ -495,6 +494,7 @@ function isCancellationOrTimeout(error: unknown): boolean {
 }
 
 function isRetryableGetError(error: unknown): boolean {
-  return !(error instanceof Error && error.name === 'AbortError') &&
+  return !(error instanceof RelayResponseParseError) &&
+    !(error instanceof Error && error.name === 'AbortError') &&
     !(error instanceof RelayRequestError && error.status >= 400 && error.status < 500);
 }

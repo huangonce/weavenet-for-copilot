@@ -1,13 +1,11 @@
 import * as vscode from 'vscode';
-import { createThinkingPart, parseToolArguments } from './helpers';
+import { createThinkingPart, hostThinkingPart, parseToolArguments } from './helpers';
 import { t } from '../l10n';
 import type { ToolCall } from '../relay/types';
 import { snapshotChatRequest } from './canonicalRequest';
 import type { ResponsePartEmitter } from './responsePartEmitter';
 import type { ProtocolReplayState } from '../relay/replayState';
 import { cloneReplayState, PROTOCOL_REPLAY_METADATA_KEY, replayDisplayText } from '../relay/replayState';
-
-const THINKING_PART_CARRIER = 'LanguageModelThinkingPart';
 
 /**
  * The thinking part class is the only carrier that can move protocol state
@@ -18,13 +16,7 @@ const THINKING_PART_CARRIER = 'LanguageModelThinkingPart';
  * instead of failing the whole request.
  */
 export function hasProtocolReplayCarrier(): boolean {
-  try {
-    // A host module may also throw on unknown properties instead of returning
-    // undefined, which must degrade exactly like an absent class.
-    return typeof (vscode as unknown as Record<string, unknown>)[THINKING_PART_CARRIER] === 'function';
-  } catch {
-    return false;
-  }
+  return hostThinkingPart() !== undefined;
 }
 
 let warnedMissingCarrier = false;

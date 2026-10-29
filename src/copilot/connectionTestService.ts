@@ -1,5 +1,6 @@
+import * as vscode from 'vscode';
 import type { AuthManager } from '../auth/auth';
-import { getConfig } from '../config/config';
+import { getConfig, getProfileConfiguration } from '../config/config';
 import type { ApiType, ConnectionProfile } from '../config/config';
 import { RelayClient } from '../relay/client';
 import type { RelayEndpointTestResult } from '../relay/client';
@@ -16,13 +17,25 @@ import type {
 import type {
   ConnectionDiagnosticsStore} from './connectionDiagnosticsStore';
 import {
-  currentProfileFingerprint,
   diagnosticsOptions,
   fingerprintConnection,
 } from './connectionDiagnosticsStore';
 import type { ConnectionRuntime } from './connectionRuntimeManager';
+import { catalogRevision } from './catalogIdentity';
+import { assembleModelCatalog } from './modelRegistry';
+import { toRoutedModel } from '../relay/models';
+import type { RoutedModel } from '../relay/types';
+import { t } from '../l10n';
 
 export type ConnectionTestResult = ConnectionDiagnosticsSnapshot;
+
+interface ConnectionTestTask {
+  readonly profileId: string;
+  readonly revision: string;
+  readonly fingerprint: string;
+  readonly cancellation: vscode.CancellationTokenSource;
+  readonly promise: Promise<ConnectionTestResult>;
+}
 
 export interface ConnectionTestServiceOptions {
   readonly auth: AuthManager;
@@ -36,40 +49,62 @@ export interface ConnectionTestServiceOptions {
 }
 
 /**
- * Runs the endpoint-level connection test (models + per-protocol probes) with
- * per-fingerprint deduplication, and persists the resulting diagnostics.
+ * Runs one test per unchanged connection, cancels invalidated work, and persists
+ * diagnostics only while the tested settings and credentials remain current.
  */
 export class ConnectionTestService {
-  private readonly connectionTestTasks = new Map<string, Promise<ConnectionTestResult>>();
+  private readonly connectionTestTasks = new Map<string, ConnectionTestTask>();
 
   constructor(private readonly options: ConnectionTestServiceOptions) {}
 
   test(profile: ConnectionProfile): Promise<ConnectionTestResult> {
+    if (!normalizeRelayBaseUrl(profile.baseUrl)) {
+      return Promise.reject(new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must use HTTPS, or HTTP on a loopback host.' }));
+    }
     const fingerprint = fingerprintConnection(profile, diagnosticsOptions());
-    const existing = this.connectionTestTasks.get(fingerprint);
-    if (existing) return existing;
-    const task = this.runConnectionTest(profile, fingerprint).finally(() => {
-      if (this.connectionTestTasks.get(fingerprint) === task) this.connectionTestTasks.delete(fingerprint);
-    });
-    this.connectionTestTasks.set(fingerprint, task);
-    return task;
+    const revision = catalogRevision(profile);
+    if (!this.matchesCurrentProfile(profile.id, revision, fingerprint)) {
+      return Promise.reject(connectionTestCancelled());
+    }
+    const existing = this.connectionTestTasks.get(profile.id);
+    if (existing && existing.revision === revision && existing.fingerprint === fingerprint
+      && !existing.cancellation.token.isCancellationRequested) return existing.promise;
+    existing?.cancellation.cancel();
+    const cancellation = new vscode.CancellationTokenSource();
+    const task: ConnectionTestTask = {
+      profileId: profile.id, revision, fingerprint, cancellation,
+      promise: Promise.resolve().then(() => this.runConnectionTest(profile, task)).finally(() => {
+        if (this.connectionTestTasks.get(profile.id) === task) this.connectionTestTasks.delete(profile.id);
+        cancellation.dispose();
+      }),
+    };
+    this.connectionTestTasks.set(profile.id, task);
+    return task.promise;
+  }
+
+  invalidate(profileId?: string): void {
+    for (const task of this.connectionTestTasks.values()) {
+      if (profileId === undefined || task.profileId === profileId) task.cancellation.cancel();
+    }
   }
 
   async clearDiagnostics(profile: ConnectionProfile): Promise<void> {
+    this.invalidate(profile.id);
     await this.options.diagnosticsStore.delete(profile, diagnosticsOptions());
   }
 
   async clearAllDiagnostics(): Promise<void> {
+    this.invalidate();
     await this.options.diagnosticsStore.clear();
   }
 
-  private async runConnectionTest(profile: ConnectionProfile, fingerprint: string): Promise<ConnectionTestResult> {
+  private async runConnectionTest(profile: ConnectionProfile, task: ConnectionTestTask): Promise<ConnectionTestResult> {
+    const { fingerprint, cancellation: { token } } = task;
     const normalizedBaseUrl = normalizeRelayBaseUrl(profile.baseUrl);
     const host = safeHost(normalizedBaseUrl ?? profile.baseUrl) ?? 'unknown host';
-    if (!normalizedBaseUrl) {
-      throw new ConnectionTestError({ category: 'url', message: 'The Relay Base URL must use HTTPS, or HTTP on a loopback host.' });
-    }
+    this.assertCurrent(task);
     const apiKey = await this.options.auth.getApiKey(profile);
+    this.assertCurrent(task);
     if (!apiKey) {
       this.options.onTestStatus(profile.id, fingerprint, { phase: 'keyMissing', message: 'API key is required.' });
       throw new ConnectionTestError({ category: 'authentication', message: 'API key is required for this connection.' });
@@ -87,35 +122,36 @@ export class ConnectionTestService {
         streamIdleTimeoutMs: config.streamIdleTimeoutMs,
       });
       const modelsStartedAt = Date.now();
-      const { models, diagnostic } = await client.testModels();
-      const modelCount = Array.isArray(models.data) ? models.data.length : 0;
+      const { models, diagnostic } = await client.testModels(token);
+      this.assertCurrent(task);
+      const catalog = assembleModelCatalog(config, (models.data ?? []).map(model => toRoutedModel(model, config.apiType)));
+      const modelCount = models.data?.length ?? 0;
       const probes: ConnectionProbeResult[] = [successfulProbe('models', modelsStartedAt, diagnostic)];
-      const declarations = new Map(config.models.map((model) => [model.id, model]));
-      const candidates = new Map<ApiType, string>();
-      for (const model of config.models) {
-        const apiType = model.apiType ?? config.apiType;
-        if (!candidates.has(apiType)) candidates.set(apiType, model.id);
+      const candidates = new Map<ApiType, RoutedModel>();
+      for (const model of catalog) {
+        const existing = candidates.get(model.apiType);
+        if (!existing || (model.apiType === 'chat-completions'
+          && existing.openai?.tokenLimitField === 'omit' && model.openai?.tokenLimitField !== 'omit')) {
+          candidates.set(model.apiType, model);
+        }
       }
-      for (const model of models.data ?? []) {
-        const declaration = declarations.get(model.id);
-        const apiType = declaration?.apiType ?? config.apiType;
-        if (!candidates.has(apiType)) candidates.set(apiType, model.id);
-      }
-      for (const [apiType, modelId] of candidates) {
+      for (const [apiType, model] of candidates) {
+        const modelId = model.upstreamId;
         const prefix = apiType === 'messages' ? 'claude' : apiType === 'responses' ? 'responses' : 'openai';
         const endpoint = apiType === 'messages' ? '/messages' : apiType === 'responses' ? '/responses' : '/chat/completions';
-        const declaration = config.models.filter((model) => model.id === modelId
-          && (model.apiType ?? config.apiType) === apiType).at(-1);
-        const tokenLimitField = declaration?.openai?.tokenLimitField ?? 'max_tokens';
+        const tokenLimitField = model.openai?.tokenLimitField ?? 'max_tokens';
         const operation = (stream: boolean) => {
-          if (apiType === 'messages') return client.testClaudeMessages(modelId, stream);
-          if (apiType === 'responses') return client.testOpenAIResponses(modelId, stream);
+          if (apiType === 'messages') return client.testClaudeMessages(modelId, stream, token);
+          if (apiType === 'responses') return client.testOpenAIResponses(modelId, stream, token);
           if (tokenLimitField === 'omit') return Promise.reject(new ConnectionTestError({ category: 'protocol',
             message: 'This model disables output limits; bounded generation tests are unavailable.' }));
-          return client.testOpenAIChatCompletion(modelId, stream, undefined, tokenLimitField);
+          return client.testOpenAIChatCompletion(modelId, stream, token, tokenLimitField);
         };
+        this.assertCurrent(task);
         probes.push(await runProtocolProbe(`${prefix}.nonStreaming`, endpoint, modelId, () => operation(false)));
+        this.assertCurrent(task);
         probes.push(await runProtocolProbe(`${prefix}.streaming`, endpoint, modelId, () => operation(true)));
+        this.assertCurrent(task);
       }
       const completedAt = Date.now();
       const result: ConnectionDiagnosticsSnapshot = {
@@ -132,21 +168,40 @@ export class ConnectionTestService {
         capabilities: deriveConnectionCapabilities(probes),
         probes,
       };
-      if (currentProfileFingerprint(profile.id) === fingerprint) {
-        await this.options.diagnosticsStore.update(result);
-        this.options.onTestStatus(profile.id, fingerprint, {
-          phase: result.overall === 'success' ? 'ready' : 'degraded',
-          lastDiagnostics: result,
-          message: result.overall === 'degraded' ? 'Connection capabilities are partially available or unknown.' : undefined,
-        });
-      }
+      await this.options.diagnosticsStore.update(result, () => this.isCurrent(task));
+      this.assertCurrent(task);
+      this.options.onTestStatus(profile.id, fingerprint, {
+        phase: result.overall === 'success' ? 'ready' : 'degraded',
+        lastDiagnostics: result,
+        message: result.overall === 'degraded' ? 'Connection capabilities are partially available or unknown.' : undefined,
+      });
       return result;
     } catch (error) {
+      this.assertCurrent(task);
       const failure = describeConnectionTestError(error);
       this.options.onTestStatus(profile.id, fingerprint, { phase: 'error', message: failure.message });
       throw new ConnectionTestError(failure);
     }
   }
+
+  private isCurrent(task: ConnectionTestTask): boolean {
+    if (task.cancellation.token.isCancellationRequested || this.connectionTestTasks.get(task.profileId) !== task) return false;
+    return this.matchesCurrentProfile(task.profileId, task.revision, task.fingerprint);
+  }
+
+  private matchesCurrentProfile(profileId: string, revision: string, fingerprint: string): boolean {
+    const profile = getProfileConfiguration().profiles.find(profile => profile.id === profileId);
+    return !!profile && catalogRevision(profile) === revision && fingerprintConnection(profile, diagnosticsOptions()) === fingerprint;
+  }
+
+  private assertCurrent(task: ConnectionTestTask): void {
+    if (!this.isCurrent(task)) throw connectionTestCancelled();
+  }
+}
+
+function connectionTestCancelled(): ConnectionTestError {
+  return new ConnectionTestError({ category: 'cancelled',
+    message: t('The connection changed during testing. Run the connection test again.') });
 }
 
 function successfulProbe(

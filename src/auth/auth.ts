@@ -26,7 +26,7 @@ export class AuthManager {
    * authenticate an unrelated connection that reuses the same name.
    */
   async getApiKey(profile: AuthProfile): Promise<string | undefined> {
-    const value = await this.secrets.get(secretKey(profile));
+    const value = await this.secrets.get(profileSecretKey(profile.id));
     return value?.trim() || undefined;
   }
 
@@ -58,16 +58,16 @@ export class AuthManager {
   }
 
   async storeApiKey(profile: AuthProfile, apiKey: string): Promise<void> {
-    await this.secrets.store(secretKey(profile), apiKey.trim());
+    await this.secrets.store(profileSecretKey(profile.id), apiKey.trim());
   }
 
   async clearProfileApiKey(profile: AuthProfile): Promise<void> {
-    await this.deleteSecretKeys([secretKey(profile), legacyProfileSecretKey(profile.name)]);
+    await this.deleteSecretKeys([profileSecretKey(profile.id), legacyProfileSecretKey(profile.name)]);
   }
 
   async clearAllRelayApiKeys(profiles: readonly AuthProfile[]): Promise<void> {
     await this.deleteSecretKeys([
-      ...profiles.flatMap((profile) => [secretKey(profile), legacyProfileSecretKey(profile.name)]),
+      ...profiles.flatMap((profile) => [profileSecretKey(profile.id), legacyProfileSecretKey(profile.name)]),
       RELAY_API_KEY_SECRET,
       OPENAI_API_KEY_SECRET,
       LEGACY_API_KEY_SECRET,
@@ -81,7 +81,7 @@ export class AuthManager {
   }
 
   private async migrateProfileApiKey(profile: AuthProfile): Promise<void> {
-    const targetKey = secretKey(profile);
+    const targetKey = profileSecretKey(profile.id);
     const sourceKey = legacyProfileSecretKey(profile.name);
     const [target, source] = await Promise.all([this.secrets.get(targetKey), this.secrets.get(sourceKey)]);
     if (target !== undefined) {
@@ -139,10 +139,6 @@ export class AuthManager {
 
 export function profileSecretKey(profileId: string): string {
   return `${RELAY_API_KEY_SECRET}.profileId.${profileId}`;
-}
-
-function secretKey(profile: AuthProfile): string {
-  return profileSecretKey(profile.id);
 }
 
 function legacyProfileSecretKey(profileName: string): string {

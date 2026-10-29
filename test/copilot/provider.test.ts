@@ -28,7 +28,7 @@ import { RelayRequestError, RelayStreamError } from '../../src/relay/errors';
 import { RelayTimeoutError } from '../../src/relay/http';
 import { RelayClient } from '../../src/relay/client';
 import { formatLogError } from '../../src/copilot/requestDiagnostics';
-import type { RelayModel, ResponsesRequest, RoutedModel } from '../../src/relay/types';
+import type { RelayModel, ResponsesRequest, RoutedModel, StreamCallbacks } from '../../src/relay/types';
 import { InMemoryMemento } from '../support/memento';
 import { initMetadataCache } from '../../src/metadata/metadataCache';
 import { OPENROUTER_CACHE_KEY, parseOpenRouterResponse } from '../../src/metadata/openrouterFallback';
@@ -117,6 +117,19 @@ function responsesInputItems(
   return input;
 }
 
+function completeResponsesText(callbacks: StreamCallbacks): void {
+  callbacks.onContent('answer');
+  callbacks.onResponsesOutputItems?.([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] }]);
+  callbacks.onStreamEnd?.('Responses', 'completed');
+}
+
+function completeClaudeText(callbacks: StreamCallbacks): void {
+  callbacks.onContent('answer');
+  callbacks.onClaudeStopReason?.('end_turn');
+  callbacks.onClaudeAssistantContent?.([{ type: 'text', text: 'answer' }]);
+  callbacks.onStreamEnd?.('Claude', 'message_stop');
+}
+
 async function flushAsyncWork(): Promise<void> {
   for (let turn = 0; turn < 6; turn++) await Promise.resolve();
 }
@@ -140,6 +153,102 @@ afterEach(() => {
 });
 
 describe('connection pool model refresh', () => {
+  it('cancels while the final enumeration key lookup is pending', async () => {
+    const { provider, secrets } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, configValues: { modelMetadataEnabled: false } });
+    vi.spyOn(RelayClient.prototype, 'listModels').mockResolvedValue({ data: [{ id: 'model' }] });
+    await provider.refreshModels();
+    let releaseKey!: (key: string) => void;
+    vi.spyOn(secrets, 'get').mockImplementationOnce(() => new Promise<string>(resolve => { releaseKey = resolve; }));
+    const source = new vscode.CancellationTokenSource();
+    const enumeration = provider.provideLanguageModelChatInformation({ silent: true }, source.token);
+    await vi.waitFor(() => expect(releaseKey).toBeDefined());
+
+    source.cancel();
+    try {
+      await expect(enumeration).rejects.toBeInstanceOf(vscode.CancellationError);
+    } finally {
+      releaseKey('work-key');
+      source.dispose();
+    }
+  });
+
+  it.each(['configuration', 'credentials'] as const)('omits enumeration entries invalidated during their key lookup: %s', async change => {
+    const { provider, secrets, setProfiles } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, configValues: { modelMetadataEnabled: false } });
+    const list = vi.spyOn(RelayClient.prototype, 'listModels').mockResolvedValue({ data: [{ id: 'old-model' }] });
+    await provider.refreshModels();
+    let releaseKey!: (key: string) => void;
+    vi.spyOn(secrets, 'get').mockImplementationOnce(() => new Promise<string>(resolve => { releaseKey = resolve; }));
+    const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
+    const enumeration = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await vi.waitFor(() => expect(releaseKey).toBeDefined());
+    list.mockResolvedValue({ data: [{ id: 'new-model' }] });
+    if (change === 'configuration') {
+      setProfiles([{ ...WORK_PROFILE, baseUrl: 'https://new-relay.example.test/v1' }]);
+      fireConfigurationChange('profiles');
+    } else await secrets.store(keyFor(WORK_ID), 'replacement-key');
+    await provider.refreshModels();
+    releaseKey('work-key');
+
+    await expect(enumeration).resolves.toEqual([]);
+    await expect(provider.provideLanguageModelChatInformation({ silent: true }, token))
+      .resolves.toEqual([expect.objectContaining({ version: 'new-model' })]);
+  });
+
+  it('uses current model information when an unchanged route is refreshed during enumeration', async () => {
+    const { provider, secrets } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, configValues: { modelMetadataEnabled: false } });
+    const list = vi.spyOn(RelayClient.prototype, 'listModels').mockResolvedValue({ data: [{ id: 'model', name: 'Old name' }] });
+    await provider.refreshModels();
+    let releaseKey!: (key: string) => void;
+    vi.spyOn(secrets, 'get').mockImplementationOnce(() => new Promise<string>(resolve => { releaseKey = resolve; }));
+    const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
+    const enumeration = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await vi.waitFor(() => expect(releaseKey).toBeDefined());
+    list.mockResolvedValue({ data: [{ id: 'model', name: 'New name', capabilities: { tool_calling: true } }] });
+    await provider.refreshModels('invalidate');
+    releaseKey('work-key');
+
+    await expect(enumeration).resolves.toEqual([expect.objectContaining({ name: 'WeaveNet New name', capabilities: expect.objectContaining({ toolCalling: true }) })]);
+  });
+
+  it.each(['remove key', 'replace key', 'change endpoint'] as const)('invalidates old connection tests before further probes after %s', async change => {
+    const state = new InMemoryMemento();
+    const { provider, secrets, setProfiles } = providerFixture({ keys: { [WORK_ID]: 'work-key' }, globalState: state,
+      configValues: { modelMetadataEnabled: false } });
+    vi.spyOn(RelayClient.prototype, 'listModels').mockResolvedValue({ data: [{ id: 'model' }] });
+    await provider.refreshModels();
+    let finishOldDirectory!: (response: Awaited<ReturnType<RelayClient['testModels']>>) => void;
+    const testModels = vi.spyOn(RelayClient.prototype, 'testModels')
+      .mockImplementationOnce(() => new Promise(resolve => { finishOldDirectory = resolve; }))
+      .mockResolvedValue({ models: { data: [{ id: 'model' }] }, diagnostic: { endpoint: '/models', status: 200, responseType: 'json' } });
+    const probe = vi.spyOn(RelayClient.prototype, 'testOpenAIChatCompletion').mockResolvedValue({
+      endpoint: '/chat/completions', status: 200, responseType: 'json', stream: false });
+    const oldTest = provider.testConnection(WORK_PROFILE);
+    await vi.waitFor(() => expect(finishOldDirectory).toBeDefined());
+    let profile = WORK_PROFILE;
+    if (change === 'remove key') await secrets.delete(keyFor(WORK_ID));
+    else if (change === 'replace key') await secrets.store(keyFor(WORK_ID), 'replacement-key');
+    else {
+      profile = { ...WORK_PROFILE, baseUrl: 'https://replacement.example.test/v1' };
+      setProfiles([profile]);
+      fireConfigurationChange('profiles');
+    }
+    await provider.refreshModels();
+    expect(testModels.mock.calls[0][0]?.isCancellationRequested).toBe(true);
+    const newTest = provider.testConnection(profile);
+    expect(newTest).not.toBe(oldTest);
+    if (change === 'remove key') await expect(newTest).rejects.toMatchObject({ failure: { category: 'authentication' } });
+    else await expect(newTest).resolves.toMatchObject({ overall: 'success' });
+    const statusAfterNewTest = provider.getConnectionStatus();
+    const persistedAfterNewTest = new Map(state.values);
+    finishOldDirectory({ models: { data: [{ id: 'model' }] }, diagnostic: { endpoint: '/models', status: 200, responseType: 'json' } });
+
+    await expect(oldTest).rejects.toMatchObject({ failure: { category: 'cancelled' } });
+    expect(probe).toHaveBeenCalledTimes(change === 'remove key' ? 0 : 2);
+    expect(provider.getConnectionStatus()).toBe(statusAfterNewTest);
+    expect(state.values).toEqual(persistedAfterNewTest);
+    if (change === 'remove key') expect(statusAfterNewTest).toMatchObject({ phase: 'keyMissing', modelCount: 0 });
+  });
+
   it('updates connection health without broadcasting an unchanged catalog', async () => {
     const { provider } = providerFixture({ configValues: { modelMetadataEnabled: false }, keys: { [WORK_ID]: 'work-key' } });
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ data: [{ id: 'gpt-stable' }] }), {
@@ -627,7 +736,7 @@ apiType: 'chat-completions' as const }] });
     expect(token.onCancellationRequested).toHaveBeenCalledOnce();
     settle(new Response(JSON.stringify({ data: [{ id: 'gpt-live' }] }), { headers: { 'content-type': 'application/json' } }));
     await Promise.all([refresh, enumeration]);
-    expect(dispose).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledTimes(token.onCancellationRequested.mock.calls.length);
   });
 
   it('clears persisted model snapshots when the API key is removed', async () => {
@@ -1402,6 +1511,11 @@ apiType: 'chat-completions' as const }],
       expect(request.thinking).toBeUndefined();
       expect(request.tool_choice).toEqual({ type: 'any' });
       callbacks.onContent('answer');
+      callbacks.onClaudeStopReason?.('tool_use');
+      callbacks.onClaudeAssistantContent?.([
+        { type: 'text', text: 'answer' },
+        { type: 'tool_use', id: 'toolu-1', name: 'search', input: {} },
+      ]);
       callbacks.onToolCall({ id: 'toolu-1', type: 'function', function: { name: 'search', arguments: '{}' } });
       callbacks.onStreamEnd?.('Claude', 'message_stop');
     });
@@ -1495,10 +1609,16 @@ apiType: 'chat-completions' as const }],
     expect(sendRequest.mock.calls[0][2]).not.toBe(token);
     expect(sendRequest).toHaveBeenCalledOnce();
     expect(stream).toHaveBeenCalledTimes(2);
-    expect(output.report.mock.calls.map(([part]) => part).filter(part => !(part as unknown as { metadata?: Record<string, unknown> }).metadata?.weavenetProtocolReplay)).toEqual([
+    expect(output.report.mock.calls.map(([part]) => part).filter(part => part instanceof vscode.LanguageModelTextPart)).toEqual([
       expect.objectContaining({ value: 'fixed' }),
       expect.objectContaining({ value: 'fixed' }),
     ]);
+    const visionStates = output.report.mock.calls.flatMap(([part]) => {
+      const state = (part as unknown as { metadata?: Record<string, unknown> }).metadata?.weavenetVisionReplay;
+      return state ? [state] : [];
+    });
+    expect(visionStates).toHaveLength(2);
+    expect(visionStates[0]).toEqual(visionStates[1]);
     expect(output.report.mock.calls.flatMap(([part]) => part).some((part) => part instanceof vscode.LanguageModelDataPart))
       .toBe(false);
   });
@@ -1776,7 +1896,8 @@ apiType: 'responses' as const }],
     };
     const { provider, model } = await readyProvider(openAIModel, { supportsImageInput: true }, profile);
     const select = vi.spyOn(vscode.lm, 'selectChatModels');
-    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
       expect(request.input).toEqual([
         expect.objectContaining({ type: 'function_call', call_id: 'call-1' }),
         expect.objectContaining({ type: 'function_call_output', call_id: 'call-1', output: 'Screenshot:' }),
@@ -1815,7 +1936,8 @@ apiType: 'responses' as const }],
   it('promotes native tool-result images after Claude tool results', async () => {
     const { provider, model } = await readyProvider(claudeModel, { supportsImageInput: true });
     const select = vi.spyOn(vscode.lm, 'selectChatModels');
-    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
+      completeClaudeText(callbacks);
       expect(request.messages).toEqual([
         expect.objectContaining({
           role: 'assistant',
@@ -1885,7 +2007,10 @@ apiType: 'responses' as const }],
 apiType: 'responses' as const }],
       },
       capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamResponses')
-        .mockImplementation(async (request) => assertRequest(responsesInputItems(request.input))),
+        .mockImplementation(async (request, callbacks) => {
+          assertRequest(responsesInputItems(request.input));
+          completeResponsesText(callbacks);
+        }),
       assertWire: (wire: unknown[]) => {
         const items = wire as Array<Record<string, unknown>>;
         expect(items.map((item) => item.type ?? item.role)).toEqual([
@@ -1906,7 +2031,10 @@ apiType: 'responses' as const }],
       configValues: { supportsImageInput: true },
       profile: WORK_PROFILE,
       capture: (assertRequest: (wire: unknown[]) => void) => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages')
-        .mockImplementation(async (request) => assertRequest(request.messages)),
+        .mockImplementation(async (request, callbacks) => {
+          assertRequest(request.messages);
+          completeClaudeText(callbacks);
+        }),
       assertWire: (wire: unknown[]) => {
         const messages = wire as Array<{ role: string; content: Array<Record<string, unknown>> }>;
         expect(messages.map((message) => message.role)).toEqual(['assistant', 'user']);
@@ -1989,7 +2117,8 @@ apiType: 'responses' as const }],
         models: [{ id: 'gpt-test',
 apiType: 'responses' as const }],
       },
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
         const input = responsesInputItems(request.input);
         expect(input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
           'function_call',
@@ -2005,7 +2134,8 @@ apiType: 'responses' as const }],
       modelInfo: claudeModel,
       configValues: { supportsImageInput: true },
       profile: WORK_PROFILE,
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
+      completeClaudeText(callbacks);
         expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'user']);
         const content = request.messages[1].content;
         if (typeof content === 'string') throw new Error('Expected Claude content blocks');
@@ -2070,7 +2200,8 @@ apiType: 'responses' as const }],
         models: [{ id: 'gpt-test',
 apiType: 'responses' as const }],
       },
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
         expect(request.input).toHaveLength(3);
         expect(request.input[0]).toMatchObject({ type: 'function_call', call_id: 'call-1' });
         expect(JSON.stringify(request.input)).not.toContain('call-2');
@@ -2131,7 +2262,8 @@ apiType: 'responses' as const }],
         models: [{ id: 'gpt-test',
 apiType: 'responses' as const }],
       },
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
         const input = responsesInputItems(request.input);
         expect(input.map((item) => 'type' in item ? item.type : item.role)).toEqual([
           'function_call',
@@ -2147,7 +2279,8 @@ apiType: 'responses' as const }],
       modelInfo: claudeModel,
       configValues: {},
       profile: WORK_PROFILE,
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
+      completeClaudeText(callbacks);
         expect(request.messages.map((message) => message.role)).toEqual(['assistant', 'user']);
         const content = request.messages[1].content;
         if (typeof content === 'string') throw new Error('Expected Claude content blocks');
@@ -2204,7 +2337,8 @@ apiType: 'responses' as const }],
         models: [{ id: 'gpt-test',
 apiType: 'responses' as const }],
       },
-      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+      capture: () => vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
         expect(JSON.stringify(request.input)).not.toContain('call-2');
       }),
     },
@@ -2437,7 +2571,8 @@ apiType: 'responses' as const }],
         stream: (async function* () { yield new vscode.LanguageModelTextPart('A graph with two rising lines.'); }()),
       }),
     } as never]);
-    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request) => {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (request, callbacks) => {
+      completeResponsesText(callbacks);
       expect(request.input).toEqual([{
         role: 'user',
         content: framedDescription('A graph with two rising lines.'),
@@ -2471,7 +2606,8 @@ apiType: 'responses' as const }],
         stream: (async function* () { yield new vscode.LanguageModelTextPart('A dialog containing an Allow button.'); }()),
       }),
     } as never]);
-    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
+      completeClaudeText(callbacks);
       expect(request.messages).toEqual([{
         role: 'user',
         content: [expect.objectContaining({
@@ -2693,7 +2829,8 @@ apiType: 'responses' as const }],
 
   it('uses Claude forced tool choice when extended thinking is disabled', async () => {
     const { provider, model } = await readyProvider(claudeModel);
-    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request) => {
+    const stream = vi.spyOn(RelayClient.prototype, 'streamClaudeMessages').mockImplementation(async (request, callbacks) => {
+      completeClaudeText(callbacks);
       expect(request).toMatchObject({ tool_choice: { type: 'any' }, temperature: undefined, top_p: undefined });
     });
 
@@ -2828,6 +2965,11 @@ apiType: 'responses' as const }],
       expect(request.input).toEqual([{ role: 'user', content: 'hello' }]);
       callbacks.onReasoning('reason');
       callbacks.onContent('answer');
+      callbacks.onResponsesOutputItems?.([
+        { type: 'reasoning', summary: [{ type: 'summary_text', text: 'reason' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        { type: 'function_call', call_id: 'call-1', name: 'search', arguments: '{"q":"docs"}' },
+      ]);
       callbacks.onToolCall({ id: 'call-1', type: 'function', function: { name: 'search', arguments: '{"q":"docs"}' } });
       callbacks.onStreamEnd?.('Responses', 'completed');
     });
@@ -2895,13 +3037,11 @@ apiType: 'responses' as const }],
     let request: ResponsesRequest | undefined;
     vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
       request = sent as ResponsesRequest;
-      callbacks.onResponsesReasoningItem?.({
-        id: 'rs_1',
-        type: 'reasoning',
-        summary: [],
-        encrypted_content: 'enc:abc',
-      });
       callbacks.onContent('answer');
+      callbacks.onResponsesOutputItems?.([
+        { id: 'rs_1', type: 'reasoning', summary: [], encrypted_content: 'enc:abc' },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      ]);
       callbacks.onStreamEnd?.('Responses', 'completed');
     });
     const reported = progress();
@@ -2938,7 +3078,7 @@ apiType: 'responses' as const }],
       let request: ResponsesRequest | undefined;
       vi.spyOn(RelayClient.prototype, 'streamResponses').mockImplementation(async (sent, callbacks) => {
         request = sent as ResponsesRequest;
-        callbacks.onContent('answer');
+        completeResponsesText(callbacks);
       });
 
       await provider.provideLanguageModelChatResponse(

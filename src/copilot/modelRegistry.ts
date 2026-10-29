@@ -16,10 +16,9 @@ export interface ModelLoadResult {
 
 /** Offline restore and online refresh share exactly the same catalog assembly. */
 export function assembleModelCatalog(config: ExtensionConfig, directory: readonly RoutedModel[]): RoutedModel[] {
-  const enrich = (models: RoutedModel[]) => config.modelMetadataEnabled ? enrichModelsWithOpenRouter(models) : models;
-  const discovered = filterModels(enrich(applyDirectoryApiTypes(config, directory)), config);
-  const configured = filterModels(enrich(config.models.map(model => fromConfiguredModel(model, config.apiType))), config);
-  return assignUniquePickerIds(dedupeModels([...discovered, ...configured]));
+  const combined = [...applyDirectoryApiTypes(config, directory), ...config.models.map(model => fromConfiguredModel(model, config.apiType))];
+  const enriched = config.modelMetadataEnabled ? enrichModelsWithOpenRouter(combined) : combined;
+  return assignUniquePickerIds(dedupeModels(filterModels(enriched, config)));
 }
 
 /** Discovery only reads /models and replaces the directory on success. */
@@ -53,7 +52,7 @@ export async function loadAllModels(
     }
   }
   const models = assembleModelCatalog(config, directory);
-  if (!models.length && directoryError) throw new Error('The Relay model directory could not be refreshed.');
+  if (!models.length && directoryError) throw directoryError;
   return { models, directory, ...(directoryError === undefined ? {} : { directoryError }) };
 }
 

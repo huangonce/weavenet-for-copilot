@@ -2,6 +2,7 @@ import type * as vscode from 'vscode';
 import { normalizeClaudeRequestCapabilities } from '../config/config';
 import type { ApiType, ConfiguredModel, ExtensionConfig } from '../config/config';
 import { normalizeOpenAIRequestCapabilities } from './openaiCapabilities';
+import { tokenLimit } from './tokenLimits';
 import type {
   ClaudeEffort,
   ModelMetadataSources,
@@ -61,15 +62,13 @@ export function toChatInformation(
 
 /** Never advertise input + output above a documented shared context window. */
 export function modelTokenBudget(model: RoutedModel, config: ExtensionConfig): { maxInputTokens: number; maxOutputTokens: number } {
-  const positive = (value: number | undefined, fallback: number) => Number.isFinite(value) && value! > 0 ? Math.floor(value!) : fallback;
   // Old OpenRouter-enriched snapshots stored the total window as maxInputTokens.
   const legacyWindow = model.metadataSources?.maxInputTokens === 'openrouter' ? model.maxInputTokens : undefined;
-  const total = positive(model.contextWindow ?? model.context_length ?? model.context_window ?? legacyWindow, Infinity);
-  if (total < 2) throw new Error('The model context window must allow at least one input and one output token.');
-  const defaultOutput = positive(config.maxOutputTokens, 16_384);
-  const maxOutputTokens = Math.min(positive(model.maxOutputTokens, defaultOutput), total - 1);
-  const maxInputTokens = Math.min(positive(model.maxInputTokens, positive(config.maxInputTokens, 128_000)),
-    positive(config.maxInputTokens, 128_000), total - maxOutputTokens);
+  const total = numberFrom(2, model.contextWindow, model.context_length, model.context_window, legacyWindow) ?? Infinity;
+  const defaultOutput = tokenLimit(config.maxOutputTokens) ?? 16_384;
+  const inputCap = tokenLimit(config.maxInputTokens) ?? 128_000;
+  const maxOutputTokens = Math.min(tokenLimit(model.maxOutputTokens) ?? defaultOutput, total - 1);
+  const maxInputTokens = Math.min(tokenLimit(model.maxInputTokens) ?? inputCap, inputCap, total - maxOutputTokens);
   return { maxInputTokens, maxOutputTokens };
 }
 
@@ -143,7 +142,7 @@ function toModelCostInfo(model: RoutedModel): Pick<PickerModelInformation, 'inpu
         outputPrice: pricing.outputPer1M,
         cachePrice: pricing.cacheHitPer1M,
         cacheWritePrice: pricing.cacheCreationPer1M,
-        contextMax: model.contextWindow ?? model.maxInputTokens,
+        contextMax: tokenLimit(model.contextWindow, 2) ?? tokenLimit(model.maxInputTokens),
       },
     },
     priceCategory: priceCategory(pricing.outputPer1M),
@@ -185,9 +184,9 @@ export function toRoutedModel(
   const openai = normalizeOpenAIRequestCapabilities(
     capabilities.openai ?? record.openai ?? record.openai_request_capabilities,
   );
-  const contextWindow = numberFrom(model.context_length, model.context_window, record.contextWindow);
-  const maxInputTokens = numberFrom(record.max_input_tokens, record.maxInputTokens);
-  const maxOutputTokens = numberFrom(model.max_completion_tokens, model.max_output_tokens, record.max_tokens);
+  const contextWindow = numberFrom(2, model.context_length, model.context_window, record.contextWindow);
+  const maxInputTokens = numberFrom(1, record.max_input_tokens, record.maxInputTokens);
+  const maxOutputTokens = numberFrom(1, model.max_completion_tokens, model.max_output_tokens, record.max_tokens);
   const imageInput = booleanFrom(
     capabilities.vision,
     typeof capabilities.image_input === 'object' ? objectFrom(capabilities.image_input).supported : capabilities.image_input,
@@ -266,9 +265,9 @@ export function fromConfiguredModel(model: ConfiguredModel, defaultApiType: ApiT
     name: model.name,
     apiType,
     catalogSource: 'configured',
-    contextWindow: model.contextWindow,
-    maxInputTokens: model.maxInputTokens,
-    maxOutputTokens: model.maxOutputTokens,
+    contextWindow: tokenLimit(model.contextWindow, 2),
+    maxInputTokens: tokenLimit(model.maxInputTokens),
+    maxOutputTokens: tokenLimit(model.maxOutputTokens),
     toolCalling: model.toolCalling,
     imageInput: model.imageInput,
     thinking: model.thinking,
@@ -314,11 +313,10 @@ function objectFrom(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
 }
 
-function numberFrom(...values: unknown[]): number | undefined {
+function numberFrom(minimum: number, ...values: unknown[]): number | undefined {
   for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return value;
-    }
+    const count = tokenLimit(value, minimum);
+    if (count !== undefined) return count;
   }
   return undefined;
 }

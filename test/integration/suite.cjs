@@ -229,6 +229,11 @@ function handleMockRelay(request, response, recorded, control) {
     try { body = raw ? JSON.parse(raw) : undefined; } catch { body = undefined; }
     const entry = { method: request.method, path: pathname, headers: request.headers, raw, body };
     recorded.push(entry);
+    if (request.method === 'GET' && pathname === '/models') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-request-id': 'req_frontend' });
+      response.end('<!doctype html><html>Private frontend content</html>');
+      return;
+    }
     if (request.method === 'GET' && pathname.endsWith('/models')) {
       const payload = JSON.stringify(MOCK_DIRECTORY);
       response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
@@ -297,6 +302,24 @@ async function checkLiveRequestPaths(extension) {
   provider.debug = (_config, message) => diagnostics.push(message);
   const source = new vscode.CancellationTokenSource();
   try {
+    const beforeBadPath = recorded.length;
+    const { RelayClient } = require(path.join(extension.extensionPath, 'out', 'relay', 'client.js'));
+    const { describeConnectionTestError } = require(path.join(extension.extensionPath, 'out', 'copilot', 'connection.js'));
+    const badPathClient = new RelayClient({ baseUrl: new URL(baseUrl).origin, apiKey: 'live-key', requestHeaders: {},
+      requestTimeoutMs: 5000, streamIdleTimeoutMs: 5000 });
+    await assert.rejects(badPathClient.testModels(), error => {
+      const failure = describeConnectionTestError(error);
+      assert.equal(failure.category, 'invalidResponse', `Unexpected loopback directory failure: ${error.name}: ${error.message}; cause=${error.cause?.code ?? error.cause?.message ?? 'none'}`);
+      assert.equal(failure.status, 200);
+      assert.equal(failure.responseType, 'html');
+      assert.equal(failure.endpointPath, '/models');
+      assert.equal(failure.requestId, 'req_frontend');
+      assert.ok(failure.message.includes('/v1'), 'A webpage response should identify the API base-path mistake.');
+      assert.ok(!JSON.stringify(error).includes('Private frontend content'), 'Diagnostics must not retain the upstream page.');
+      return true;
+    });
+    assert.deepEqual(recorded.slice(beforeBadPath).map(entry => [entry.method, entry.path]), [['GET', '/models']],
+      'A bad base path must not trigger retries, guessed alternative endpoints or generation probes.');
     const info = await provider.provideLanguageModelChatInformation({ silent: true }, source.token);
     const discoveredIds = info.map(model => model.id).sort();
     const catalogReport = `received=[${discoveredIds.join(', ')}] relay=[${recorded.map(entry => `${entry.method} ${entry.path}`).join(', ')}]`;
@@ -475,6 +498,8 @@ async function checkLiveRequestPaths(extension) {
       }
     }
 
+    await checkReviewedToolBoundaries(provider, modelFor, recorded, relayControl, source.token);
+
     const chatsBeforeKeyRemoval = requestTo('/v1/chat/completions').length;
     secrets.delete(entries[0][0]);
     let failure;
@@ -489,6 +514,7 @@ async function checkLiveRequestPaths(extension) {
 
     secrets.set(entries[0][0], 'live-key');
     await require('./rpc.cjs').checkRegisteredRequests({ provider, recorded, profiles });
+    await require('./vision.cjs').checkVisionReplayRequests({ extension, provider, recorded, profiles });
     assert.equal(requestTo('/v1/responses/input_tokens').length, 1,
       'RPC generation and host countTokens must not repeat the manual remote diagnostic.');
   } finally {
@@ -536,6 +562,56 @@ async function checkCancelledToolRequest(provider, model, tool, recorded, contro
   } finally {
     source.cancel();
     source.dispose();
+    control.respond = undefined;
+  }
+}
+
+async function checkReviewedToolBoundaries(provider, modelFor, recorded, control, token) {
+  const tool = { name: 'nested', description: 'Read a nested object', inputSchema: {
+    type: 'object', properties: { a: { type: 'object', properties: { a: { type: 'number' } } } }, required: ['a'],
+  } };
+  const claudeEvents = args => [
+    { type: 'message_start', message: { id: 'msg_boundary', content: [] } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'visible text' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'boundary_call', name: 'nested', input: {} } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: args } },
+    { type: 'content_block_stop', index: 1 },
+  ];
+  const cases = [
+    { label: 'Chat append-only nested arguments', model: 'mock-chat', tools: 1, body: sseBody([
+      ...['{"a":', '{"a":1}', '}'].map((fragment, index) => ({ choices: [{ delta: { tool_calls: [{ index: 0,
+        ...(index === 0 ? { id: 'boundary_call' } : {}), function: { ...(index === 0 ? { name: 'nested' } : {}), arguments: fragment },
+      }] } }] })), { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]) + 'data: [DONE]\n\n' },
+    { label: 'Claude missing stop reason', model: 'mock-claude', tools: 0, fails: true,
+      body: sseBody([...claudeEvents('{"a":{"a":1}}'), { type: 'message_stop' }]) },
+    { label: 'Claude unknown stop reason', model: 'mock-claude', tools: 0, fails: true,
+      body: sseBody([...claudeEvents('{"a":{"a":1}}'), { type: 'message_delta', delta: { stop_reason: 'unknown_reason' } }, { type: 'message_stop' }]) },
+    { label: 'Claude DONE with explicit tool_use', model: 'mock-claude', tools: 1,
+      body: sseBody([...claudeEvents('{"a":{"a":1}}'), { type: 'message_delta', delta: { stop_reason: 'tool_use' } }]) + 'data: [DONE]\n\n' },
+    { label: 'Claude truncated tool input', model: 'mock-claude', tools: 0,
+      body: sseBody([...claudeEvents('{"a":{"a":'), { type: 'message_delta', delta: { stop_reason: 'max_tokens' } }, { type: 'message_stop' }]) },
+  ];
+  try {
+    for (const test of cases) {
+      const before = recorded.length;
+      const parts = [];
+      control.respond = (_entry, response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(test.body);
+      };
+      const pending = provider.provideLanguageModelChatResponse(modelFor(test.model),
+        [vscode.LanguageModelChatMessage.User('Check tool boundaries')], { tools: [tool] }, { report: part => parts.push(part) }, token);
+      if (test.fails) await assert.rejects(pending, undefined, test.label);
+      else await pending;
+      const calls = parts.filter(part => part instanceof vscode.LanguageModelToolCallPart);
+      assert.equal(calls.length, test.tools, test.label);
+      if (calls.length) assert.deepEqual(calls[0].input, { a: { a: 1 } }, test.label);
+      if (test.model === 'mock-claude') assert.equal(parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join(''), 'visible text', test.label);
+      assert.equal(recorded.slice(before).filter(entry => entry.method === 'POST').length, 1, `${test.label}: no generation retry`);
+    }
+  } finally {
     control.respond = undefined;
   }
 }

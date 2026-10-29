@@ -1,5 +1,5 @@
 import type { ExtensionConfig } from '../config/config';
-import { RelayRequestError, RelayStreamError } from '../relay/errors';
+import { RelayRequestError, RelayResponseParseError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
 import { InvalidToolArgumentsError } from './helpers';
 import type {
@@ -214,6 +214,13 @@ function safeDiagnosticValue(value: string): string {
 export function formatLogError(error: unknown): string {
   if (error instanceof InvalidToolArgumentsError) {
     return `InvalidToolArgumentsError(reason=${error.reason}, length=${error.argumentLength})`;
+  }
+  if (error instanceof RelayResponseParseError) {
+    const details = [`status=${error.status}`, `responseKind=${error.responseKind}`,
+      error.endpointPath ? `endpoint=${error.endpointPath}` : undefined,
+      error.requestId ? `requestId=${safeDiagnosticValue(error.requestId)}` : undefined,
+    ].filter(Boolean).join(', ');
+    return `RelayResponseParseError(${details})`;
   }
   if (error instanceof RelayRequestError) {
     const details = [

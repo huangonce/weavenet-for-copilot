@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { RelayRequestError, RelayStreamError } from '../relay/errors';
+import { isRateLimited, RelayRequestError, RelayResponseParseError, RelayStreamError } from '../relay/errors';
 import { RelayTimeoutError } from '../relay/http';
+import { t } from '../l10n';
 
 export interface ConnectionTestFailure {
   readonly category: 'url' | 'network' | 'timeout' | 'authentication' | 'notFound' | 'rateLimited' | 'server' | 'http' | 'invalidResponse' | 'protocol' | 'cancelled' | 'unknown';
@@ -8,6 +9,7 @@ export interface ConnectionTestFailure {
   readonly status?: number;
   readonly responseType?: RelayRequestError['responseKind'];
   readonly requestId?: string;
+  readonly endpointPath?: string;
 }
 
 export function safeHost(baseUrl: string): string | undefined {
@@ -28,6 +30,10 @@ export class ConnectionTestError extends Error {
 
 export function describeConnectionTestError(error: unknown): ConnectionTestFailure {
   if (error instanceof ConnectionTestError) return error.failure;
+  if (error instanceof RelayResponseParseError) return {
+    category: 'invalidResponse', message: relayResponseParseMessage(error), status: error.status,
+    responseType: error.responseKind, requestId: error.requestId, endpointPath: error.endpointPath,
+  };
   if (error instanceof RelayRequestError) {
     const common = { status: error.status, responseType: error.responseKind, requestId: error.requestId };
     if (error.status === 401 || error.status === 403) return { ...common, category: 'authentication', message: 'API key was rejected or lacks permission.' };
@@ -53,6 +59,7 @@ export function describeConnectionTestError(error: unknown): ConnectionTestFailu
 }
 
 export function connectionErrorMessage(error: unknown): string {
+  if (error instanceof RelayResponseParseError) return relayResponseParseMessage(error);
   if (error instanceof RelayRequestError) {
     if (error.status === 401 || error.status === 403) return 'Authentication was rejected by the Relay.';
     if (error.status === 404) return 'The Relay does not expose a compatible /models endpoint.';
@@ -65,12 +72,13 @@ export function connectionErrorMessage(error: unknown): string {
 
 export function toLanguageModelError(error: unknown): Error {
   if (error instanceof vscode.LanguageModelError || error instanceof vscode.CancellationError) return error;
+  if (error instanceof RelayResponseParseError) return new vscode.LanguageModelError(relayResponseParseMessage(error));
   if (error instanceof RelayRequestError) {
     const message = relayRequestDisplayMessage(error);
     if (error.status === 401) return vscode.LanguageModelError.NoPermissions(message);
     if (error.status === 404) return vscode.LanguageModelError.NotFound(message);
     if (error.status === 402 || error.status === 403 || error.status === 429
-      || isQuotaError(error.upstreamCode, error.upstreamType, error.message)) {
+      || isRateLimited(error.upstreamCode, error.upstreamType, error.message)) {
       return vscode.LanguageModelError.Blocked(message);
     }
     // Do not attach the transport error as `cause`: some VS Code versions
@@ -80,12 +88,20 @@ export function toLanguageModelError(error: unknown): Error {
   }
   if (error instanceof RelayStreamError) {
     const message = relayStreamDisplayMessage(error);
-    if (error.rateLimited || isQuotaError(error.upstreamCode, error.upstreamType, error.message)) {
+    if (error.rateLimited || isRateLimited(error.upstreamCode, error.upstreamType, error.message)) {
       return vscode.LanguageModelError.Blocked(message);
     }
     return new vscode.LanguageModelError(message);
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function relayResponseParseMessage(error: RelayResponseParseError): string {
+  if (error.responseKind === 'html') {
+    return t('The model endpoint returned an HTML page instead of JSON. Check the API Base URL (for example, include /v1) and whether a login or gateway page intercepted the request.');
+  }
+  if (error.responseKind === 'empty') return t('The model endpoint returned an empty response instead of JSON.');
+  return t('The model endpoint returned malformed JSON. Check the Relay response format.');
 }
 
 /**
@@ -163,7 +179,7 @@ function relayStreamDisplayMessage(error: RelayStreamError): string {
       ? '请求超出此模型的上下文窗口。请新建对话，或减少附件和工作区上下文。'
       : error.message;
   }
-  if (error.rateLimited || isQuotaError(error.upstreamCode, error.upstreamType, error.message)) {
+  if (error.rateLimited || isRateLimited(error.upstreamCode, error.upstreamType, error.message)) {
     return zh ? '请求受到速率或额度限制。请稍后重试或检查账户额度。' : 'The request was rate- or quota-limited. Please try again later or check the account quota.';
   }
   return zh
@@ -173,8 +189,4 @@ function relayStreamDisplayMessage(error: RelayStreamError): string {
 
 function usesSimplifiedChinese(): boolean {
   return /^(zh-cn|zh-hans)(?:$|-)/i.test(vscode.env.language);
-}
-
-function isQuotaError(...values: Array<string | undefined>): boolean {
-  return /rate.?limit|quota|insufficient.?credit|billing|payment.?required/i.test(values.filter(Boolean).join(' '));
 }

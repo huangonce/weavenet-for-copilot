@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
 import type { ConnectionProfile } from './config';
+import { CONFIG_SECTION } from '../constants';
 import { t } from '../l10n';
-
-export const configurationSection = 'weavenet-copilot';
 
 let connectionMutation = Promise.resolve();
 
@@ -30,7 +29,7 @@ export function runConnectionMutation<T>(operation: () => Promise<T>): Promise<T
 
 /** Persists the connection pool as the only workspace-independent mutable setting. */
 export async function saveProfiles(profiles: ConnectionProfile[]): Promise<void> {
-  const configuration = vscode.workspace.getConfiguration(configurationSection);
+  const configuration = vscode.workspace.getConfiguration(CONFIG_SECTION);
   await configuration.update('profiles', profiles, vscode.ConfigurationTarget.Global);
 }
 

@@ -16,7 +16,7 @@ function callbacks() {
     onContent: vi.fn(),
     onReasoning: vi.fn(),
     onToolCall: vi.fn(),
-    onResponsesReasoningItem: vi.fn(),
+    onResponsesOutputItems: vi.fn(),
     onRefusal: vi.fn(),
     onOpenAIFinishReason: vi.fn(),
     onProcessingStarted: vi.fn(),
@@ -191,13 +191,15 @@ describe('Responses SSE parsing', () => {
       cb,
       state,
     );
-    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+    expect(cb.onResponsesOutputItems).not.toHaveBeenCalled();
+    processResponsesSseLine('data: {"type":"response.completed","response":{"status":"completed"}}', tools, cb, state);
+    expect(cb.onResponsesOutputItems).toHaveBeenCalledExactlyOnceWith([{
       id: 'rs_1',
       type: 'reasoning',
       summary: [{ type: 'summary_text', text: 'short' }],
       content: [{ type: 'reasoning_text', text: 'think' }],
       encrypted_content: 'enc:abc123',
-    });
+    }]);
     expect(cb.onReasoning).toHaveBeenCalledWith('think');
   });
 });
@@ -244,12 +246,12 @@ describe('Responses full response parsing', () => {
       prompt_tokens_details: { cached_tokens: 4 },
       completion_tokens_details: { reasoning_tokens: 6 },
     });
-    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+    expect(cb.onResponsesOutputItems).toHaveBeenCalledExactlyOnceWith(expect.arrayContaining([{
       id: 'rs_1',
       type: 'reasoning',
       summary: [{ type: 'summary_text', text: 'short' }],
       content: [{ type: 'reasoning_text', text: 'long thought' }],
-    });
+    }]));
   });
 
   it('passes through encrypted reasoning content from a full response', async () => {
@@ -264,13 +266,13 @@ describe('Responses full response parsing', () => {
 
     await processResponsesFullResponse(response, cb);
 
-    expect(cb.onResponsesReasoningItem).toHaveBeenCalledWith({
+    expect(cb.onResponsesOutputItems).toHaveBeenCalledExactlyOnceWith([{
       id: 'rs_1',
       type: 'reasoning',
       summary: [],
       content: [{ type: 'reasoning_text', text: 'think' }],
       encrypted_content: 'enc:xyz',
-    });
+    }]);
   });
 
   it('throws when the response status is failed', async () => {

@@ -8,10 +8,10 @@ import {
   fetchWithResponseTimeout,
   MAX_COMPLETE_RESPONSE_BYTES,
   MAX_SSE_EVENT_BYTES,
-  readRelayErrorResponse,
   readResponseText,
   readSseStream,
   responseDiagnosticsMetadata,
+  throwIfNotOk,
 } from './http';
 import type {
   OpenAIUsage,
@@ -86,10 +86,7 @@ export async function streamOpenAIResponses(
     response.headers.get('content-type') ?? 'unknown',
     { ...responseDiagnosticsMetadata(response), clientRequestId },
   );
-  if (!response.ok) {
-    const failure = await readRelayErrorResponse(response, options.streamIdleTimeoutMs, token);
-    throw failure.error;
-  }
+  await throwIfNotOk(response, options.streamIdleTimeoutMs, token);
 
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (!request.stream || !contentType.includes('text/event-stream')) {
@@ -226,10 +223,6 @@ function processResponsesSseData(
       if (event.item?.type === 'function_call') {
         const index = event.output_index ?? 0;
         completeFunctionItem(state, index, event.item, pendingFunctionCalls);
-      } else if (event.item?.type === 'reasoning') {
-        // Carries the server-side `id` and, with `include: ["reasoning.encrypted_content"]`,
-        // the encrypted payload that a stateless replay must send back verbatim.
-        callbacks.onResponsesReasoningItem?.(event.item);
       }
       return false;
     }
@@ -311,8 +304,6 @@ export async function processResponsesFullResponse(
       });
       parts++;
     } else if (item.type === 'reasoning') {
-      // Surfaced in full so the caller can replay the real item verbatim.
-      callbacks.onResponsesReasoningItem?.(item);
       for (const part of [...(item.summary ?? []), ...(item.content ?? [])]) {
         if (part.text) {
           callbacks.onReasoning(part.text);

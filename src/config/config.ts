@@ -7,6 +7,7 @@ import type { ClaudeRequestCapabilities, OpenAIRequestCapabilities, ApiType } fr
 import { normalizeClaudeRequestCapabilities } from '../relay/claudeCapabilities';
 export { normalizeClaudeRequestCapabilities } from '../relay/claudeCapabilities';
 import { normalizeRelayBaseUrl } from '../relay/url';
+import { tokenLimit } from '../relay/tokenLimits';
 import { t } from '../l10n';
 
 const MAX_PROFILE_NAME_LENGTH = 100;
@@ -103,8 +104,8 @@ export function getConfig(profile?: ConnectionProfile): ExtensionConfig {
     modelNamePrefix: (config.get<string>('modelNamePrefix') ?? 'WeaveNet').trim() || 'WeaveNet',
     includeModels: compileRegexList(profile?.includeModels ?? []),
     excludeModels: compileRegexList(profile?.excludeModels ?? []),
-    maxInputTokens: Math.max(1, config.get<number>('maxInputTokens') ?? 128000),
-    maxOutputTokens: Math.max(1, config.get<number>('maxOutputTokens') ?? 16384),
+    maxInputTokens: tokenLimit(config.get<number>('maxInputTokens')) ?? 128000,
+    maxOutputTokens: tokenLimit(config.get<number>('maxOutputTokens')) ?? 16384,
     sendMaxTokens: config.get<boolean>('sendMaxTokens') ?? false,
     supportsToolCalling: config.get<boolean>('supportsToolCalling') ?? true,
     supportsImageInput: config.get<boolean>('supportsImageInput') ?? false,
@@ -178,13 +179,17 @@ function normalizeModels(values: unknown[]): ConfiguredModel[] {
     const record = value as Record<string, unknown>;
     const id = typeof record.id === 'string' ? record.id.trim() : '';
     if (!id || (record.apiType !== undefined && !isApiType(record.apiType))) continue;
+    // A declaration still carrying legacy routing cannot safely inherit the
+    // modern protocol. Ignore that declaration at runtime, retaining its raw
+    // settings and the other models in the connection.
+    if (['route', 'openaiApi', 'contextWindows'].some(key => record[key] !== undefined)) continue;
     models.push({
       id,
       apiType: isApiType(record.apiType) ? record.apiType : undefined,
       name: typeof record.name === 'string' && record.name.trim() ? record.name.trim() : undefined,
-      contextWindow: positiveNumber(record.contextWindow),
-      maxInputTokens: positiveNumber(record.maxInputTokens),
-      maxOutputTokens: positiveNumber(record.maxOutputTokens),
+      contextWindow: tokenLimit(record.contextWindow, 2),
+      maxInputTokens: tokenLimit(record.maxInputTokens),
+      maxOutputTokens: tokenLimit(record.maxOutputTokens),
       toolCalling: typeof record.toolCalling === 'boolean' ? record.toolCalling : undefined,
       imageInput: typeof record.imageInput === 'boolean' ? record.imageInput : undefined,
       thinking: typeof record.thinking === 'boolean' ? record.thinking : undefined,
@@ -211,9 +216,6 @@ export function normalizeConnectionProfiles(values: unknown[]): ConnectionProfil
     seenNames.add(name);
     const includeModels = stringArray(record.includeModels);
     const excludeModels = stringArray(record.excludeModels);
-    // Old public declarations must be upgraded, never silently routed by new defaults.
-    if (Array.isArray(record.models) && record.models.some(model => model && typeof model === 'object'
-      && ['route', 'openaiApi', 'contextWindows'].some(key => (model as Record<string, unknown>)[key] !== undefined))) continue;
     const models = Array.isArray(record.models) ? normalizeModels(record.models) : undefined;
     profiles.push({
       id,
@@ -246,8 +248,4 @@ function objectHeaders(value: unknown): Record<string, string> | undefined {
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
-}
-
-function positiveNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }

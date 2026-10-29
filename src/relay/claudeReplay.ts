@@ -1,5 +1,6 @@
 import type { ClaudeContentBlock, ClaudeStreamEvent } from './types';
 import { cloneReplayState, MAX_PROTOCOL_REPLAY_ITEMS, ReplayBudget } from './replayState';
+import { createRelayStreamError } from './errors';
 
 /** Rebuild output blocks at their original indices, independently of display deltas. */
 export class ClaudeReplayCollector {
@@ -47,12 +48,15 @@ export class ClaudeReplayCollector {
         this.toolJson.set(index, (this.toolJson.get(index) ?? '') + delta.partial_json);
       }
     }
-    if (event.type === 'content_block_stop') { this.finalizeTool(index); this.stopped.add(index); }
+    if (event.type === 'content_block_stop') this.stopped.add(index);
   }
 
-  finish(): ClaudeContentBlock[] {
+  finish(discardIncomplete = false): ClaudeContentBlock[] {
     const result: ClaudeContentBlock[] = [];
     for (const [index, block] of [...this.blocks].sort(([a], [b]) => a - b)) {
+      // Truncation may leave both unsigned thinking and partial tool JSON.
+      // Preserve visible text without interpreting incomplete protocol state.
+      if (discardIncomplete && block.type !== 'text') continue;
       this.finalizeTool(index);
       if (block.type === 'thinking') {
         if (typeof block.thinking !== 'string' || typeof block.signature !== 'string' || !block.signature) {
@@ -66,7 +70,7 @@ export class ClaudeReplayCollector {
         if (typeof block.text !== 'string') throw new Error('Claude returned invalid text content.');
         result.push({ type: 'text', text: block.text });
       } else if (block.type === 'tool_use') {
-        if (!block.id || !block.name || !block.input || typeof block.input !== 'object' || Array.isArray(block.input)) {
+        if (!this.stopped.has(index) || !block.id || !block.name || !block.input || typeof block.input !== 'object' || Array.isArray(block.input)) {
           throw new Error('Claude returned an invalid tool block.');
         }
         result.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input });
@@ -79,7 +83,10 @@ export class ClaudeReplayCollector {
     const text = this.toolJson.get(index);
     if (text === undefined) return;
     const block = this.blocks.get(index);
-    if (block?.type === 'tool_use') block.input = JSON.parse(text || '{}');
+    if (block?.type === 'tool_use') {
+      try { block.input = JSON.parse(text); }
+      catch { throw createRelayStreamError('Claude', 'received invalid tool call arguments'); }
+    }
     this.toolJson.delete(index);
   }
 }

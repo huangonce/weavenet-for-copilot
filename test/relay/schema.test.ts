@@ -27,6 +27,15 @@ describe('sanitizeJsonSchema', () => {
     expect(input.properties.value.errorMessage).toBe('bad');
   });
 
+  it('preserves root and embedded resource IDs used to resolve relative references', () => {
+    const schema = { $id: 'https://schema.example.test/root', type: 'object',
+      properties: { address: { $ref: 'address' } }, required: ['address'],
+      $defs: { address: { $id: 'address', type: 'string', markdownDescription: 'editor-only' } } };
+    expect(sanitizeJsonSchema(schema)).toEqual({ ...schema,
+      $defs: { address: { $id: 'address', type: 'string' } } });
+    expect(schema.$defs.address.markdownDescription).toBe('editor-only');
+  });
+
   it.each(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'])('preserves user-defined names inside %s', (key) => {
     const namedSchemas = JSON.parse('{"errorMessage":{"type":"string","errorMessage":"editor-only"},"$id":{"type":"number"},"markdownDescription":{"type":"boolean"},"__proto__":{"type":"string","markdownDescription":"editor-only"}}');
     const input = { [key]: namedSchemas };
@@ -186,5 +195,79 @@ describe('strict schema subset', () => {
     ]) {
       expect(toStrictJsonSchema({ type: 'object', properties: { value }, required: ['value'] })).toBeUndefined();
     }
+  });
+
+  it('keeps resource and non-pointer reference semantics in non-strict mode', () => {
+    const object = { type: 'object', properties: {}, required: [] };
+    expect(toStrictJsonSchema({ ...object, $id: 'https://schema.example.test/root' })).toBeUndefined();
+    for (const value of [
+      { $ref: 'address' }, { $ref: 'https://schema.example.test/address' }, { $ref: '#address' },
+      { $id: 'address', type: 'string' }, { $anchor: 'address', type: 'string' },
+      { $dynamicRef: '#address' }, { $recursiveRef: '#' },
+    ]) {
+      const schema = { type: 'object', properties: { value }, required: ['value'] };
+      expect(toStrictJsonSchema(schema)).toBeUndefined();
+      expect(sanitizeJsonSchema(schema)).toEqual(schema);
+    }
+  });
+
+  it('accepts documented string formats and retains ordinary length constraints', () => {
+    for (const format of ['date-time', 'time', 'date', 'duration', 'email', 'hostname', 'ipv4', 'ipv6', 'uuid']) {
+      const schema = { type: 'object', properties: { value: { type: 'string', format, minLength: 1, maxLength: 100 } }, required: ['value'] };
+      expect(toStrictJsonSchema(schema)).toEqual({ ...schema, additionalProperties: false });
+    }
+  });
+
+  it('does not mark unsupported formats or uniqueItems strict', () => {
+    for (const value of [{ type: 'string', format: 'uri' }, { type: 'string', format: 'custom-format' },
+      { type: 'array', items: { type: 'string' }, uniqueItems: true }]) {
+      const schema = { type: 'object', properties: { value }, required: ['value'] };
+      expect(toStrictJsonSchema(schema)).toBeUndefined();
+      expect(sanitizeJsonSchema(schema)).toEqual(schema);
+    }
+  });
+
+  it('counts enum values across schema nodes without interpreting literal data as schemas', () => {
+    const values = Array.from({ length: 500 }, (_, index) => `v${index}`);
+    const schema = { type: 'object', properties: {
+      first: { type: 'string', enum: values }, second: { type: 'array', items: { type: 'string', enum: values } },
+    }, required: ['first', 'second'] };
+    expect(toStrictJsonSchema(schema)).toBeDefined();
+    expect(toStrictJsonSchema({ ...schema, $defs: { extra: { enum: ['overflow'] } } })).toBeUndefined();
+    const data = { format: 'uri', enum: Array.from({ length: 1_001 }, (_, index) => index), uniqueItems: true };
+    const literal = { type: 'object', properties: { format: { type: 'string' }, enum: { type: 'string' } },
+      required: ['format', 'enum'], enum: [data], const: data, default: data, examples: [data] };
+    expect(toStrictJsonSchema(literal)).toEqual({ ...literal, additionalProperties: false });
+  });
+
+  it('falls back beyond the single large enum string limit', () => {
+    const values = [...Array.from({ length: 250 }, (_, index) => String(index).padEnd(59, 'x')), 'z'.repeat(250)];
+    const schema = (enumValues: string[]) => ({ type: 'object', properties: { value: { type: 'string', enum: enumValues } }, required: ['value'] });
+    expect(values.join('')).toHaveLength(15_000);
+    expect(toStrictJsonSchema(schema(values))).toBeDefined();
+    expect(toStrictJsonSchema(schema([...values.slice(0, -1), 'z'.repeat(251)]))).toBeUndefined();
+    expect(toStrictJsonSchema(schema(values.slice(0, 250).map(value => value + 'extra')))).toBeDefined();
+  });
+
+  it('enforces the total property and object nesting limits', () => {
+    const object = (count: number) => {
+      const properties = Object.fromEntries(Array.from({ length: count }, (_, index) => [`p${index}`, { type: 'string' }]));
+      return { type: 'object', properties, required: Object.keys(properties) };
+    };
+    expect(toStrictJsonSchema(object(5_000))).toBeDefined();
+    expect(toStrictJsonSchema(object(5_001))).toBeUndefined();
+    expect(toStrictJsonSchema({ ...object(5_000), $defs: { more: object(1) } })).toBeUndefined();
+    let nested: Record<string, unknown> = object(0);
+    for (let depth = 1; depth < 10; depth += 1) nested = { type: 'object', properties: { child: nested }, required: ['child'] };
+    expect(toStrictJsonSchema(nested)).toBeDefined();
+    expect(toStrictJsonSchema({ type: 'object', properties: { child: nested }, required: ['child'] })).toBeUndefined();
+  });
+
+  it('counts property, definition, enum and const strings toward the aggregate string limit', () => {
+    const schema = (length: number) => ({ type: 'object', properties: { v: { $ref: '#/$defs/d' } }, required: ['v'],
+      $defs: { d: { type: 'string', const: 'x'.repeat(length), enum: ['abc'] } },
+      description: 'x'.repeat(120_001), default: { properties: 'x'.repeat(120_001) } });
+    expect(toStrictJsonSchema(schema(119_995))).toBeDefined();
+    expect(toStrictJsonSchema(schema(119_996))).toBeUndefined();
   });
 });

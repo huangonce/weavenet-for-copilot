@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as vscode from 'vscode';
+import { RelayResponseParseError } from '../../src/relay/errors';
+import { describeConnectionTestError } from '../../src/copilot/connection';
+import { formatLogError } from '../../src/copilot/requestDiagnostics';
 import { fetchJsonWithRetry, fetchJsonWithRetryMetadata, fetchWithResponseTimeout, readResponseText, readSseStream, readWithIdleTimeout, throwIfNotOk } from '../../src/relay/http';
 
 afterEach(() => vi.restoreAllMocks());
@@ -262,6 +265,46 @@ describe('relay HTTP safety', () => {
       contentType: 'application/json',
       requestId: 'req_models',
     });
+  });
+
+  it.each([
+    ['html', '<!doctype html><html>private-response-token</html>', 'text/html'],
+    ['json', '{"private-response-token":', 'application/json'],
+    ['empty', '  ', 'application/json'],
+    ['text', 'private-response-token', 'text/plain'],
+  ])('preserves safe metadata for successful %s responses without retrying JSON parse failures', async (responseKind, body, contentType) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, {
+      headers: { 'content-type': contentType, 'x-request-id': 'req_directory' },
+    }));
+    const failure = await fetchJsonWithRetryMetadata('https://private-user:private-password@private-host.example/private-path-secret/models?key=private-query-secret', {}, 100)
+      .then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(RelayResponseParseError);
+    expect(failure).toMatchObject({ status: 200, responseKind, requestId: 'req_directory', endpointPath: '/…/models' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(failure).not.toHaveProperty('cause');
+    const rendered = [String(failure), JSON.stringify(failure), formatLogError(failure), JSON.stringify(describeConnectionTestError(failure))].join('\n');
+    expect(rendered).not.toMatch(/private-response-token|private-user|private-password|private-host|private-path-secret|private-query-secret/);
+    expect(formatLogError(failure)).toContain(`status=200, responseKind=${responseKind}, endpoint=/…/models, requestId=req_directory`);
+    expect(describeConnectionTestError(failure)).toMatchObject({ category: 'invalidResponse', status: 200, responseType: responseKind });
+  });
+
+  it.each(['/models', '/v1/models'])('retains the standard directory endpoint %s without its query', async endpoint => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<html>login</html>', { headers: { 'content-type': 'text/html' } }));
+    await expect(fetchJsonWithRetry(`https://relay.example.test${endpoint}?token=secret`, {}, 100))
+      .rejects.toMatchObject({ endpointPath: endpoint, responseKind: 'html' });
+  });
+
+  it('does not expose arbitrary endpoint paths in parse errors', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('invalid'));
+    await expect(fetchJsonWithRetry('https://relay.example.test/private-path-secret', {}, 100))
+      .rejects.toMatchObject({ endpointPath: undefined });
+  });
+
+  it('accepts valid JSON even when a Relay mislabels its content type', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"data":[]}', { headers: { 'content-type': 'text/html' } }));
+    await expect(fetchJsonWithRetry('https://relay.example.test/v1/models', {}, 100)).resolves.toEqual({ data: [] });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('cancels while reading a JSON body without retrying', async () => {

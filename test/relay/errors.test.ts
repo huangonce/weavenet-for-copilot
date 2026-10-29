@@ -1,13 +1,36 @@
 import { describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
-import { createRelayRequestError, createRelayStreamError } from '../../src/relay/errors';
+import { createRelayRequestError, createRelayResponseParseError, createRelayStreamError } from '../../src/relay/errors';
 import {
   describeConnectionTestError,
+  connectionErrorMessage,
   sanitizeLanguageModelError,
   toLanguageModelError,
 } from '../../src/copilot/connection';
 
 describe('relay error mapping', () => {
+  it('explains HTML directory responses without interpreting HTTP 200 as a working API', () => {
+    const failure = createRelayResponseParseError(200, 'text/html', '<html>private login page</html>', 'https://relay.example.test/models', 'req_models');
+    const result = describeConnectionTestError(failure);
+    expect(result).toMatchObject({ category: 'invalidResponse', status: 200, responseType: 'html', requestId: 'req_models', endpointPath: '/models' });
+    expect(result.message).toContain('HTML page instead of JSON');
+    expect(result.message).toContain('/v1');
+    expect(result.message).not.toContain('private login page');
+    expect(connectionErrorMessage(failure)).toBe(result.message);
+    expect(toLanguageModelError(failure)).toBeInstanceOf(vscode.LanguageModelError);
+    expect(toLanguageModelError(failure).message).toBe(result.message);
+  });
+
+  it.each([
+    ['', 'empty response'],
+    ['{"value":', 'malformed JSON'],
+  ])('does not guess a URL or login problem for other invalid JSON: %j', (body, description) => {
+    const failure = createRelayResponseParseError(200, 'application/json', body, 'https://relay.example.test/v1/models');
+    const result = describeConnectionTestError(failure);
+    expect(result.message).toContain(description);
+    expect(result.message).not.toMatch(/\/v1|login|HTML/);
+  });
+
   it('preserves safe structured SSE error fields and maps rate limits', () => {
     const relayError = createRelayStreamError('Claude', {
       type: 'rate_limit_error',

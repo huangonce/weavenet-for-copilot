@@ -82,9 +82,10 @@ type ThinkingPartConstructor = new (
  * The thinking part class is a proposed API surface. A host module may expose it,
  * omit it, or throw on unknown properties, so every failure degrades the same way.
  */
-function hostThinkingPart(): ThinkingPartConstructor | undefined {
+export function hostThinkingPart(): ThinkingPartConstructor | undefined {
   try {
-    return (vscode as unknown as { LanguageModelThinkingPart?: ThinkingPartConstructor }).LanguageModelThinkingPart;
+    const constructor = (vscode as unknown as { LanguageModelThinkingPart?: ThinkingPartConstructor }).LanguageModelThinkingPart;
+    return typeof constructor === 'function' ? constructor : undefined;
   } catch {
     return undefined;
   }
