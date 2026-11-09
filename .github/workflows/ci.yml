@@ -35,6 +35,9 @@ jobs:
       - name: Run quality checks
         run: npm run check
 
+      - name: Verify pinned Agent Host bridge contracts
+        run: npm run test:agent-host
+
       - name: Package extension
         run: npm run package -- --out weavenet-for-copilot.vsix
 

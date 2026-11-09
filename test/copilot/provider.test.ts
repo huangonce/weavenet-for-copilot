@@ -3058,9 +3058,9 @@ apiType: 'responses' as const }],
     expect(request).not.toHaveProperty('previous_response_id');
     // The opaque payload is parked on a thinking part so the next turn can replay it verbatim.
     expect(reported.report).toHaveBeenCalledWith(expect.objectContaining({
-      metadata: { weavenetProtocolReplay: expect.objectContaining({
+      metadata: expect.objectContaining({ weavenetProtocolReplay: expect.objectContaining({
         apiType: 'responses', responses: expect.arrayContaining([expect.objectContaining({ id: 'rs_1', encrypted_content: 'enc:abc' })]),
-      }) },
+      }), encrypted_content: expect.stringMatching(/^weavenet-replay:v1:/) }),
     }));
   });
 

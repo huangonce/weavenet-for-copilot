@@ -49,6 +49,31 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+describe('explicit opaque replay opt-out', () => {
+  it.each(['chat-completions', 'responses', 'messages'] as const)('omits hidden %s state while keeping text and tools', async apiType => {
+    const payload = apiType === 'chat-completions' ? { choices: [{ message: { content: 'answer', reasoning_content: 'private thought',
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'ping', arguments: '{"q":"docs"}' } }] }, finish_reason: 'tool_calls' }] }
+      : apiType === 'responses' ? { status: 'completed', output: [
+        { type: 'reasoning', id: 'rs_1', encrypted_content: 'private-native-state', summary: [] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        { type: 'function_call', call_id: 'call_1', name: 'ping', arguments: '{"q":"docs"}' },
+      ] } : { stop_reason: 'tool_use', content: [
+        { type: 'thinking', thinking: 'private thought', signature: 'private-signature' },
+        { type: 'text', text: 'answer' }, { type: 'tool_use', id: 'call_1', name: 'ping', input: { q: 'docs' } },
+      ] };
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(payload));
+    const current = context(apiType, { openai: { replayReasoningContent: true, encryptedReasoning: true } });
+    current.options = snapshotChatResponseOptions({ toolMode: vscode.LanguageModelChatToolMode.Auto,
+      tools: [ping], includeEncryptedThinking: false } as never);
+    const provide = apiType === 'messages' ? provideClaudeResponse : apiType === 'responses' ? provideResponsesResponse : provideOpenAIResponse;
+    await provide(current);
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('answer');
+    expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(true);
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
+    if (apiType === 'responses') expect(request(fetch, 0).include).toBeUndefined();
+  });
+});
+
 describe('Claude signed thinking round trips', () => {
   const blocks = [
     { type: 'thinking', thinking: ' Exact\nthought ', signature: 'SIG-A==\n' },
@@ -115,9 +140,10 @@ describe('Claude signed thinking round trips', () => {
   it('does not execute completed-looking tools when the model ends at max_tokens', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ content: blocks, stop_reason: 'max_tokens' }));
     const current = context('messages');
-    await provideClaudeResponse(current);
+    await expect(provideClaudeResponse(current)).rejects.toThrow('truncated (max_tokens)');
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('Checking.');
     expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
-    expect(state(current.parts).claude).toEqual([{ type: 'text', text: 'Checking.' }]);
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
   });
 
   it.each(['message_stop', '[DONE]'])('never publishes tools or replay metadata when %s lacks a stop reason', async terminal => {
@@ -149,9 +175,10 @@ describe('Claude signed thinking round trips', () => {
       { type: 'message_stop' },
     ]));
     const current = context('messages');
-    await provideClaudeResponse(current);
+    await expect(provideClaudeResponse(current)).rejects.toThrow(stop_reason === 'pause_turn' ? 'continuation is unsupported' : `truncated (${stop_reason})`);
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('Checking.');
     expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
-    expect(state(current.parts).claude).toEqual([blocks[2]]);
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
     expect(fetch).toHaveBeenCalledOnce();
   });
 
@@ -292,10 +319,52 @@ describe('Responses phase and message boundaries', () => {
       { type: 'reasoning', id: 'rs', encrypted_content: 'PARTIAL_OPAQUE', summary: [] }, ...output,
     ] }));
     const current = context('responses', { openai: { encryptedReasoning: true } });
-    await provideResponsesResponse(current);
+    await expect(provideResponsesResponse(current)).rejects.toThrow('truncated (incomplete)');
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('first second');
     expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
-    expect(JSON.stringify(state(current.parts))).not.toContain('PARTIAL_OPAQUE');
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
   });
+});
+
+describe('Chat truncated completion failures', () => {
+  it.each(['length', 'content_filter'])('retains partial text but rejects JSON %s before publishing tools', async finish_reason => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ choices: [{ message: {
+      content: 'partial answer', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'ping', arguments: '{}' } }],
+    }, finish_reason }] }));
+    const current = context('chat-completions', { openai: { replayReasoningContent: true } });
+    await expect(provideOpenAIResponse(current)).rejects.toThrow(`truncated (${finish_reason})`);
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('partial answer');
+    expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each(['length', 'content_filter'])('rejects streaming %s even when reasoning replay is disabled', async finish_reason => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([
+      { choices: [{ delta: { content: 'partial answer' } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'ping', arguments: '{"q":"partial' } }] } }] },
+      { choices: [{ delta: {}, finish_reason }] }, '[DONE]',
+    ]));
+    const current = context('chat-completions');
+    await expect(provideOpenAIResponse(current)).rejects.toThrow(`truncated (${finish_reason})`);
+    expect(current.parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('')).toBe('partial answer');
+    expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+});
+
+it('reads final usage after a Chat truncation marker before surfacing failure', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([
+    { choices: [{ delta: { content: 'partial answer' } }] },
+    { choices: [{ delta: {}, finish_reason: 'length' }] },
+    { choices: [], usage: { prompt_tokens: 120, completion_tokens: 7 } }, '[DONE]',
+  ]));
+  const current = context('chat-completions');
+  await expect(provideOpenAIResponse(current)).rejects.toThrow('truncated (length)');
+  const usage = current.parts.find(part => part instanceof vscode.LanguageModelDataPart && part.mimeType === 'usage');
+  expect(usage).toBeDefined();
+  expect(JSON.parse(Buffer.from((usage as vscode.LanguageModelDataPart).data).toString('utf8')))
+    .toEqual({ prompt_tokens: 120, completion_tokens: 7, total_tokens: 127 });
 });
 
 describe('protocol state coherence and cancellation', () => {

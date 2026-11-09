@@ -1,4 +1,5 @@
 import { types as utilTypes } from 'node:util';
+import { decodeHostReplayMetadata } from './hostReplayCarrier';
 import * as vscode from 'vscode';
 import type { ProtocolReplayState } from '../relay/replayState';
 import { MAX_PROTOCOL_REPLAY_BYTES, MAX_PROTOCOL_REPLAY_ITEMS, PROTOCOL_REPLAY_METADATA_KEY } from '../relay/replayState';
@@ -100,6 +101,7 @@ export interface CanonicalChatResponseOptions {
   readonly tools?: readonly vscode.LanguageModelChatTool[];
   readonly toolMode: vscode.LanguageModelChatToolMode;
   readonly modelOptions?: Readonly<Record<string, unknown>>;
+  readonly includeEncryptedThinking?: boolean;
 }
 
 interface SnapshotState {
@@ -153,14 +155,16 @@ export function snapshotChatResponseOptions(
   ) {
     throw new vscode.LanguageModelError('The response tool mode is invalid and cannot be sent safely.');
   }
-  const reasoningEffort = snapshotSelectedModelOption(rawOptions, 'reasoningEffort');
-  const modelOptions = reasoningEffort === undefined
-    ? undefined
-    : Object.freeze({ reasoningEffort });
+  const modelOptions = snapshotSelectedModelOptions(rawOptions);
+  const includeEncryptedThinking = readHostProperty(rawOptions, 'includeEncryptedThinking', 'The response options');
+  if (includeEncryptedThinking !== undefined && typeof includeEncryptedThinking !== 'boolean') {
+    throw new vscode.LanguageModelError('The response includeEncryptedThinking option must be a boolean.');
+  }
   return Object.freeze({
     ...(tools === undefined ? {} : { tools }),
     toolMode: (rawToolMode ?? vscode.LanguageModelChatToolMode.Auto) as vscode.LanguageModelChatToolMode,
     ...(modelOptions === undefined ? {} : { modelOptions }),
+    ...(includeEncryptedThinking === undefined ? {} : { includeEncryptedThinking }),
   });
 }
 
@@ -360,6 +364,34 @@ function snapshotThinkingPart(raw: object, state: SnapshotState, subject: string
     if (Object.hasOwn(metadata, VISION_REPLAY_METADATA_KEY)) {
       const vision = readOwnData(metadata, VISION_REPLAY_METADATA_KEY, `${subject} metadata`);
       if (vision !== undefined && vision !== null) visionReplay = snapshotVisionReplay(vision, state, subject);
+    }
+    const hostEncrypted = readHostProperty(metadata, 'encrypted_content', `${subject} metadata`)
+      ?? readHostProperty(metadata, 'encrypted', `${subject} metadata`);
+    let hostReplay: Record<string, unknown> | undefined;
+    try {
+      hostReplay = decodeHostReplayMetadata(hostEncrypted);
+    } catch {
+      throw new vscode.LanguageModelError('Invalid host replay metadata cannot be sent safely.');
+    }
+    if (hostReplay) {
+      const protocol = hostReplay[PROTOCOL_REPLAY_METADATA_KEY];
+      const vision = hostReplay[VISION_REPLAY_METADATA_KEY];
+      if (protocol !== undefined) {
+        if (protocolReplay && JSON.stringify(protocolReplay) !== JSON.stringify(protocol)) {
+          throw new vscode.LanguageModelError('Conflicting host protocol replay metadata cannot be sent safely.');
+        }
+        protocolReplay ??= snapshotProtocolReplay(protocol, state, subject);
+      }
+      if (vision !== undefined) {
+        if (visionReplay && JSON.stringify(visionReplay) !== JSON.stringify(vision)) {
+          throw new vscode.LanguageModelError('Conflicting host vision replay metadata cannot be sent safely.');
+        }
+        visionReplay ??= snapshotVisionReplay(vision, state, subject);
+      }
+    } else if (typeof hostEncrypted === 'string' && hostEncrypted) {
+      assertBoundedString(hostEncrypted, `${subject} encrypted reasoning`, MAX_TEXT_BYTES, false);
+      consumeTextBudget(state, hostEncrypted);
+      encryptedContent = hostEncrypted;
     }
     const carried = readHostProperty(metadata, RESPONSES_REASONING_METADATA_KEY, `${subject} metadata`);
     if (carried !== undefined && carried !== null) {
@@ -606,16 +638,28 @@ function jsonStringBytes(value: string): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-function snapshotSelectedModelOption(
-  options: object,
-  key: 'reasoningEffort',
-): string | undefined {
-  const container = readHostProperty(options, 'modelOptions', 'The response options');
-  if (container === undefined || container === null) return undefined;
-  assertHostRecord(container, 'The response options.modelOptions');
-  const value = readHostProperty(container, key, 'The response options.modelOptions');
-  // Unsupported values use the model default without retaining caller data.
-  return typeof value === 'string' ? value : undefined;
+function snapshotSelectedModelOptions(options: object): Readonly<Record<string, unknown>> | undefined {
+  const selected: Record<string, unknown> = {};
+  for (const name of ['modelConfiguration', 'modelOptions'] as const) {
+    const container = readHostProperty(options, name, 'The response options');
+    if (container === undefined || container === null) continue;
+    const subject = `The response options.${name}`;
+    assertHostRecord(container, subject);
+    const effort = readHostProperty(container, 'reasoningEffort', subject);
+    // Configuration includes schema defaults, not just user choices. Explicit
+    // per-request LM options win; Agent Host supplies effort via configuration.
+    if (typeof effort === 'string' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+      selected.reasoningEffort = effort;
+    }
+    if (name !== 'modelOptions') continue;
+    for (const key of ['max_tokens', 'temperature', 'top_p'] as const) {
+      const value = readHostProperty(container, key, subject);
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      if (key === 'max_tokens' ? Number.isSafeInteger(value) && value > 0
+        : value >= 0 && value <= (key === 'temperature' ? 2 : 1)) selected[key] = value;
+    }
+  }
+  return Object.keys(selected).length ? Object.freeze(selected) : undefined;
 }
 
 function binaryByteLength(value: unknown, subject: string): number {

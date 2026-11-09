@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const vscode = require('vscode');
+const { loadOfficialAgentHost, parseSseFrames } = require('./agentHostContract.cjs');
+const { createRegisteredModelHandler } = require('./agentHostRpc.cjs');
 
 // A generated 1x1 RGBA PNG with valid chunk CRCs. The real host decodes images
 // before the request reaches our synthetic vision backend.
@@ -117,6 +119,51 @@ async function checkVisionReplayRequests({ extension, provider, recorded, profil
     assert.ok(!wire.includes('original image was not replayed'));
     assert.ok(!wire.includes('weavenetVisionReplay'), 'Metadata keys must not be serialized into model content.');
     assert.ok(!wire.includes('data:image/') && !wire.includes('"type":"image"'), 'The text-only target must never receive original image data.');
+
+    // Replay the production carriers through the actual Agent Host wire, not a direct metadata copy.
+    const official = await loadOfficialAgentHost();
+    const { toInternalPart } = require('./agentHostRpc.cjs');
+    const serializer = official.createHandler({ modelId: model.version, sendChatRequest: async () => ({
+      stream: (async function* () { for (const part of first.parts) yield toInternalPart(part); })(),
+      result: Promise.resolve(),
+    }) });
+    const serialized = await serializer.chat(official.responsesRequestToBridge('weavenet', {
+      model: model.version, input: question,
+    }), source.token);
+    assert.equal(serialized.error, undefined);
+    const response = parseSseFrames(official.bridgeResultToResponsesSseFrames(serialized, model.version)).at(-1).response;
+    const carriers = response.output.filter(item => item.type === 'reasoning' && item.encrypted_content?.startsWith('weavenet-replay:v1:'));
+    assert.equal(carriers.length, 2, 'Both protocol and vision carriers must survive as distinct reasoning items.');
+    assert.equal(new Set(carriers.map(item => item.id)).size, 2);
+    provider.visionDescriptionCache.clear();
+    const handler = createRegisteredModelHandler({ official, model, token: source.token });
+    const start = recorded.length;
+    const continuation = await handler.chat(official.responsesRequestToBridge('weavenet', {
+      model: model.version,
+      input: [{ type: 'message', role: 'user', content: [
+        { type: 'input_text', text: question },
+        { type: 'input_image', image_url: `data:image/png;base64,${IMAGE_PNG.toString('base64')}` },
+      ] }, ...response.output, { type: 'message', role: 'user', content: 'Use the screenshot evidence from the previous turn.' }],
+      reasoning: { effort: 'low' },
+    }), source.token);
+    assert.equal(continuation.error, undefined, 'Official bridge continuation must restore vision and signed protocol state.');
+    assert.equal(descriptions, 1, 'Cache loss after the full wire round trip must not trigger a second vision call.');
+    assert.equal(selections, 1);
+    const posts = recorded.slice(start).filter(entry => entry.method === 'POST');
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].body.messages[0], first.request.messages[0]);
+    assert.ok(JSON.stringify(posts[0].body).includes(caption));
+    assert.ok(!JSON.stringify(posts[0].body).includes('weavenet-replay:v1:'));
+
+    const withoutReplay = await model.sendRequest([firstUser], {
+      modelOptions: { reasoningEffort: 'low' }, includeEncryptedThinking: false,
+    }, source.token);
+    const withoutReplayParts = [];
+    for await (const part of withoutReplay.stream) withoutReplayParts.push(part);
+    assert.equal(withoutReplayParts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join(''), 'mock answer');
+    assert.ok(!withoutReplayParts.some(part => part.metadata?.weavenetVisionReplay
+      || part.metadata?.weavenetProtocolReplay || part.metadata?.encrypted_content),
+      'Explicit opt-out must also suppress vision replay carriers across the actual RPC.');
   } finally {
     registration?.dispose();
     source.dispose();

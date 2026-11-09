@@ -1,20 +1,14 @@
 import * as vscode from 'vscode';
 import { createThinkingPart, hostThinkingPart, parseToolArguments } from './helpers';
 import { t } from '../l10n';
+import { hostReplayMetadata } from './hostReplayCarrier';
 import type { ToolCall } from '../relay/types';
 import { snapshotChatRequest } from './canonicalRequest';
 import type { ResponsePartEmitter } from './responsePartEmitter';
 import type { ProtocolReplayState } from '../relay/replayState';
 import { cloneReplayState, PROTOCOL_REPLAY_METADATA_KEY, replayDisplayText } from '../relay/replayState';
 
-/**
- * The thinking part class is the only carrier that can move protocol state
- * through host history. It is a proposed API surface, so availability is a host
- * capability rather than a build-time guarantee: it has been verified present
- * from the declared minimum host (1.116.0) through current stable, but a future
- * or trimmed-down host may not expose it. Callers must degrade explicitly
- * instead of failing the whole request.
- */
+/** Thinking parts carry state in LM history; Agent Host additionally needs the opaque encrypted_content envelope. */
 export function hasProtocolReplayCarrier(): boolean {
   return hostThinkingPart() !== undefined;
 }
@@ -54,7 +48,8 @@ export function reconcileProtocolText(output: ResponsePartEmitter, displayed: st
 
 export function reportProtocolReplay(output: ResponsePartEmitter, state: ProtocolReplayState): void {
   if (replayDisplayText(state) !== state.displayText) throw new vscode.LanguageModelError('The Relay response text does not match its protocol replay payload. No tools were published.');
-  const part = createThinkingPart('', undefined, { [PROTOCOL_REPLAY_METADATA_KEY]: cloneReplayState(state) });
+  const carrier = hostReplayMetadata({ [PROTOCOL_REPLAY_METADATA_KEY]: cloneReplayState(state) });
+  const part = createThinkingPart('', carrier.id, carrier.metadata);
   if (!part) throw new vscode.LanguageModelError('This VS Code host cannot preserve protocol replay metadata.');
   snapshotChatRequest([{ role: vscode.LanguageModelChatMessageRole.Assistant, content: [part], name: undefined }]);
   output.report(part);

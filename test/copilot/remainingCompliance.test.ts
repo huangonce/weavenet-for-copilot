@@ -127,10 +127,10 @@ describe('declared model request capabilities', () => {
 
   it('treats model_context_window_exceeded as truncation, with no pending tool publication', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => json({ content: signed, stop_reason: 'model_context_window_exceeded' }));
-    const current = context('messages'); await provideClaudeResponse(current);
+    const current = context('messages');
+    await expect(provideClaudeResponse(current)).rejects.toThrow('truncated (model_context_window_exceeded)');
     expect(current.parts.some(part => part instanceof vscode.LanguageModelToolCallPart)).toBe(false);
-    const marker = current.parts.find(part => !!(part as unknown as { metadata?: Record<string, unknown> }).metadata?.[PROTOCOL_REPLAY_METADATA_KEY]);
-    expect(JSON.stringify(marker)).not.toContain('SIG');
+    expect(current.parts.some(part => !!(part as unknown as { metadata?: unknown }).metadata)).toBe(false);
   });
 
   it('only sends sampling at declared OpenAI reasoning effort levels', async () => {

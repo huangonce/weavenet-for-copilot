@@ -6,6 +6,25 @@ import type { ClaudeEffort, ClaudeThinking, ReasoningEffort, RoutedModel } from 
 
 export type ModelOptions = vscode.ProvideLanguageModelChatResponseOptions;
 
+export function getConfiguredMaxOutputTokens(modelLimit: number | undefined, configLimit: number, options: ModelOptions): number {
+  const limit = modelLimit ?? configLimit;
+  const requested = options.modelOptions?.max_tokens;
+  return typeof requested === 'number' && Number.isSafeInteger(requested) && requested > 0
+    ? Math.min(requested, limit) : limit;
+}
+
+export function getConfiguredSampling(
+  config: { temperature?: number; topP?: number }, options: ModelOptions,
+): { temperature?: number; top_p?: number } {
+  const temperature = options.modelOptions?.temperature;
+  const topP = options.modelOptions?.top_p;
+  if (typeof temperature === 'number' && Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
+    return { temperature };
+  }
+  if (typeof topP === 'number' && Number.isFinite(topP) && topP >= 0 && topP <= 1) return { top_p: topP };
+  return config.temperature === undefined ? { top_p: config.topP } : { temperature: config.temperature };
+}
+
 export function getConfiguredReasoningEffort(model: RoutedModel | undefined, options: ModelOptions): ReasoningEffort | undefined {
   if (!model?.thinking) return undefined;
   const value = options.modelOptions?.reasoningEffort;

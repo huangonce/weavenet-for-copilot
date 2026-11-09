@@ -18,6 +18,7 @@ const OPTIONS = {
   tools: [TOOL],
   toolMode: vscode.LanguageModelChatToolMode.Auto,
   modelOptions: { reasoningEffort: 'low' },
+  configuration: { reasoningEffort: 'low' },
 };
 
 function rpcProfiles(profiles) {
@@ -30,7 +31,8 @@ function rpcProfiles(profiles) {
       model.claude = { ...existing?.claude, thinkingMode: 'adaptive', reasoningEfforts: ['low', 'high'],
         defaultReasoningEffort: 'high', sampling: false, forcedToolChoice: false };
     } else {
-      model.openai = { ...existing?.openai, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', strictTools: false };
+      model.openai = { ...existing?.openai, reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high', strictTools: false,
+        replayReasoningContent: true, encryptedReasoning: true, sampling: true };
     }
     return { ...profile, models: [...(profile.models ?? []).filter(entry => entry.id !== id), model] };
   });
@@ -80,7 +82,7 @@ function toolOf(parts, callId, expectedInput) {
  * Call after the direct-provider request-count assertions and restore the fake
  * Chat key first. The caller owns the loopback server and provider disposal.
  */
-async function checkRegisteredRequests({ provider, recorded, profiles }) {
+async function checkRegisteredRequests({ provider, recorded, profiles, relayControl }) {
   const bridgeExtension = vscode.extensions.getExtension(BRIDGE_ID);
   assert.ok(bridgeExtension, `Missing RPC fixture extension ${BRIDGE_ID}; include its development path in the test runner.`);
   const bridge = await bridgeExtension.activate();
@@ -113,6 +115,25 @@ async function checkRegisteredRequests({ provider, recorded, profiles }) {
       assert.equal(requests[0].body.model, id);
       return { parts, request: requests[0] };
     };
+
+    for (const [id, endpoint, field] of [
+      ['mock-chat', '/v1/chat/completions', 'reasoning_effort'],
+      ['mock-responses', '/v1/responses', 'reasoning'],
+      ['mock-claude', '/v1/messages', 'output_config'],
+    ]) {
+      const start = recorded.length;
+      const response = await modelFor(id).sendRequest([vscode.LanguageModelChatMessage.User('Explicit effort overrides schema defaults')],
+        { ...OPTIONS, includeEncryptedThinking: false }, source.token);
+      const parts = await readStream(response);
+      const posts = recorded.slice(start).filter(entry => entry.method === 'POST' && entry.path === endpoint);
+      assert.equal(posts.length, 1);
+      assert.equal(field === 'reasoning_effort' ? posts[0].body[field] : posts[0].body[field]?.effort, 'low',
+        'The explicit low effort must win over the high schema default contributed by rpcProfiles.');
+      assert.ok(!parts.some(part => part.metadata?.weavenetProtocolReplay || part.metadata?.encrypted_content),
+        'Explicit opaque-state opt-out must survive the real caller/provider RPC.');
+      assert.equal(textOf(parts), 'mock answer');
+      if (id === 'mock-responses') assert.equal(posts[0].body.include, undefined);
+    }
 
     const counted = await modelFor('mock-chat').countTokens('hello world', source.token);
     assert.ok(Number.isInteger(counted) && counted > 0, 'Token counting must work through the registered model RPC.');
@@ -176,6 +197,8 @@ async function checkRegisteredRequests({ provider, recorded, profiles }) {
       [{ type: 'thinking', thinking: 'mock thought', signature: 'mock-signature' }],
       'The host must return the original signed thinking metadata to the provider on the next RPC request.');
     assert.equal(replayed.filter(block => block.type === 'text').map(block => block.text).join(''), 'mock answer');
+
+    await require('./agentHostRpc.cjs').checkAgentHostRegisteredRequests({ modelFor, recorded, token: source.token, tool: TOOL, relayControl });
   } finally {
     registration?.dispose();
     source.dispose();

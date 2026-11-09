@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.9.2 - 2026-11-09
+
+- 修正思考参数优先级：有效逐请求值覆盖宿主自动填入的默认配置；显式 `includeEncryptedThinking: false` 不再返回协议或视觉回放载体，新增三协议与视觉真实宿主 RPC 回归。
+
+- 接通 Agent Host 的 `modelConfiguration.reasoningEffort` 和逐请求输出上限、采样参数；保留直接 LM API 兼容、模型能力及 API 版本约束。
+- 协议与视觉历史使用有界、版本化 opaque reasoning 载体跨越 Agent Host Responses 桥接；恢复后仍验证身份、结构和容量，不把内部封装转发为上游 reasoning。
+- 确定截断及不支持的 Claude 暂停续接显式失败，LM 流保留部分文本但不发布未完成工具，避免宿主误报正常完成；当前 Agent Host 错误路径仍会丢弃其部分输出。
+- 新增固定官方源码、SHA-256 校验和离线缓存的 Agent Host 契约测试，并纳入 CI/发布；真实宿主生产 provider 覆盖三协议完整桥接往返、输出限制、签名/加密 reasoning/phase、视觉缓存丢失与截断失败，明确缓存统计仍受宿主限制。
+
 ## 0.9.1 - 2026-11-09
 
 - 三协议服务端用量经 `usage` 数据响应回传给 VS Code，接入 Agent Host BYOK 用量通道；累计事件仅合并一次，缓存计数与未知值保持原语义。助手历史回放忽略统计数据，避免作为非图片附件被拒绝或发送给模型。

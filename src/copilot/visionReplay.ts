@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { createThinkingPart, hostThinkingPart } from './helpers';
+import { hostReplayMetadata } from './hostReplayCarrier';
 import { snapshotChatRequest } from './canonicalRequest';
 import type { CanonicalChatRequestSnapshot } from './canonicalRequest';
 import { MAX_VISION_REPLAY_BYTES, MAX_VISION_REPLAY_ENTRIES, MAX_VISION_REPLAY_HISTORY_ENTRIES, VISION_REPLAY_METADATA_KEY } from '../relay/visionReplay';
@@ -26,8 +27,9 @@ export function createVisionReplayPart(identity: string, entries: readonly Visio
   if (!candidate) return undefined;
   const snapshot = snapshotChatRequest([{ role: vscode.LanguageModelChatMessageRole.Assistant, content: [candidate], name: undefined }]);
   const part = snapshot.messages[0].content[0];
-  return part.kind === 'thinking' && part.visionReplay
-    ? createThinkingPart('', undefined, { [VISION_REPLAY_METADATA_KEY]: part.visionReplay }) : undefined;
+  if (part.kind !== 'thinking' || !part.visionReplay) return undefined;
+  const carrier = hostReplayMetadata({ [VISION_REPLAY_METADATA_KEY]: part.visionReplay });
+  return createThinkingPart('', carrier.id, carrier.metadata);
 }
 
 /** The newest matching history is bounded; conflicting copies never become evidence. */

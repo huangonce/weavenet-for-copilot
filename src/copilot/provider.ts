@@ -361,7 +361,9 @@ export class WeaveNetChatProvider implements vscode.LanguageModelChatProvider {
         );
         resolvedMessages = vision.messages;
         pendingVisionCacheWrites = vision.pendingCacheWrites;
-        visionReplayPart = createVisionReplayPart(protocolIdentity, vision.replayEntries);
+        if (optionsSnapshot.includeEncryptedThinking !== false) {
+          visionReplayPart = createVisionReplayPart(protocolIdentity, vision.replayEntries);
+        }
         await this.waitForExternalVisionRefresh(token);
         this.assertVisionConfigurationCurrent(visionCacheGeneration, messageSnapshot.hasImages);
         this.debug(

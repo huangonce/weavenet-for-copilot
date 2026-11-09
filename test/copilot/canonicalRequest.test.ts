@@ -288,41 +288,113 @@ describe('canonical chat request snapshot', () => {
 });
 
 describe('canonical response options snapshot', () => {
-  it.each(['modelConfiguration', 'configuration'])('ignores the obsolete %s field when selecting reasoning effort', (alias) => {
-    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
-    const legacy = { toolMode: vscode.LanguageModelChatToolMode.Auto, [alias]: { reasoningEffort: 'max' } };
-
-    expect(snapshotChatResponseOptions(legacy)).toEqual({ toolMode: vscode.LanguageModelChatToolMode.Auto });
-    expect(getConfiguredReasoningEffort(model, legacy)).toBe('high');
-
-    const current = { ...legacy, modelOptions: { reasoningEffort: 'low' } };
-    expect(snapshotChatResponseOptions(current).modelOptions).toEqual({ reasoningEffort: 'low' });
-    expect(getConfiguredReasoningEffort(model, current)).toBe('low');
+  it.each([true, false])('snapshots explicit includeEncryptedThinking=%s once', value => {
+    let reads = 0;
+    const options = { toolMode: vscode.LanguageModelChatToolMode.Auto,
+      get includeEncryptedThinking() { reads++; return value; } };
+    expect(snapshotChatResponseOptions(options)).toEqual({ toolMode: options.toolMode, includeEncryptedThinking: value });
+    expect(reads).toBe(1);
   });
 
-  it.each([undefined, 'low'])('reads the official option once without touching legacy getters, effort=%s', (effort) => {
-    let optionReads = 0;
-    let effortReads = 0;
-    let legacyReads = 0;
+  it.each([null, 'false', 0, {}])('rejects invalid includeEncryptedThinking=%s', value => {
+    expect(() => snapshotChatResponseOptions({ includeEncryptedThinking: value } as never)).toThrow('must be a boolean');
+  });
+
+  it('falls back to host configuration when direct effort is invalid', () => {
+    expect(snapshotChatResponseOptions({ modelOptions: { reasoningEffort: 'invalid' },
+      modelConfiguration: { reasoningEffort: 'low' } } as never).modelOptions).toEqual({ reasoningEffort: 'low' });
+  });
+
+  it('prefers explicit LM options over host defaults, not the internal configuration alias', () => {
+    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
     const options = {
       toolMode: vscode.LanguageModelChatToolMode.Auto,
-      get modelOptions() {
-        optionReads++;
+      modelConfiguration: { reasoningEffort: 'max' },
+      modelOptions: { reasoningEffort: 'low' },
+      get configuration(): never { throw new Error('internal alias must not run'); },
+    };
+    const snapshot = snapshotChatResponseOptions(options);
+    expect(snapshot.modelOptions).toEqual({ reasoningEffort: 'low' });
+    expect(getConfiguredReasoningEffort(model, snapshot)).toBe('low');
+    expect(snapshotChatResponseOptions({ toolMode: options.toolMode, modelConfiguration: options.modelConfiguration } as never).modelOptions)
+      .toEqual({ reasoningEffort: 'max' });
+    expect(snapshotChatResponseOptions({ toolMode: options.toolMode, modelOptions: options.modelOptions }).modelOptions)
+      .toEqual({ reasoningEffort: 'low' });
+  });
+
+  it.each([undefined, 'low'])('reads each official option once, effort=%s', (effort) => {
+    let optionReads = 0;
+    let configurationReads = 0;
+    let effortReads = 0;
+    const options = {
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+      get modelOptions() { optionReads++; return { reasoningEffort: 'high' }; },
+      get modelConfiguration() {
+        configurationReads++;
         return effort === undefined ? undefined : { get reasoningEffort() { effortReads++; return effort; } };
       },
     };
-    for (const alias of ['modelConfiguration', 'configuration']) {
-      Object.defineProperty(options, alias, { get() { legacyReads++; throw new Error('obsolete getter must not run'); } });
-    }
-
+    Object.defineProperty(options, 'configuration', { get() { throw new Error('internal alias must not run'); } });
     const snapshot = snapshotChatResponseOptions(options);
-
-    expect(snapshot.modelOptions).toEqual(effort === undefined ? undefined : { reasoningEffort: effort });
+    expect(snapshot.modelOptions).toEqual({ reasoningEffort: 'high' });
     expect(optionReads).toBe(1);
+    expect(configurationReads).toBe(1);
     expect(effortReads).toBe(effort === undefined ? 0 : 1);
-    const model = fromConfiguredModel({ id: 'reasoning-model', thinking: true });
-    expect(getConfiguredReasoningEffort(model, options)).toBe(effort ?? 'high');
-    expect(legacyReads).toBe(0);
+  });
+
+  it('snapshots only supported scalar request options without reading unknown getters', () => {
+    const reads: string[] = [];
+    const values = { max_tokens: 12, temperature: 0, top_p: 0.8 };
+    const modelOptions = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value]));
+    for (const [key, value] of Object.entries(values)) {
+      Object.defineProperty(modelOptions, key, { get() { reads.push(key); return value; } });
+    }
+    Object.defineProperty(modelOptions, 'unknown', { get() { throw new Error('unknown option read'); } });
+    const snapshot = snapshotChatResponseOptions({ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions });
+    expect(snapshot.modelOptions).toEqual(values);
+    expect(reads).toEqual(['max_tokens', 'temperature', 'top_p']);
+    expect(Object.isFrozen(snapshot.modelOptions)).toBe(true);
+  });
+
+  it.each([
+    ['max_tokens', 0], ['max_tokens', -1], ['max_tokens', 1.5], ['max_tokens', Number.MAX_SAFE_INTEGER + 1],
+    ['max_tokens', '12'], ['max_tokens', Infinity], ['max_tokens', NaN],
+    ['temperature', -0.1], ['temperature', 2.1], ['temperature', '0.5'], ['temperature', NaN],
+    ['top_p', -0.1], ['top_p', 1.1], ['top_p', Infinity], ['top_p', { value: 0.9 }],
+    ['reasoningEffort', 'invalid'],
+  ])('discards invalid %s=%s without retaining caller data', (key, value) => {
+    expect(snapshotChatResponseOptions({ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions: { [key]: value } }))
+      .toEqual({ toolMode: vscode.LanguageModelChatToolMode.Auto });
+  });
+
+  it('detaches request parameter primitives from caller mutations', () => {
+    const modelOptions = { max_tokens: 128, temperature: 0.3, top_p: 0.7 };
+    const modelConfiguration = { reasoningEffort: 'low' };
+    const snapshot = snapshotChatResponseOptions({ toolMode: vscode.LanguageModelChatToolMode.Auto, modelOptions, modelConfiguration } as never);
+    Object.assign(modelOptions, { max_tokens: 9000, temperature: 1.2, top_p: 0.1 });
+    modelConfiguration.reasoningEffort = 'high';
+    expect(snapshot.modelOptions).toEqual({ max_tokens: 128, temperature: 0.3, top_p: 0.7, reasoningEffort: 'low' });
+  });
+
+  it('ignores invalid host effort and configuration sampling overrides', () => {
+    const snapshot = snapshotChatResponseOptions({
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+      modelOptions: { reasoningEffort: 'low', max_tokens: 12 },
+      modelConfiguration: { reasoningEffort: 'invalid', max_tokens: 50, temperature: 0.9, top_p: 0.2 },
+    } as never);
+    expect(snapshot.modelOptions).toEqual({ reasoningEffort: 'low', max_tokens: 12 });
+  });
+
+  it.each(['modelOptions', 'modelConfiguration'])('rejects proxies and throwing getters in %s safely', (name) => {
+    let traps = 0;
+    const proxy = new Proxy({}, { get() { traps++; throw new Error('proxy must not run'); } });
+    expect(() => snapshotChatResponseOptions({ toolMode: vscode.LanguageModelChatToolMode.Auto, [name]: proxy }))
+      .toThrow('dynamic');
+    expect(traps).toBe(0);
+    expect(() => snapshotChatResponseOptions({
+      toolMode: vscode.LanguageModelChatToolMode.Auto,
+      [name]: { get reasoningEffort(): never { throw new Error('private failure'); } },
+    })).toThrow('cannot be read safely');
   });
 
   it('discards unsupported model option data and uses the model default', () => {

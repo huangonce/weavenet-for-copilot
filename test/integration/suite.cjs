@@ -187,6 +187,7 @@ const RESPONSES_TOOL = { type: 'function_call', id: 'fc_live', call_id: 'call_re
 
 const MOCK_SSE = {
   '/v1/chat/completions': sseBody([
+    { choices: [{ delta: { reasoning_content: 'mock chat thought' } }] },
     { choices: [{ delta: { content: 'mock answer' } }] },
     { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_live', type: 'function',
       function: { name: 'search', arguments: '{"q":"docs \ud83d' } }] } }] },
@@ -210,13 +211,14 @@ const MOCK_SSE = {
   ]),
   '/v1/responses': sseBody([
     { type: 'response.created', response: { id: 'resp_live' } },
-    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'mock answer' },
-    { type: 'response.output_item.added', output_index: 1, item: { ...RESPONSES_TOOL, arguments: '', status: 'in_progress' } },
-    { type: 'response.function_call_arguments.delta', output_index: 1, delta: RESPONSES_TOOL.arguments },
-    { type: 'response.function_call_arguments.done', output_index: 1, arguments: RESPONSES_TOOL.arguments },
-    { type: 'response.output_item.done', output_index: 1, item: RESPONSES_TOOL },
+    { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: 'mock answer' },
+    { type: 'response.output_item.added', output_index: 2, item: { ...RESPONSES_TOOL, arguments: '', status: 'in_progress' } },
+    { type: 'response.function_call_arguments.delta', output_index: 2, delta: RESPONSES_TOOL.arguments },
+    { type: 'response.function_call_arguments.done', output_index: 2, arguments: RESPONSES_TOOL.arguments },
+    { type: 'response.output_item.done', output_index: 2, item: RESPONSES_TOOL },
     { type: 'response.completed', response: { id: 'resp_live', status: 'completed',
-      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'mock answer' }] }, RESPONSES_TOOL],
+      output: [{ type: 'reasoning', id: 'rs_live', summary: [], encrypted_content: 'native-encrypted-reasoning' },
+        { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'mock answer' }] }, RESPONSES_TOOL],
       usage: { input_tokens: 5, output_tokens: 7, total_tokens: 12 } } },
   ]),
 };
@@ -469,7 +471,9 @@ async function checkLiveRequestPaths(extension) {
       ]));
     };
     try {
-      const partial = await collect(modelFor('mock-responses'), [vscode.LanguageModelChatMessage.User('truncated output')], { tools: [tool] });
+      const partial = [];
+      await assert.rejects(provider.provideLanguageModelChatResponse(modelFor('mock-responses'),
+        [vscode.LanguageModelChatMessage.User('truncated output')], { tools: [tool] }, { report: part => partial.push(part) }, source.token), /truncated \(incomplete\)/);
       assert.deepEqual(textParts(partial), ['partial answer'], 'A truncated tool must not hide legitimate partial text.');
       assert.ok(partial.every(part => !(part instanceof vscode.LanguageModelToolCallPart)), 'Incomplete tools must not be published.');
       assert.equal(recorded.slice(beforeIncomplete).filter(entry => entry.method === 'POST').length, 1);
@@ -516,7 +520,7 @@ async function checkLiveRequestPaths(extension) {
     assert.equal(requestTo('/v1/chat/completions').length, chatsBeforeKeyRemoval, 'A key-less request must not reach the relay.');
 
     secrets.set(entries[0][0], 'live-key');
-    await require('./rpc.cjs').checkRegisteredRequests({ provider, recorded, profiles });
+    await require('./rpc.cjs').checkRegisteredRequests({ provider, recorded, profiles, relayControl });
     await require('./vision.cjs').checkVisionReplayRequests({ extension, provider, recorded, profiles });
     assert.equal(requestTo('/v1/responses/input_tokens').length, 1,
       'RPC generation and host countTokens must not repeat the manual remote diagnostic.');
@@ -593,7 +597,7 @@ async function checkReviewedToolBoundaries(provider, modelFor, recorded, control
       body: sseBody([...claudeEvents('{"a":{"a":1}}'), { type: 'message_delta', delta: { stop_reason: 'unknown_reason' } }, { type: 'message_stop' }]) },
     { label: 'Claude DONE with explicit tool_use', model: 'mock-claude', tools: 1,
       body: sseBody([...claudeEvents('{"a":{"a":1}}'), { type: 'message_delta', delta: { stop_reason: 'tool_use' } }]) + 'data: [DONE]\n\n' },
-    { label: 'Claude truncated tool input', model: 'mock-claude', tools: 0,
+    { label: 'Claude truncated tool input', model: 'mock-claude', tools: 0, fails: true,
       body: sseBody([...claudeEvents('{"a":{"a":'), { type: 'message_delta', delta: { stop_reason: 'max_tokens' } }, { type: 'message_stop' }]) },
   ];
   try {

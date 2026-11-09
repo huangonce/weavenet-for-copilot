@@ -63,7 +63,7 @@ Base URL 是 API 根路径，例如 `https://relay.example.com/v1`。远程 Rela
 
 - `toolCalling`：工具调用支持。
 - `imageInput`：原生图片输入支持。明确的 `false` 可关闭来自公开目录的视觉声明。
-- `thinking`：推理支持；模型选择器可以显示思考工作量。
+- `thinking`：推理支持；模型选择器可以显示思考工作量。Agent Host 通过 provider 的 `modelConfiguration.reasoningEffort` 传递选择值。该配置也可能包含 schema 默认值，因此有效的逐请求 `modelOptions.reasoningEffort` 优先，其次使用宿主配置，最后使用模型默认；非法值不覆盖有效的回退值。
 - `contextWindow`：已知的输入加输出总窗口；插件会从中预留输出空间。它是静态预算元数据，不创建上下文档位控件。
 - `maxInputTokens` / `maxOutputTokens`：向宿主声明的输入、输出上限；请按上游实际限制填写并预留输出空间。
 - `openai`：已验证的 OpenAI 请求能力，例如 `tokenLimitField`、`strictTools`、`parallelToolCalls`、`developerRole`、`clientRequestId`、`reasoningEfforts`、`defaultReasoningEffort`。
@@ -72,7 +72,9 @@ Base URL 是 API 根路径，例如 `https://relay.example.com/v1`。远程 Rela
 
 连接也支持 `includeModels`、`excludeModels` 正则过滤与非敏感的 `requestHeaders`。认证和协议保留头由扩展管理；额外请求头不能用于保存密钥。
 
-扩展将服务端返回的 token 用量归一化为 OpenAI 格式，通过稳定的 `LanguageModelDataPart`（MIME `usage`）报告给 VS Code；支持该通道的 Agent Host 可据此更新上下文用量。Chat、Responses 和 Claude 的累计用量按请求只报告一次，不累加重复事件；Claude 输入总量包含已明确返回的缓存读取和写入，未知字段不伪造为零。回放助手历史时忽略 usage 数据，不将统计信息发送给模型。没有服务端用量或宿主不支持该通道时，不保证界面能显示已用量；本地 token 估算不冒充服务端统计。
+扩展将服务端返回的 token 用量归一化为 OpenAI 格式，通过稳定的 `LanguageModelDataPart`（MIME `usage`）报告给 VS Code；支持该通道的 Agent Host 可据此更新上下文用量。Chat、Responses 和 Claude 的累计用量按请求只报告一次，不累加重复事件；Claude 输入总量包含已明确返回的缓存读取和写入，未知字段不伪造为零。回放助手历史时忽略 usage 数据，不将统计信息发送给模型。没有服务端用量或宿主不支持该通道时，不保证界面能显示已用量；本地 token 估算不冒充服务端统计。VS Code 1.144/1.145 的 Agent Host BYOK 桥接只消费输入、输出和推理计数，并将 SDK Responses 的缓存命中写为零；扩展虽报告缓存字段，仍不能修正宿主内部的细分统计，也不会篡改总输入量作为替代。
+
+宿主逐请求传来的 `modelOptions.max_tokens` 会作为输出上限，并夹在当前模型输出容量内；显式限制不受 `sendMaxTokens: false` 默认值吞掉，但仍遵守接口的 `tokenLimitField: "omit"` 和已明确选择的旧图片兼容策略。逐请求 `temperature` / `top_p` 优先于静态配置，仍受模型采样能力和 Claude API 版本约束；同时传入时只采用 temperature。它们是生成参数，不改变宿主输入预算或上下文档位。
 
 输入 token 全局硬上限为 `maxInputTokens`，默认 128000；输出默认值为 `maxOutputTokens`，默认 16384。之前的“上下文大小”档位已移除：它在不同 API 上不能一致生效。需要限制上下文时使用明确的输入、输出上限。若 Relay 或 OpenRouter 提供总窗口，向宿主声明的输入加输出不会超过该窗口。
 
@@ -195,7 +197,9 @@ Copilot 的 Agent 模式只会提供声明了工具调用的模型。WeaveNet �
 
 ## 推理与协议历史
 
-Claude 的完整签名思考块和 `redacted_thinking`、Chat 的推理正文、Responses 的原始消息边界与阶段会通过有界宿主 metadata 保存，在下一轮回传。状态绑定连接配置、凭据、模型和 API，不能拿到其他模型或密钥下继续使用；工具与可见正文修改或裁剪后会拒绝失配的旧状态。宿主若不提供承载状态所需的 thinking part，扩展会给出一次性提示并禁用原样回放，而不是让请求整体失败。
+Claude 的完整签名思考块和 `redacted_thinking`、Chat 的推理正文、Responses 的原始消息边界与阶段会通过有界宿主 metadata 保存，在下一轮回传。为通过 Agent Host 的 Responses 桥接，协议状态和视觉描述还会分别封装在宿主保留的 `encrypted_content` 字段中；这是带版本的 Base64 opaque 封装，不是加密。每份载体使用独立 ID，避免与显示用思考或其他状态合并；解码后继续校验容量、结构和身份，冲突或损坏的封装拒绝使用，内部封装不会作为上游加密推理转发。状态绑定连接配置、凭据、模型和 API，不能拿到其他模型或密钥下继续使用；工具与可见正文修改或裁剪后会拒绝失配的旧状态。宿主若不提供承载状态所需的 thinking part，扩展会给出一次性提示并禁用原样回放，而不是让请求整体失败。
+
+调用方显式设置 `includeEncryptedThinking: false` 时，不返回协议或视觉 opaque 回放载体，也不请求 Responses 的加密 reasoning 附加输出；已有输入历史仍按原规则读取，可见思考、正文和合法工具调用不因此关闭。未传该选项时保持已有回放兼容行为，Agent Host 明确请求该状态时照常返回。选择退出后，调用方不能依赖隐藏状态进行后续原生签名/推理续接。
 
 DeepSeek thinking 的 Chat 请求携带工具时需要所有历史轮次的完整 `reasoning_content`，包括未实际调用工具的轮次。配置示例：
 
@@ -229,7 +233,7 @@ DeepSeek thinking 的 Chat 请求携带工具时需要所有历史轮次的完�
 
 签名状态同时保存实际 system、工具定义和此前消息的前缀指纹（不计 API cache_control 断点）；前缀变化或旧状态缺指纹时，在 POST 前拒绝并提示新开会话。指纹不会把工具业务参数或 schema 中的同名 cache_control 删除。
 
-状态最多 4 MiB、512 个协议 item，继续受 canonical JSON 的节点、深度与累计大小限制。工具批次只在完整响应和状态校验成功后发布；取消、缺终止事件、无效签名、正文冲突或截断不会发布未完成的工具。Claude 的 model_context_window_exceeded 与 max_tokens 一样视为截断；不发布待执行工具或继续使用受截断的思考状态。Responses 的合法 incomplete 可保留已知消息阶段及部分文本，但不保存未完成的加密推理或工具调用。
+状态最多 4 MiB、512 个协议 item，继续受 canonical JSON 的节点、深度与累计大小限制。工具批次只在完整响应和状态校验成功后发布；取消、缺终止事件、无效签名、正文冲突或截断不会发布未完成的工具。Claude 的 model_context_window_exceeded 与 max_tokens 一样视为截断；不发布待执行工具或继续使用受截断的思考状态。Responses 的合法 incomplete 可保留部分文本，但不保存未完成的加密推理或工具调用。确定截断或 Claude `pause_turn` 不再静默成功：扩展向 LM 响应流保留已输出文本后显式失败，因为当前 Agent Host 无法传递完整的 incomplete/续接状态；不自动重试，也不发布残缺工具。当前 Agent Host 的错误路径会丢弃其收集到的部分输出，因此 SDK 侧只能收到明确错误，不能承诺保留部分答案或自动续写。
 
 旧版本没有保存完整签名、推理或原始 phase 的历史无法补造；升级后建议新开需要原生推理工具链的会话。详细官方依据及已修复记录见 [文档对照审查](CODE_REVIEW_2026-10-06.md)。
 
@@ -244,6 +248,7 @@ token 上限按正整数读取，总窗口至少需要容纳一个输入和一�
 ```bash
 npm ci
 npm run check
+npm run test:agent-host
 npm run test:integration
 npm run package:list
 ```
@@ -253,6 +258,8 @@ npm run package:list
 `npm run check` 执行 lint、源码和测试类型检查、带覆盖率的测试。CI 质量任务通过后只编译、打包一次，两个宿主任务下载并安装同一 VSIX，不再分别编译源码。发布同样检查、打包、安装测试并发布同一个文件。手动发布已经验证的包使用 `npm run publish:marketplace -- <文件路径.vsix>`，不会再次从源码构建。
 
 `npm run test:integration` 同时加载独立测试扩展，通过已注册模型的 `selectChatModels` / `sendRequest` / `countTokens` 验证宿主 RPC，覆盖三协议文本、工具 Schema、思考工作量和协议状态跨轮回放，并检查缓存控制、手动 Token 对比、取消及错误不会重发生成请求。测试只连接本地模拟 Relay，期间关闭在线元数据并在结束时恢复设置；使用隔离的宿主用户目录与扩展安装目录。可通过 `VSCODE_VERSION` 选择版本，或通过 `VSCODE_EXECUTABLE_PATH` 使用已经准备好的测试宿主而跳过下载。对已打包产物执行 `VSCODE_TEST_VSIX=/绝对路径/extension.vsix node test/integration/run.cjs`，可跳过源码编译并测试真实安装文件。2026-10-19 的已安装 VSIX 回归已通过 Linux VS Code 1.116.0 和 1.142.0；真实上游服务和 Windows/macOS 界面不在该自动化测试范围内。
+
+`npm run test:agent-host` 加载微软 VS Code 固定 commit `c4453f8ea430795f941c1b2ff6c9321135a74a02` 的真实 BYOK handler 和 Responses 转换源码，验证选项、回放、usage 和截断边界；不是手写的协议副本。首次仅从官方公开地址下载两个源码文件并校验固定 SHA-256，缓存到忽略的 `.tmp/agent-host-contract`，不上传项目内容。设置 `WEAVENET_AGENT_HOST_OFFLINE=1` 可复用缓存离线运行；缓存缺失、损坏、下载失败或契约变化均明确失败，不静默跳过。CI 与发布流程运行该检查，真实宿主集成还会把生产 provider 输出经过这些转换后再续接，覆盖三协议输出上限、Claude 签名、Responses 加密 reasoning/phase、视觉缓存清空后的历史描述，以及截断只失败一次。此测试固定已核实的宿主源码，并不等同运行真实 SDK 或验证所有未来 VS Code 版本；目前没有可用的固定 1.144 源码地址时也不会用其他版本冒充。
 
 `npm run benchmark` 编译后执行不联网的 CPU 基准，覆盖目录匹配、工具参数、文本计数与多轮 Claude 前缀校验；也可用 `node --expose-gc scripts/benchmark.cjs <out目录>` 测量已保存的构建。夹具生成和输出校验不计入耗时，预热 2 次，取 5 或 7 轮中位数。2026-10-19 在 Node 24.20.0 / Linux x64 / Ryzen 5 5600X 上，使用相同脚本比较目录与工具参数优化前后的结果：
 

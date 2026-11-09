@@ -8,7 +8,9 @@ import { convertClaudeMessages, convertClaudeTools } from './convert';
 import { claudePrefix, validateClaudePrefixes } from './claudePrefix';
 import {
   clampClaudeTemperature,
+  getConfiguredMaxOutputTokens,
   getConfiguredReasoningEffort,
+  getConfiguredSampling,
   toClaudeThinking,
 } from './helpers';
 import type { DebugLogger } from './requestDiagnostics';
@@ -48,8 +50,10 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   const manual = (routedModel.claude?.thinkingMode ?? 'manual') === 'manual';
   const forcedAllowed = routedModel.claude?.forcedToolChoice ?? (routedModel.claude?.thinkingMode === 'manual');
   if (required && !forcedAllowed) throw new vscode.LanguageModelError('This model has not declared support for Required/forced tool choice. Select Auto tool mode or a supported model.');
+  const maxOutputTokens = getConfiguredMaxOutputTokens(model.maxOutputTokens, config.maxOutputTokens, options);
+  const sampling = getConfiguredSampling(config, options);
   const thinking = !replayAvailable || (required && manual) ? undefined : toClaudeThinking(
-    getConfiguredReasoningEffort(routedModel, options), model.maxOutputTokens ?? config.maxOutputTokens,
+    getConfiguredReasoningEffort(routedModel, options), maxOutputTokens,
     routedModel.claude?.thinkingMode ?? 'manual',
   );
   const lastAssistant = [...messages.messages].reverse().find((message) => message.role === 'assistant');
@@ -67,7 +71,7 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
   });
   const request: ClaudeRequest = {
     model: routedModel.upstreamId,
-    max_tokens: model.maxOutputTokens ?? config.maxOutputTokens,
+    max_tokens: maxOutputTokens,
     messages: converted.messages,
     // Keep one system block shape in every cache mode so enabling, disabling or
     // moving cache controls does not change the signed conversation prefix hash.
@@ -76,8 +80,8 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     stream: true,
     ...(automaticCaching ? { cache_control: { type: 'ephemeral' as const,
       ...(config.claudePromptCachingTTL === '1h' ? { ttl: '1h' as const } : {}) } } : {}),
-    temperature: !thinking && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? clampClaudeTemperature(config.temperature) : undefined,
-    top_p: !thinking && config.temperature === undefined && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? config.topP : undefined,
+    temperature: !thinking && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? clampClaudeTemperature(sampling.temperature) : undefined,
+    top_p: !thinking && (routedModel.claude?.sampling ?? (routedModel.claude?.thinkingMode === 'manual')) ? sampling.top_p : undefined,
     ...(tools?.length ? {
       tools,
       // Anthropic extended thinking is incompatible with forced tool choice.
@@ -127,15 +131,21 @@ export async function provideClaudeResponse(context: ClaudeResponseContext): Pro
     }, token);
     if (token.isCancellationRequested) throw new vscode.CancellationError();
     if (!replyContent) throw new Error('Claude completed without its protocol replay payload.');
-    const complete = !isClaudeTruncated(stopReason);
-    const savedBlocks = complete ? replyContent : replyContent.filter((block) => block.type === 'text');
+    if (isClaudeTruncated(stopReason)) {
+      const partialText = replyContent.filter((block) => block.type === 'text').map((block) => block.text).join('');
+      replyText = reconcileProtocolText(output, replyText, partialText);
+      throw new Error(stopReason === 'pause_turn'
+        ? 'Claude paused the turn (pause_turn); continuation is unsupported. Partial output was retained, but the response is not complete.'
+        : `Claude response was truncated (${stopReason}). Partial output was retained, but the response is not complete.`);
+    }
+    const savedBlocks = replyContent;
     const replay: ProtocolReplayState = { version: 1, identity: context.protocolIdentity, apiType: 'messages', displayText: replyText, claude: savedBlocks, claudePrefix: signedPrefix };
     replyText = reconcileProtocolText(output, replyText, replayDisplayText(replay));
     const calls: ToolCall[] = (stopReason === 'tool_use' ? replyContent : []).flatMap((block) => block.type === 'tool_use' ? [{
       id: block.id, type: 'function' as const, function: { name: block.name, arguments: JSON.stringify(block.input) },
     }] : []);
     const parts = prepareProtocolTools(calls);
-    if (replayAvailable) reportProtocolReplay(output, { ...replay, displayText: replyText });
+    if (replayAvailable && options.includeEncryptedThinking !== false) reportProtocolReplay(output, { ...replay, displayText: replyText });
     for (const part of parts) { if (token.isCancellationRequested) throw new vscode.CancellationError(); output.report(part); }
   });
 }
