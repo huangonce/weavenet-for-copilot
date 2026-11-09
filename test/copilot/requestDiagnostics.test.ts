@@ -14,6 +14,47 @@ function diagnostics(protocol: RelayProtocol) {
   return { current, lines, summaries: () => lines.filter(line => /request (completed|failed|cancelled):/.test(line)) };
 }
 
+describe('host usage payloads', () => {
+  it('keeps absent fields unknown and preserves reported zeros', () => {
+    const { current } = diagnostics('OpenAI');
+    expect(current.getUsage()).toBeUndefined();
+    current.onOpenAIUsage({ prompt_tokens: 0 });
+    expect(current.getUsage()).toEqual({ prompt_tokens: 0 });
+    current.onOpenAIUsage({ completion_tokens: 0, completion_tokens_details: { reasoning_tokens: 0 } });
+    expect(current.getUsage()).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+      completion_tokens_details: { reasoning_tokens: 0 } });
+  });
+
+  it('normalizes Claude cache-inclusive input without inventing missing cache counts', () => {
+    const { current } = diagnostics('Claude');
+    current.onClaudeUsage({ input_tokens: 40, output_tokens: 7 });
+    expect(current.getUsage()).toEqual({ completion_tokens: 7 });
+    current.onClaudeUsage({ cache_read_input_tokens: 60, cache_creation_input_tokens: 20 });
+    expect(current.getUsage()).toEqual({ prompt_tokens: 120, completion_tokens: 7, total_tokens: 127,
+      prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 20 } });
+  });
+
+  it('returns detached snapshots and ignores invalid or late values', () => {
+    const { current } = diagnostics('Responses');
+    current.onOpenAIUsage({ prompt_tokens: 120, prompt_tokens_details: { cached_tokens: 60 },
+      completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 3 } });
+    const first = current.getUsage()!;
+    first.prompt_tokens = 999;
+    first.prompt_tokens_details!.cached_tokens = 999;
+    current.onOpenAIUsage({ prompt_tokens: -1, completion_tokens: Infinity } as never);
+    current.complete();
+    current.onOpenAIUsage({ prompt_tokens: 999 });
+    expect(current.getUsage()).toEqual({ prompt_tokens: 120, completion_tokens: 7, total_tokens: 127,
+      prompt_tokens_details: { cached_tokens: 60 }, completion_tokens_details: { reasoning_tokens: 3 } });
+  });
+
+  it('does not report overflowed totals', () => {
+    const { current } = diagnostics('OpenAI');
+    current.onOpenAIUsage({ prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: 1 });
+    expect(current.getUsage()).toEqual({ prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: 1 });
+  });
+});
+
 describe('request usage summaries', () => {
   it('merges cumulative Claude usage without adding events or losing omitted fields', () => {
     const { current, summaries } = diagnostics('Claude');

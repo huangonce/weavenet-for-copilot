@@ -46,6 +46,15 @@ function textOf(parts) {
   return parts.filter(part => part instanceof vscode.LanguageModelTextPart).map(part => part.value).join('');
 }
 
+function usageOf(parts) {
+  const usage = parts.filter(part => part instanceof vscode.LanguageModelDataPart && part.mimeType === 'usage');
+  assert.equal(usage.length, 1, 'Exactly one usage data part must survive the provider RPC.');
+  const payload = JSON.parse(Buffer.from(usage[0].data).toString('utf8'));
+  assert.equal(typeof payload.prompt_tokens, 'number', 'Agent Host must be able to decode input usage.');
+  assert.equal(typeof payload.completion_tokens, 'number', 'Agent Host must be able to decode output usage.');
+  return payload;
+}
+
 function replayOf(parts, apiType) {
   const carrier = parts.find(part => part?.metadata?.weavenetProtocolReplay?.apiType === apiType);
   assert.ok(carrier, `VS Code ${vscode.version} did not preserve ${apiType} protocol metadata in the RPC response stream.`);
@@ -110,6 +119,8 @@ async function checkRegisteredRequests({ provider, recorded, profiles }) {
 
     const chat = await send('mock-chat', '/v1/chat/completions', [vscode.LanguageModelChatMessage.User('RPC chat')]);
     toolOf(chat.parts, 'call_live', { q: 'docs 😀汉' });
+    assert.deepEqual(usageOf(chat.parts), { prompt_tokens: 120, completion_tokens: 7, total_tokens: 127,
+      prompt_tokens_details: { cached_tokens: 60 }, completion_tokens_details: { reasoning_tokens: 3 } });
     assert.equal(chat.request.body.reasoning_effort, 'low', 'Chat reasoning effort must survive the caller-to-provider RPC options.');
     assert.equal(chat.request.body.tools[0].function.name, TOOL.name);
 
@@ -123,6 +134,7 @@ async function checkRegisteredRequests({ provider, recorded, profiles }) {
     const responsesFirstUser = vscode.LanguageModelChatMessage.User('RPC responses');
     const responses = await send('mock-responses', '/v1/responses', [responsesFirstUser]);
     const responsesTool = toolOf(responses.parts, 'call_responses', { q: 'response docs' });
+    assert.deepEqual(usageOf(responses.parts), { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 });
     assert.equal(responses.request.body.reasoning?.effort, 'low', 'Responses reasoning effort must survive RPC.');
     assert.equal(responses.request.body.tools[0].strict, false, 'RPC requests must retain the explicit non-strict Responses tool schema.');
     const responsesReplay = replayOf(responses.parts, 'responses');
@@ -141,6 +153,8 @@ async function checkRegisteredRequests({ provider, recorded, profiles }) {
 
     const claudeFirstUser = vscode.LanguageModelChatMessage.User('RPC signed thinking');
     const claude = await send('mock-claude', '/v1/messages', [claudeFirstUser]);
+    assert.deepEqual(usageOf(claude.parts), { prompt_tokens: 17, completion_tokens: 3, total_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 10, cache_write_tokens: 2 } });
     assert.deepEqual(claude.request.body.thinking, { type: 'adaptive' });
     assert.equal(claude.request.body.output_config?.effort, 'low', 'Claude reasoning effort must survive RPC.');
     assert.equal(claude.request.body.tools[0].name, TOOL.name);

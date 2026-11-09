@@ -44,6 +44,18 @@ it('honors cancellation between protocol completion and final output flushing', 
   expect(vi.getTimerCount()).toBe(0);
 });
 
+it('does not retry a rejected usage report or record a successful request', async () => {
+  const current = context('chat-completions');
+  const error = new Error('usage stream closed');
+  const report = vi.fn(() => { throw error; });
+  current.progress.report = report;
+  await expect(runResponseLifecycle(current, 'OpenAI', 1, 0, async (_output, diagnostics) => {
+    diagnostics.onOpenAIUsage({ prompt_tokens: 120, completion_tokens: 7 });
+  })).rejects.toBe(error);
+  expect(report).toHaveBeenCalledOnce();
+  expect(settlements(current)).toEqual([expect.stringContaining('OpenAI request failed:')]);
+});
+
 describe.each(variants)('$apiType response lifecycle', ({ apiType, protocol, method, provide }) => {
   it.each(['completed', 'failed', 'cancelled'] as const)('includes cumulative usage once when %s', async outcome => {
     const current = context(apiType);
@@ -65,6 +77,15 @@ describe.each(variants)('$apiType response lifecycle', ({ apiType, protocol, met
     });
     if (outcome === 'completed') await provide(current);
     else await expect(provide(current)).rejects.toBeInstanceOf(Error);
+    const usageParts = current.parts.filter((part): part is vscode.LanguageModelDataPart =>
+      part instanceof vscode.LanguageModelDataPart && part.mimeType === 'usage');
+    expect(usageParts).toHaveLength(outcome === 'cancelled' ? 0 : 1);
+    if (usageParts.length) {
+      expect(JSON.parse(Buffer.from(usageParts[0].data).toString('utf8'))).toEqual({
+        prompt_tokens: 120, completion_tokens: 7, total_tokens: 127,
+        prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 20 },
+      });
+    }
     expect(settlements(current)).toHaveLength(1);
     expect(settlements(current)[0]).toContain(`${protocol} request ${outcome}:`);
     expect(settlements(current)[0]).toContain('usage={inputTotal:120,output:7,total:127,cacheRead:60,cacheWrite:20');

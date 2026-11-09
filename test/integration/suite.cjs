@@ -192,9 +192,12 @@ const MOCK_SSE = {
       function: { name: 'search', arguments: '{"q":"docs \ud83d' } }] } }] },
     { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '\ude00汉"}' } }] } }] },
     { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    { choices: [], usage: { prompt_tokens: 120, completion_tokens: 7, total_tokens: 127,
+      prompt_tokens_details: { cached_tokens: 60 }, completion_tokens_details: { reasoning_tokens: 3 } } },
   ], '\r\n', true) + 'data: [DONE]\r\n\r\n',
   '/v1/messages': sseBody([
-    { type: 'message_start', message: { id: 'msg_live', usage: { input_tokens: 5, output_tokens: 1 } } },
+    { type: 'message_start', message: { id: 'msg_live', usage: {
+      input_tokens: 5, cache_read_input_tokens: 10, cache_creation_input_tokens: 2, output_tokens: 1 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'mock thought' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'mock-signature' } },

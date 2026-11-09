@@ -25,10 +25,20 @@ export async function runResponseLifecycle(
   const { config, model, progress, token, debug } = context;
   const diagnostics = createRequestDiagnostics(debug, config, protocol, model.id, messageCount, toolCount);
   const output = new ResponsePartEmitter(progress);
+  let usageReported = false;
+  const reportUsage = (): void => {
+    if (usageReported || token.isCancellationRequested) return;
+    const usage = diagnostics.getUsage();
+    if (!usage) return;
+    usageReported = true;
+    // Agent Host's BYOK bridge consumes OpenAI-shaped JSON in a `usage` data part.
+    progress.report(new vscode.LanguageModelDataPart(Buffer.from(JSON.stringify(usage), 'utf8'), 'usage'));
+  };
   try {
     await operation(output, diagnostics);
     if (token.isCancellationRequested) throw new vscode.CancellationError();
     output.flush();
+    reportUsage();
     diagnostics.complete();
   } catch (error) {
     if (token.isCancellationRequested) {
@@ -38,6 +48,7 @@ export async function runResponseLifecycle(
     }
     try {
       output.flush();
+      reportUsage();
     } catch {
       // Preserve the request failure when reporting the remaining text also
       // fails. A progress failure from the successful path is already primary.

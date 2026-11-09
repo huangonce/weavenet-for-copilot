@@ -200,7 +200,14 @@ function snapshotMessage(raw: unknown, index: number, state: SnapshotState): Can
   const rawParts = readDenseArray(contentValue, `Message ${index + 1} content`, MAX_PARTS - state.parts);
   state.parts += rawParts.length;
   if (state.parts > MAX_PARTS) throw snapshotLimitError();
-  const content = rawParts.map((part, partIndex) => snapshotPart(part, state, `Message ${index + 1} part ${partIndex + 1}`));
+  const content = rawParts.flatMap((part, partIndex) => {
+    const subject = `Message ${index + 1} part ${partIndex + 1}`;
+    assertNotProxy(part, subject);
+    // Usage is response telemetry, not model input, even when consumers replay the whole stream.
+    if (role === 'assistant' && part instanceof vscode.LanguageModelDataPart
+      && readHostProperty(part, 'mimeType', subject) === 'usage') return [];
+    return [snapshotPart(part, state, subject)];
+  });
   return Object.freeze({
     role,
     content: Object.freeze(content),

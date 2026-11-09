@@ -35,6 +35,14 @@ function accessorRecord<T extends object>(prototype: object | null, properties: 
 }
 
 describe('canonical chat request snapshot', () => {
+  it('drops replayed assistant usage telemetry without forwarding it as input', () => {
+    const usage = new vscode.LanguageModelDataPart(Buffer.from('{"prompt_tokens":120}'), 'usage');
+    const snapshot = snapshotChatRequest([assistant(new vscode.LanguageModelTextPart('answer'), usage)]);
+    expect(snapshot.messages[0].content).toEqual([{ kind: 'text', value: 'answer' }]);
+    expect(convertMessages(snapshot, false)).toEqual([{ role: 'assistant', content: 'answer' }]);
+    expect(() => snapshotChatRequest([user(usage)])).toThrow(/non-image data attachment/);
+  });
+
   it('accepts host-revived message and options containers with non-Object prototypes', () => {
     class HostMessage {
       role = vscode.LanguageModelChatMessageRole.User;

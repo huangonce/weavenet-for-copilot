@@ -21,6 +21,7 @@ export interface RequestDiagnostics {
   onOpenAIFinishReason(reason: string): void;
   onOpenAIUsage(usage: OpenAIUsage): void;
   onClaudeUsage(usage: ClaudeUsage, responseId?: string): void;
+  getUsage(): OpenAIUsage | undefined;
   onResponse(protocol: RelayProtocol, status: number, contentType: string, metadata?: ResponseDiagnosticsMetadata): void;
   onStreamEnd(protocol: RelayProtocol, terminalEvent: '[DONE]' | 'finish_reason' | 'message_stop' | 'completed' | 'incomplete'): void;
   complete(): void;
@@ -140,6 +141,29 @@ export function createRequestDiagnostics(
       });
       if (!settled && typeof responseId === 'string' && responseId) usageResponseId = responseId;
     },
+    getUsage: () => {
+      const inputTotal = totalInputTokens(protocol, usage);
+      const total = usage.total ?? sumKnownCounts(inputTotal, usage.output);
+      if (inputTotal === undefined && usage.output === undefined) return undefined;
+      return {
+        ...(inputTotal === undefined ? {} : { prompt_tokens: inputTotal }),
+        ...(usage.output === undefined ? {} : { completion_tokens: usage.output }),
+        ...(total === undefined ? {} : { total_tokens: total }),
+        ...(usage.cacheRead === undefined && usage.cacheWrite === undefined ? {} : {
+          prompt_tokens_details: {
+            ...(usage.cacheRead === undefined ? {} : { cached_tokens: usage.cacheRead }),
+            ...(usage.cacheWrite === undefined ? {} : { cache_write_tokens: usage.cacheWrite }),
+          },
+        }),
+        ...(usage.reasoning === undefined && usage.predictionAccepted === undefined && usage.predictionRejected === undefined ? {} : {
+          completion_tokens_details: {
+            ...(usage.reasoning === undefined ? {} : { reasoning_tokens: usage.reasoning }),
+            ...(usage.predictionAccepted === undefined ? {} : { accepted_prediction_tokens: usage.predictionAccepted }),
+            ...(usage.predictionRejected === undefined ? {} : { rejected_prediction_tokens: usage.predictionRejected }),
+          },
+        }),
+      };
+    },
     onResponse: (_responseProtocol, status, contentType, metadata) => {
       responseStatus = status;
       responseContentType = contentType;
@@ -155,10 +179,14 @@ export function createRequestDiagnostics(
   };
 }
 
-function formatUsage(protocol: RelayProtocol, usage: UsageCounts): string {
-  const inputTotal = protocol === 'Claude'
+function totalInputTokens(protocol: RelayProtocol, usage: UsageCounts): number | undefined {
+  return protocol === 'Claude'
     ? sumKnownCounts(usage.inputUncached, usage.cacheRead, usage.cacheWrite)
     : usage.inputTotal;
+}
+
+function formatUsage(protocol: RelayProtocol, usage: UsageCounts): string {
+  const inputTotal = totalInputTokens(protocol, usage);
   const total = usage.total ?? sumKnownCounts(inputTotal, usage.output);
   const values: UsageCounts = { inputTotal, output: usage.output, total,
     cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,

@@ -72,6 +72,8 @@ Base URL 是 API 根路径，例如 `https://relay.example.com/v1`。远程 Rela
 
 连接也支持 `includeModels`、`excludeModels` 正则过滤与非敏感的 `requestHeaders`。认证和协议保留头由扩展管理；额外请求头不能用于保存密钥。
 
+扩展将服务端返回的 token 用量归一化为 OpenAI 格式，通过稳定的 `LanguageModelDataPart`（MIME `usage`）报告给 VS Code；支持该通道的 Agent Host 可据此更新上下文用量。Chat、Responses 和 Claude 的累计用量按请求只报告一次，不累加重复事件；Claude 输入总量包含已明确返回的缓存读取和写入，未知字段不伪造为零。回放助手历史时忽略 usage 数据，不将统计信息发送给模型。没有服务端用量或宿主不支持该通道时，不保证界面能显示已用量；本地 token 估算不冒充服务端统计。
+
 输入 token 全局硬上限为 `maxInputTokens`，默认 128000；输出默认值为 `maxOutputTokens`，默认 16384。之前的“上下文大小”档位已移除：它在不同 API 上不能一致生效。需要限制上下文时使用明确的输入、输出上限。若 Relay 或 OpenRouter 提供总窗口，向宿主声明的输入加输出不会超过该窗口。
 
 ## 模型参数能力与安全默认
